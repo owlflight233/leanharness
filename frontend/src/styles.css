@@ -479,6 +479,14 @@ textarea:focus-visible {
   background: var(--warning);
 }
 
+.status-dot.connected {
+  background: var(--accent);
+}
+
+.status-dot.error {
+  background: var(--danger);
+}
+
 .status-divider {
   width: 1px;
   height: 12px;

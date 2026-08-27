@@ -6,10 +6,69 @@ engineering assessment.
 
 ## Current status
 
-The repository is at the foundation milestone. It defines the product scope,
-architecture, clean-room boundary, and security rules. Model calls, local
-tools, the agent loop, sessions, and plugins are intentionally not implemented
-yet.
+The foundation milestone provides an installable Python package, environment
+diagnostics, a local FastAPI server, and a responsive React workspace shell.
+Model calls, local tools, the agent loop, sessions, and plugins are
+intentionally not implemented yet.
+
+## Prerequisites
+
+- Python 3.12 or newer
+- [uv](https://docs.astral.sh/uv/)
+- Node.js 22 or newer
+- pnpm 11 or newer
+- Git
+
+## Run from a source checkout
+
+PowerShell:
+
+```powershell
+git clone https://github.com/owlflight233/leanharness.git
+Set-Location leanharness
+uv sync --dev
+Set-Location frontend
+pnpm install --frozen-lockfile
+pnpm build
+Set-Location ..
+uv run leanharness doctor
+uv run leanharness serve
+```
+
+macOS or Linux:
+
+```sh
+git clone https://github.com/owlflight233/leanharness.git
+cd leanharness
+uv sync --dev
+cd frontend
+pnpm install --frozen-lockfile
+pnpm build
+cd ..
+uv run leanharness doctor
+uv run leanharness serve
+```
+
+Open `http://127.0.0.1:4318`. Use another workspace with:
+
+```sh
+uv run leanharness serve --workspace /path/to/project
+```
+
+For frontend development, keep the Python server on port 4318 and run
+`pnpm dev` from `frontend/`; Vite proxies `/api` to the local server.
+
+## Verify
+
+```sh
+uv run ruff check src tests
+uv run pytest
+uv build
+cd frontend
+pnpm typecheck
+pnpm test
+pnpm build
+```
 
 ## Direction
 

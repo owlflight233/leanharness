@@ -15,13 +15,46 @@ import {
   X,
 } from "lucide-react";
 import { useState } from "react";
+import { useEffect } from "react";
+
+import { fetchHealth, type HealthLoader, type HealthResponse } from "./api/health";
 
 type InspectorTab = "plan" | "trace";
 
-function App() {
+type HealthState =
+  | { status: "loading" }
+  | { status: "ready"; data: HealthResponse }
+  | { status: "error" };
+
+interface AppProps {
+  healthLoader?: HealthLoader;
+}
+
+function App({ healthLoader = fetchHealth }: AppProps) {
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("plan");
+  const [health, setHealth] = useState<HealthState>({ status: "loading" });
+
+  useEffect(() => {
+    const controller = new AbortController();
+    healthLoader(controller.signal)
+      .then((data) => setHealth({ status: "ready", data }))
+      .catch((error: unknown) => {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setHealth({ status: "error" });
+        }
+      });
+    return () => controller.abort();
+  }, [healthLoader]);
+
+  const workspace = health.status === "ready" ? health.data.workspace : "未选择";
+  const version = health.status === "ready" ? health.data.version : "0.1.0.dev0";
+  const connectionCopy = {
+    loading: { title: "正在连接本地服务", status: "服务连接中", dot: "pending" },
+    ready: { title: "工作区已连接", status: "服务在线", dot: "connected" },
+    error: { title: "本地服务不可用", status: "服务离线", dot: "error" },
+  }[health.status];
 
   return (
     <div className="app-shell">
@@ -100,7 +133,7 @@ function App() {
           </button>
           <div className="session-identity">
             <span className="session-title">新会话</span>
-            <span className="session-subtitle">未选择工作区</span>
+            <span className="session-subtitle">{workspace}</span>
           </div>
           <div className="mode-select" aria-label="运行模式">
             <button type="button" className="mode-button active" disabled>
@@ -124,8 +157,8 @@ function App() {
             <div className="empty-glyph">
               <FileCode2 size={22} />
             </div>
-            <h1>准备连接本地服务</h1>
-            <p>LeanHarness 0.1.0.dev0</p>
+            <h1>{connectionCopy.title}</h1>
+            <p>LeanHarness {version}</p>
           </div>
         </section>
 
@@ -205,13 +238,13 @@ function App() {
 
       <footer className="status-bar" aria-label="运行状态">
         <span className="status-item">
-          <span className="status-dot pending" />
-          服务未连接
+          <span className={`status-dot ${connectionCopy.dot}`} />
+          {connectionCopy.status}
         </span>
         <span className="status-divider" />
-        <span className="status-item">工作区：未选择</span>
+        <span className="status-item" title={workspace}>工作区：{workspace}</span>
         <span className="status-spacer" />
-        <span className="status-item">v0.1.0.dev0</span>
+        <span className="status-item">v{version}</span>
       </footer>
 
       {(leftOpen || rightOpen) && (
