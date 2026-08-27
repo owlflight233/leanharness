@@ -17,9 +17,18 @@ from leanharness.errors import (
     ModelUnavailableError,
 )
 from leanharness.models.config import ModelConfig
-from leanharness.models.contracts import ModelEvent, ModelRequest, ModelResponse, ModelUsage
+from leanharness.models.contracts import (
+    ModelEvent,
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    ModelUsage,
+    ToolCall,
+)
 
 MAX_RESPONSE_BYTES = 1_048_576
+MAX_TOOL_ARGUMENT_BYTES = 32 * 1024
+MAX_TOOL_CALLS = 4
 DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
 
 
@@ -58,12 +67,14 @@ class OpenAICompatibleClient:
             raise ModelUnavailableError("Model service is unavailable") from exc
 
         data = _decode_json(body)
-        try:
-            choice = _first_choice(data)
-            message = choice["message"]
-            content = message["content"]
-        except (KeyError, TypeError) as exc:
-            raise ModelProtocolError("Model response is missing assistant content") from exc
+        choice = _first_choice(data)
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            raise ModelProtocolError("Model response is missing an assistant message")
+        tool_calls = _parse_tool_calls(message.get("tool_calls"))
+        content = message.get("content")
+        if content is None and tool_calls:
+            content = ""
         if not isinstance(content, str):
             raise ModelProtocolError("Model response assistant content must be text")
 
@@ -74,6 +85,7 @@ class OpenAICompatibleClient:
             content=content,
             finish_reason=finish_reason,
             usage=_parse_usage(data.get("usage")),
+            tool_calls=tool_calls,
         )
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
@@ -83,6 +95,7 @@ class OpenAICompatibleClient:
         sequence = 0
         finish_reason: str | None = None
         saw_done = False
+        tool_buffers: dict[int, dict[str, str]] = {}
 
         try:
             async with self._client() as client, client.stream(
@@ -131,6 +144,7 @@ class OpenAICompatibleClient:
                                 content=content,
                             )
                             sequence += 1
+                    _accumulate_tool_call_deltas(tool_buffers, delta.get("tool_calls"))
                     candidate_reason = choice.get("finish_reason")
                     if candidate_reason is not None:
                         if not isinstance(candidate_reason, str):
@@ -145,10 +159,12 @@ class OpenAICompatibleClient:
 
         if not saw_done:
             raise ModelProtocolError("Model stream ended without a completion marker")
+        tool_calls = _finalize_tool_call_buffers(tool_buffers)
         yield ModelEvent(
             type="turn.completed",
             sequence=sequence,
             finish_reason=finish_reason,
+            tool_calls=tool_calls,
         )
 
     def _client(self) -> httpx.AsyncClient:
@@ -163,16 +179,26 @@ class OpenAICompatibleClient:
     def _build_payload(self, request: ModelRequest, *, stream: bool) -> dict[str, object]:
         payload: dict[str, object] = {
             "model": self._config.model,
-            "messages": [
-                {"role": message.role, "content": message.content}
-                for message in request.messages
-            ],
+            "messages": [_serialize_message(message) for message in request.messages],
             "stream": stream,
         }
         if request.max_tokens is not None:
             payload["max_tokens"] = request.max_tokens
         if stream:
             payload["stream_options"] = {"include_usage": True}
+        if request.tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                }
+                for tool in request.tools
+            ]
+            payload["tool_choice"] = request.tool_choice or "auto"
         return payload
 
     @staticmethod
@@ -269,3 +295,122 @@ def _optional_token_count(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ModelProtocolError("Model response token usage is invalid")
     return value
+
+
+def _serialize_message(message: ModelMessage) -> dict[str, object]:
+    payload: dict[str, object] = {"role": message.role, "content": message.content}
+    if message.role == "assistant" and message.tool_calls:
+        payload["tool_calls"] = [
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {
+                    "name": call.name,
+                    "arguments": json.dumps(
+                        call.arguments, ensure_ascii=False, separators=(",", ":")
+                    ),
+                },
+            }
+            for call in message.tool_calls
+        ]
+    if message.role == "tool":
+        if not message.tool_call_id:
+            raise ModelProtocolError("Tool result message is missing a tool call ID")
+        payload["tool_call_id"] = message.tool_call_id
+    return payload
+
+
+def _parse_tool_calls(value: object) -> tuple[ToolCall, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) > MAX_TOOL_CALLS:
+        raise ModelProtocolError("Model response has an invalid number of tool calls")
+    calls: list[ToolCall] = []
+    seen_ids: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or item.get("type", "function") != "function":
+            raise ModelProtocolError("Model response tool call is invalid")
+        call_id = item.get("id")
+        function = item.get("function")
+        if not isinstance(call_id, str) or not call_id or call_id in seen_ids:
+            raise ModelProtocolError("Model response tool call has an invalid ID")
+        if not isinstance(function, dict):
+            raise ModelProtocolError("Model response tool call is missing a function")
+        name = function.get("name")
+        raw_arguments = function.get("arguments")
+        calls.append(_build_tool_call(call_id, name, raw_arguments))
+        seen_ids.add(call_id)
+    return tuple(calls)
+
+
+def _accumulate_tool_call_deltas(
+    buffers: dict[int, dict[str, str]], value: object
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        raise ModelProtocolError("Model stream tool calls are invalid")
+    for item in value:
+        if not isinstance(item, dict):
+            raise ModelProtocolError("Model stream tool call is invalid")
+        index = item.get("index")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise ModelProtocolError("Model stream tool call has an invalid index")
+        if index >= MAX_TOOL_CALLS:
+            raise ModelProtocolError("Model response has too many tool calls")
+        buffer = buffers.setdefault(index, {"id": "", "name": "", "arguments": ""})
+        call_id = item.get("id")
+        if call_id is not None:
+            if not isinstance(call_id, str):
+                raise ModelProtocolError("Model stream tool call has an invalid ID")
+            buffer["id"] += call_id
+        call_type = item.get("type")
+        if call_type is not None and call_type != "function":
+            raise ModelProtocolError("Model stream tool call type is unsupported")
+        function = item.get("function")
+        if function is not None:
+            if not isinstance(function, dict):
+                raise ModelProtocolError("Model stream tool function is invalid")
+            for field_name in ("name", "arguments"):
+                fragment = function.get(field_name)
+                if fragment is not None:
+                    if not isinstance(fragment, str):
+                        raise ModelProtocolError(
+                            f"Model stream tool {field_name} fragment is invalid"
+                        )
+                    buffer[field_name] += fragment
+        if len(buffer["arguments"].encode("utf-8")) > MAX_TOOL_ARGUMENT_BYTES:
+            raise ModelProtocolError("Model tool arguments exceeded the size limit")
+
+
+def _finalize_tool_call_buffers(buffers: dict[int, dict[str, str]]) -> tuple[ToolCall, ...]:
+    if not buffers:
+        return ()
+    expected = list(range(len(buffers)))
+    if sorted(buffers) != expected:
+        raise ModelProtocolError("Model stream tool call indexes are not contiguous")
+    calls = tuple(
+        _build_tool_call(buffer["id"], buffer["name"], buffer["arguments"])
+        for _, buffer in sorted(buffers.items())
+    )
+    if len({call.id for call in calls}) != len(calls):
+        raise ModelProtocolError("Model response tool call IDs must be unique")
+    return calls
+
+
+def _build_tool_call(call_id: object, name: object, raw_arguments: object) -> ToolCall:
+    if not isinstance(call_id, str) or not call_id:
+        raise ModelProtocolError("Model response tool call is missing an ID")
+    if not isinstance(name, str) or not name:
+        raise ModelProtocolError("Model response tool call is missing a name")
+    if not isinstance(raw_arguments, str):
+        raise ModelProtocolError("Model response tool arguments must be JSON text")
+    if len(raw_arguments.encode("utf-8")) > MAX_TOOL_ARGUMENT_BYTES:
+        raise ModelProtocolError("Model tool arguments exceeded the size limit")
+    try:
+        arguments = json.loads(raw_arguments)
+    except json.JSONDecodeError as exc:
+        raise ModelProtocolError("Model tool arguments are not valid JSON") from exc
+    if not isinstance(arguments, dict):
+        raise ModelProtocolError("Model tool arguments must be a JSON object")
+    return ToolCall(id=call_id, name=name, arguments=arguments)

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
-type MessageRole = Literal["system", "user", "assistant"]
+type MessageRole = Literal["system", "user", "assistant", "tool"]
 type EventType = Literal[
     "turn.started",
     "content.delta",
@@ -16,9 +16,32 @@ type EventType = Literal[
 
 
 @dataclass(frozen=True, slots=True)
+class ToolDefinition:
+    """Provider-independent description of a callable local capability."""
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """A validated model request to invoke one named tool."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+    def to_dict(self) -> dict[str, object]:
+        return {"id": self.id, "name": self.name, "arguments": self.arguments}
+
+
+@dataclass(frozen=True, slots=True)
 class ModelMessage:
     role: MessageRole
     content: str
+    tool_calls: tuple[ToolCall, ...] = ()
+    tool_call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +49,8 @@ class ModelRequest:
     messages: tuple[ModelMessage, ...]
     max_tokens: int | None = None
     stream: bool = False
+    tools: tuple[ToolDefinition, ...] = ()
+    tool_choice: Literal["auto", "none"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +72,7 @@ class ModelResponse:
     content: str
     finish_reason: str | None = None
     usage: ModelUsage | None = None
+    tool_calls: tuple[ToolCall, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +84,7 @@ class ModelEvent:
     finish_reason: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+    tool_calls: tuple[ToolCall, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {"type": self.type, "sequence": self.sequence}
@@ -72,4 +99,6 @@ class ModelEvent:
                 "code": self.error_code,
                 "message": self.error_message or "Model request failed",
             }
+        if self.tool_calls:
+            payload["tool_calls"] = [call.to_dict() for call in self.tool_calls]
         return payload

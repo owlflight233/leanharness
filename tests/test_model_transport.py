@@ -12,7 +12,14 @@ from leanharness.errors import (
     ModelTimeoutError,
     ModelUnavailableError,
 )
-from leanharness.models import ModelConfig, ModelMessage, ModelRequest, OpenAICompatibleClient
+from leanharness.models import (
+    ModelConfig,
+    ModelMessage,
+    ModelRequest,
+    OpenAICompatibleClient,
+    ToolCall,
+    ToolDefinition,
+)
 
 SECRET = "transport-test-secret"
 
@@ -239,4 +246,165 @@ def test_stream_rejects_a_single_oversized_event() -> None:
         return [event async for event in client.stream(request)]
 
     with pytest.raises(ModelProtocolError, match="size limit"):
+        run(collect())
+
+
+def test_complete_serializes_tools_and_linked_tool_results() -> None:
+    captured: dict[str, object] = {}
+    call = ToolCall(id="call-1", name="workspace_list", arguments={"path": "."})
+    definition = ToolDefinition(
+        name="workspace_list",
+        description="List workspace entries.",
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}
+                ]
+            },
+        )
+
+    client = OpenAICompatibleClient(config(), transport=httpx.MockTransport(handler))
+    response = run(
+        client.complete(
+            ModelRequest(
+                messages=(
+                    ModelMessage(
+                        role="assistant",
+                        content="I will inspect files.",
+                        tool_calls=(call,),
+                    ),
+                    ModelMessage(role="tool", content='{"ok":true}', tool_call_id="call-1"),
+                ),
+                tools=(definition,),
+            )
+        )
+    )
+
+    assert response.content == "done"
+    assert captured["tool_choice"] == "auto"
+    assert captured["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace_list",
+                "description": "List workspace entries.",
+                "parameters": definition.parameters,
+            },
+        }
+    ]
+    assert captured["messages"] == [
+        {
+            "role": "assistant",
+            "content": "I will inspect files.",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "workspace_list", "arguments": '{"path":"."}'},
+                }
+            ],
+        },
+        {"role": "tool", "content": '{"ok":true}', "tool_call_id": "call-1"},
+    ]
+
+
+def test_stream_assembles_fragmented_tool_calls() -> None:
+    stream = ChunkedStream(
+        [
+            b'data: {"choices":[{"delta":{"content":"I will inspect. ","tool_calls":[',
+            b'{"index":0,"id":"call-","type":"function","function":{"name":"workspace_",',
+            b'"arguments":"{\\"path\\":\\""}}]},"finish_reason":null}]}\n',
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"1",',
+            b'"function":{"name":"read","arguments":"README.md\\"}"}}]},',
+            b'"finish_reason":"tool_calls"}]}\n',
+            b"data: [DONE]\n",
+        ]
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    client = OpenAICompatibleClient(config(), transport=httpx.MockTransport(handler))
+
+    async def collect():
+        request = ModelRequest(
+            messages=(ModelMessage(role="user", content="inspect"),),
+            tools=(
+                ToolDefinition(
+                    name="workspace_read",
+                    description="Read a file.",
+                    parameters={"type": "object"},
+                ),
+            ),
+            stream=True,
+        )
+        return [event async for event in client.stream(request)]
+
+    events = run(collect())
+
+    assert [event.type for event in events] == [
+        "turn.started",
+        "content.delta",
+        "turn.completed",
+    ]
+    assert events[-1].finish_reason == "tool_calls"
+    assert events[-1].tool_calls == (
+        ToolCall(id="call-1", name="workspace_read", arguments={"path": "README.md"}),
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_calls",
+    [
+        [
+            {
+                "index": 0,
+                "type": "function",
+                "function": {"name": "workspace_list", "arguments": "{}"},
+            }
+        ],
+        [{"index": 0, "id": "call-1", "type": "function", "function": {"arguments": "{}"}}],
+        [
+            {
+                "index": 0,
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "workspace_list", "arguments": "[]"},
+            }
+        ],
+    ],
+)
+def test_stream_rejects_incomplete_or_non_object_tool_calls(tool_calls: object) -> None:
+    payload = (
+        "data: "
+        + json.dumps(
+            {"choices": [{"delta": {"tool_calls": tool_calls}, "finish_reason": "tool_calls"}]}
+        )
+        + "\ndata: [DONE]\n"
+    ).encode()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload)
+
+    client = OpenAICompatibleClient(config(), transport=httpx.MockTransport(handler))
+
+    async def collect():
+        return [
+            event
+            async for event in client.stream(
+                ModelRequest(messages=(ModelMessage(role="user", content="x"),), stream=True)
+            )
+        ]
+
+    with pytest.raises(ModelProtocolError):
         run(collect())
