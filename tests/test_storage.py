@@ -52,10 +52,12 @@ def test_trace_redaction_never_persists_secret_or_tool_content(tmp_path: Path) -
         "content": "private source text",
         "api_key": "secret-key",
         "metadata": {"path": "README.md"},
+        "nested": {"authorization": "Bearer secret-key"},
     }
     safe = redact_payload(payload)
     assert "secret-key" not in json.dumps(safe)
     assert safe["content"] == "[tool result redacted]"
+    assert "authorization" not in safe["nested"]
 
     store = LocalStore(tmp_path / "data")
     project = store.ensure_project(tmp_path)
@@ -76,3 +78,17 @@ def test_invalid_permission_is_rejected(tmp_path: Path) -> None:
 def test_data_dir_environment_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("LEANHARNESS_DATA_DIR", str(tmp_path / "override"))
     assert default_data_dir() == (tmp_path / "override").resolve()
+
+
+def test_default_title_is_replaced_only_by_first_task(tmp_path: Path) -> None:
+    from leanharness.application.session_gateway import apply_first_task_title
+
+    store = LocalStore(tmp_path / "data")
+    project = store.ensure_project(tmp_path)
+    session = store.create_session(project)
+    titled = apply_first_task_title(store, session, "  分析   这个仓库的结构 " + "x" * 80)
+    assert titled.title == ("分析 这个仓库的结构 " + "x" * 80)[:40]
+    assert apply_first_task_title(store, titled, "second task").title == titled.title
+
+    explicit = store.create_session(project, title="我的会话")
+    assert apply_first_task_title(store, explicit, "task").title == "我的会话"

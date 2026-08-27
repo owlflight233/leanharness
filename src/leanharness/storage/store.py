@@ -199,7 +199,7 @@ class LocalStore:
         return self.get_session(session_id)
 
     def delete_session(self, session_id: str) -> None:
-        self.get_session(session_id)
+        session = self.get_session(session_id)
         run_ids = [
             row["id"]
             for row in self.connection.execute(
@@ -208,8 +208,8 @@ class LocalStore:
         ]
         with self.connection:
             self.connection.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        for run_id in run_ids:
-            path = self.trace_path(session_id, run_id)
+        paths = [self._trace_path(session.project_id, session_id, run_id) for run_id in run_ids]
+        for path in paths:
             try:
                 if path.exists():
                     path.unlink()
@@ -338,17 +338,20 @@ class LocalStore:
                     utc_now(),
                 ),
             )
-        path = self.trace_path(session_id, run_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {"sequence": sequence, "type": event_type, **safe},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
+        try:
+            path = self.trace_path(session_id, run_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {"sequence": sequence, "type": event_type, **safe},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
                 )
-                + "\n"
-            )
+        except OSError as exc:
+            raise StorageError("Run trace could not be written") from exc
 
     def list_runs(self, session_id: str) -> list[RunRecord]:
         self.get_session(session_id)
@@ -383,7 +386,11 @@ class LocalStore:
         return [json.loads(row["payload_json"]) for row in rows]
 
     def trace_path(self, session_id: str, run_id: str) -> Path:
-        return self.trace_dir / session_id / f"{run_id}.jsonl"
+        session = self.get_session(session_id)
+        return self._trace_path(session.project_id, session_id, run_id)
+
+    def _trace_path(self, project_id: str, session_id: str, run_id: str) -> Path:
+        return self.trace_dir / project_id / session_id / f"{run_id}.jsonl"
 
     def _migrate(self) -> None:
         with self.connection:
@@ -438,15 +445,26 @@ def _validate_permission(value: str) -> None:
 
 def redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Keep public event metadata while removing secrets and raw tool content."""
+    return _redact_mapping(payload, event_type=str(payload.get("type", "")))
+
+
+def _redact_mapping(value: dict[str, Any], *, event_type: str) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    for key, value in payload.items():
-        lowered = key.casefold()
-        if lowered in {"api_key", "authorization", "headers", "environment", "env"}:
+    forbidden = {"api_key", "authorization", "headers", "environment", "env", "cookie"}
+    for key, item in value.items():
+        if key.casefold() in forbidden:
             continue
-        if key in {"content", "answer"} and isinstance(value, str) and len(value) > 64_000:
-            result[key] = value[:64_000] + "...[truncated]"
-        elif key == "content" and payload.get("type", "").startswith("tool"):
+        if key == "content" and event_type.startswith("tool"):
             result[key] = "[tool result redacted]"
+        elif isinstance(item, dict):
+            result[key] = _redact_mapping(item, event_type=event_type)
+        elif isinstance(item, list):
+            result[key] = [
+                _redact_mapping(entry, event_type=event_type) if isinstance(entry, dict) else entry
+                for entry in item[:100]
+            ]
+        elif key in {"content", "answer", "summary"} and isinstance(item, str):
+            result[key] = item[:64_000] + ("...[truncated]" if len(item) > 64_000 else "")
         else:
-            result[key] = value
+            result[key] = item
     return result

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from leanharness.errors import ConfigurationError, WorkspaceError
+from leanharness.storage import default_data_dir
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 4318
@@ -20,6 +21,7 @@ class AppConfig:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     log_level: str = DEFAULT_LOG_LEVEL
+    data_dir: Path = field(default_factory=default_data_dir)
 
 
 def resolve_workspace(value: str | Path | None = None, *, cwd: Path | None = None) -> Path:
@@ -42,6 +44,7 @@ def build_config(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
     log_level: str = DEFAULT_LOG_LEVEL,
+    data_dir: str | Path | None = None,
 ) -> AppConfig:
     """Validate interface inputs and construct immutable application config."""
 
@@ -60,4 +63,7 @@ def build_config(
         host=normalized_host,
         port=port,
         log_level=normalized_level,
+        data_dir=(
+            Path(data_dir).expanduser().resolve() if data_dir is not None else default_data_dir()
+        ),
     )
