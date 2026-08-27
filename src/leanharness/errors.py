@@ -77,3 +77,21 @@ class RunInputError(LeanHarnessError):
     """Raised when an inspection-run request violates the public contract."""
 
     code = "INVALID_RUN_INPUT"
+
+
+class StorageError(LeanHarnessError):
+    """Raised when local session storage cannot be opened or updated."""
+
+    code = "STORAGE_ERROR"
+
+
+class SessionNotFoundError(StorageError):
+    """Raised when a requested local session does not exist."""
+
+    code = "SESSION_NOT_FOUND"
+
+
+class InvalidPermissionError(StorageError):
+    """Raised when a permission mode is unknown or malformed."""
+
+    code = "INVALID_PERMISSION_MODE"
