@@ -6,10 +6,11 @@ engineering assessment.
 
 ## Current status
 
-The foundation milestone provides an installable Python package, environment
-diagnostics, a local FastAPI server, and a responsive React workspace shell.
-Model calls, local tools, the agent loop, sessions, and plugins are
-intentionally not implemented yet.
+The current milestone provides an installable Python package, environment
+diagnostics, a provider-independent model gateway, and ephemeral single-turn
+streaming chat through both the CLI and responsive local web interface. Local
+tools, the agent loop, persistent sessions, and plugins are intentionally not
+implemented yet.
 
 ## Prerequisites
 
@@ -54,6 +55,39 @@ Open `http://127.0.0.1:4318`. Use another workspace with:
 ```sh
 uv run leanharness serve --workspace /path/to/project
 ```
+
+## Configure a model
+
+LeanHarness currently targets the OpenAI-compatible chat completions protocol.
+For DeepSeek, set process environment variables before running the CLI or
+server. Never place a real key in `.env.example` or another tracked file.
+
+PowerShell:
+
+```powershell
+$env:LEANHARNESS_MODEL_BASE_URL = "https://api.deepseek.com"
+$env:LEANHARNESS_MODEL_NAME = "deepseek-chat"
+$env:LEANHARNESS_MODEL_API_KEY = "your-api-key"
+uv run leanharness model check
+uv run leanharness chat "Reply with one short sentence."
+uv run leanharness serve
+```
+
+macOS or Linux:
+
+```sh
+export LEANHARNESS_MODEL_BASE_URL="https://api.deepseek.com"
+export LEANHARNESS_MODEL_NAME="deepseek-chat"
+export LEANHARNESS_MODEL_API_KEY="your-api-key"
+uv run leanharness model check
+uv run leanharness chat "Reply with one short sentence."
+uv run leanharness serve
+```
+
+`LEANHARNESS_MODEL_API_KEY` may be omitted for a local endpoint that does not
+require authentication. Plain HTTP is accepted only for `localhost`,
+`127.0.0.1`, or `::1`. Chat is currently stateless and does not read or modify
+the selected workspace.
 
 For frontend development, keep the Python server on port 4318 and run
 `pnpm dev` from `frontend/`; Vite proxies `/api` to the local server.

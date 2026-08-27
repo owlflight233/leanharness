@@ -3,22 +3,34 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import App from "./App";
+import type { ChatStreamer } from "./api/chat";
 import type { HealthLoader, HealthResponse } from "./api/health";
+import type { ModelStatusLoader } from "./api/model";
 
 const healthy: HealthResponse = {
   status: "ok",
   name: "LeanHarness",
   version: "0.1.0.dev0",
   workspace: "C:\\projects\\demo",
-  capabilities: [],
+  capabilities: ["model.chat", "model.streaming"],
 };
 
 const successfulHealth: HealthLoader = async () => healthy;
+const configuredModel: ModelStatusLoader = async () => ({
+  configured: true,
+  protocol: "openai-compatible",
+  model: "example-model",
+});
+const unconfiguredModel: ModelStatusLoader = async () => ({
+  configured: false,
+  protocol: "openai-compatible",
+  model: null,
+});
 
 describe("application shell", () => {
   it("renders a loading state without claiming agent capabilities", () => {
     const pendingHealth: HealthLoader = () => new Promise(() => undefined);
-    render(<App healthLoader={pendingHealth} />);
+    render(<App healthLoader={pendingHealth} modelStatusLoader={unconfiguredModel} />);
 
     expect(screen.getByText("LeanHarness")).toBeInTheDocument();
     expect(screen.getByText("正在连接本地服务")).toBeInTheDocument();
@@ -27,7 +39,7 @@ describe("application shell", () => {
   });
 
   it("renders backend health and workspace", async () => {
-    render(<App healthLoader={successfulHealth} />);
+    render(<App healthLoader={successfulHealth} modelStatusLoader={configuredModel} />);
 
     expect(await screen.findByText("工作区已连接")).toBeInTheDocument();
     expect(screen.getByText("服务在线")).toBeInTheDocument();
@@ -38,7 +50,7 @@ describe("application shell", () => {
     const failedHealth: HealthLoader = async () => {
       throw new Error("offline");
     };
-    render(<App healthLoader={failedHealth} />);
+    render(<App healthLoader={failedHealth} modelStatusLoader={unconfiguredModel} />);
 
     await waitFor(() => expect(screen.getByText("本地服务不可用")).toBeInTheDocument());
     expect(screen.getByText("服务离线")).toBeInTheDocument();
@@ -46,7 +58,7 @@ describe("application shell", () => {
 
   it("switches inspector projections", async () => {
     const user = userEvent.setup();
-    render(<App healthLoader={successfulHealth} />);
+    render(<App healthLoader={successfulHealth} modelStatusLoader={configuredModel} />);
 
     await user.click(screen.getByRole("tab", { name: "轨迹" }));
 
@@ -56,12 +68,67 @@ describe("application shell", () => {
 
   it("opens and closes the project drawer", async () => {
     const user = userEvent.setup();
-    render(<App healthLoader={successfulHealth} />);
+    render(<App healthLoader={successfulHealth} modelStatusLoader={configuredModel} />);
 
     await user.click(screen.getByRole("button", { name: "打开项目导航" }));
     expect(screen.getByLabelText("项目导航")).toHaveClass("is-open");
 
     await user.click(screen.getByRole("button", { name: "关闭项目导航" }));
     expect(screen.getByLabelText("项目导航")).not.toHaveClass("is-open");
+  });
+
+  it("keeps chat disabled when the model is not configured", async () => {
+    render(<App healthLoader={successfulHealth} modelStatusLoader={unconfiguredModel} />);
+
+    expect(await screen.findByText("请在环境变量中配置模型")).toBeInTheDocument();
+    expect(screen.getByLabelText("任务输入")).toBeDisabled();
+    expect(screen.getByText("模型未配置")).toBeInTheDocument();
+  });
+
+  it("renders streamed content and trace events", async () => {
+    const user = userEvent.setup();
+    const successfulChat: ChatStreamer = async (_message, onEvent) => {
+      onEvent({ type: "turn.started", sequence: 0 });
+      onEvent({ type: "content.delta", sequence: 1, content: "流式回复" });
+      onEvent({ type: "turn.completed", sequence: 2, finish_reason: "stop" });
+    };
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        chatStreamer={successfulChat}
+      />,
+    );
+
+    const input = await screen.findByLabelText("任务输入");
+    await user.type(input, "你好");
+    await user.click(screen.getByRole("button", { name: "发送任务" }));
+
+    expect(await screen.findByText("流式回复")).toBeInTheDocument();
+    expect(screen.getByText("turn.started")).toBeInTheDocument();
+    expect(screen.getByText("turn.completed")).toBeInTheDocument();
+  });
+
+  it("cancels the active stream", async () => {
+    const user = userEvent.setup();
+    const blockingChat: ChatStreamer = (_message, onEvent, signal) =>
+      new Promise((_resolve, reject) => {
+        onEvent({ type: "turn.started", sequence: 0 });
+        signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+      });
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        chatStreamer={blockingChat}
+      />,
+    );
+
+    const input = await screen.findByLabelText("任务输入");
+    await user.type(input, "停止测试");
+    await user.click(screen.getByRole("button", { name: "发送任务" }));
+    await user.click(await screen.findByRole("button", { name: "停止生成" }));
+
+    expect(await screen.findByText("已停止生成")).toBeInTheDocument();
   });
 });

@@ -167,6 +167,17 @@ textarea:focus-visible {
   font-size: 12px;
 }
 
+.empty-row svg {
+  flex: 0 0 auto;
+}
+
+.empty-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .empty-row.muted {
   color: var(--muted);
 }
@@ -262,6 +273,63 @@ textarea:focus-visible {
   overflow-y: auto;
 }
 
+.message-list {
+  width: min(780px, calc(100% - 36px));
+  margin: 0 auto;
+  padding: 24px 0 32px;
+}
+
+.message {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  padding: 14px 4px;
+  border-bottom: 1px solid var(--border);
+  gap: 10px;
+}
+
+.message-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--accent-dark);
+  background: var(--surface-subtle);
+}
+
+.message-user .message-icon {
+  color: #52605d;
+  background: #eef1f0;
+}
+
+.message-body {
+  min-width: 0;
+}
+
+.message-body strong {
+  display: block;
+  margin: 4px 0 7px;
+  font-size: 12px;
+}
+
+.message-body p {
+  overflow-wrap: anywhere;
+  margin: 0;
+  color: #303937;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.message.is-error .message-body p {
+  color: var(--danger);
+}
+
+.message.is-cancelled .message-body p {
+  color: var(--muted);
+}
+
 .conversation-empty {
   display: flex;
   width: min(360px, calc(100% - 40px));
@@ -351,6 +419,10 @@ textarea:focus-visible {
   background: #aeb8b6;
 }
 
+.stop-button {
+  background: #4f5957;
+}
+
 .inspector {
   grid-column: 3;
   grid-row: 1;
@@ -422,6 +494,31 @@ textarea:focus-visible {
 
 .panel-empty span {
   font-size: 11px;
+}
+
+.trace-list {
+  margin: 0;
+  padding: 8px 12px;
+  list-style: none;
+}
+
+.trace-list li {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  min-height: 32px;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.trace-list strong {
+  overflow: hidden;
+  color: #495350;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .inspector-summary {
@@ -614,6 +711,11 @@ textarea:focus-visible {
 
   .conversation-empty {
     width: calc(100% - 24px);
+  }
+
+  .message-list {
+    width: calc(100% - 20px);
+    padding-top: 12px;
   }
 }
 

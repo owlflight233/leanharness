@@ -210,10 +210,14 @@ async def _iter_sse_data(response: httpx.Response) -> AsyncIterator[str]:
                 break
             raw_line = bytes(buffer[:newline]).rstrip(b"\r")
             del buffer[: newline + 1]
+            if len(raw_line) > MAX_RESPONSE_BYTES:
+                raise ModelProtocolError("Model stream event exceeded the size limit")
             data = _parse_sse_line(raw_line)
             if data is not None:
                 yield data
     if buffer:
+        if len(buffer) > MAX_RESPONSE_BYTES:
+            raise ModelProtocolError("Model stream event exceeded the size limit")
         data = _parse_sse_line(bytes(buffer).rstrip(b"\r"))
         if data is not None:
             yield data

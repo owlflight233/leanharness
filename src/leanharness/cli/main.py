@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from collections.abc import Sequence
 
 from leanharness import __version__
+from leanharness.application.model_gateway import check_model, stream_chat
 from leanharness.cli.doctor import collect_diagnostics
 from leanharness.config import (
     DEFAULT_HOST,
@@ -15,14 +17,15 @@ from leanharness.config import (
     build_config,
     resolve_workspace,
 )
-from leanharness.errors import LeanHarnessError
+from leanharness.errors import LeanHarnessError, ModelError, ModelNotConfiguredError
 from leanharness.logging import configure_logging
+from leanharness.models import ModelConfig, load_model_config
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="leanharness",
-        description="Local-first coding agent runtime (foundation milestone).",
+        description="Local-first coding agent runtime.",
     )
     parser.add_argument("--version", action="version", version=f"LeanHarness {__version__}")
     subparsers = parser.add_subparsers(dest="command")
@@ -58,6 +61,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
         help="Structured log threshold.",
     )
+
+    model_parser = subparsers.add_parser("model", help="Inspect the configured model gateway.")
+    model_subparsers = model_parser.add_subparsers(dest="model_command", required=True)
+    model_subparsers.add_parser("check", help="Send a small model connectivity check.")
+
+    chat_parser = subparsers.add_parser("chat", help="Run one ephemeral streaming model turn.")
+    chat_parser.add_argument("message", help="User message (1 to 32000 characters).")
     return parser
 
 
@@ -82,6 +92,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 log_level=args.log_level,
             )
             return _serve(config)
+
+        if args.command == "model" and args.model_command == "check":
+            return asyncio.run(_check_model())
+
+        if args.command == "chat":
+            model_config = load_model_config()
+            return asyncio.run(_chat(args.message, model_config))
     except LeanHarnessError as exc:
         print(f"error [{exc.code}]: {exc.message}", file=sys.stderr)
         return 2
@@ -106,3 +123,38 @@ def _serve(config: AppConfig) -> int:
         log_config=None,
     )
     return 0
+
+
+async def _check_model() -> int:
+    try:
+        result = await check_model()
+    except ModelNotConfiguredError:
+        raise
+    except ModelError as exc:
+        print(f"error [{exc.code}]: {exc.message}", file=sys.stderr)
+        return 3
+    print(f"Model check passed: {result.model} ({result.latency_ms} ms)")
+    return 0
+
+
+async def _chat(message: str, config: ModelConfig) -> int:
+    wrote_content = False
+    failed = False
+    async for event in stream_chat(message, config=config):
+        if event.type == "content.delta" and event.content:
+            print(event.content, end="", flush=True)
+            wrote_content = True
+        elif event.type == "usage.reported" and event.usage:
+            total = event.usage.total_tokens
+            if total is not None:
+                print(f"usage: {total} tokens", file=sys.stderr)
+        elif event.type == "turn.failed":
+            if wrote_content:
+                print()
+            error_code = event.error_code or "MODEL_ERROR"
+            error_message = event.error_message or "Model request failed"
+            print(f"error [{error_code}]: {error_message}", file=sys.stderr)
+            failed = True
+    if wrote_content and not failed:
+        print()
+    return 3 if failed else 0

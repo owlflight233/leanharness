@@ -224,3 +224,19 @@ def test_stream_closes_upstream_when_consumer_cancels() -> None:
 
     run(consume_one_delta())
     assert stream.closed is True
+
+
+def test_stream_rejects_a_single_oversized_event() -> None:
+    payload = b"data: " + (b"x" * 1_048_577) + b"\n"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload)
+
+    client = OpenAICompatibleClient(config(), transport=httpx.MockTransport(handler))
+
+    async def collect():
+        request = ModelRequest(messages=(ModelMessage(role="user", content="x"),), stream=True)
+        return [event async for event in client.stream(request)]
+
+    with pytest.raises(ModelProtocolError, match="size limit"):
+        run(collect())
