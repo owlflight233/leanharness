@@ -47,17 +47,23 @@ owns transitions and is the only layer allowed to request model or tool work.
 
 ## Runtime flow target
 
-The future runtime will use explicit states:
+The runtime uses explicit states:
 
 ```text
 CREATED -> PREPARING -> REQUESTING_MODEL -> INTERPRETING
-        -> WAITING_APPROVAL -> EXECUTING_TOOL -> PREPARING
-        -> COMPLETED | FAILED | CANCELLED
+        -> EXECUTING_TOOL -> PREPARING
+        -> COMPLETED | EXHAUSTED | FAILED | CANCELLED
 ```
 
 Every transition will be deterministic from the current run state and a typed
 input. Model calls and tools are effects requested by transitions rather than
 hidden side effects inside state objects.
+
+The current implementation enables only the inspect permission mode and three
+workspace-scoped tools: `workspace_list`, `workspace_read`, and
+`workspace_search`. Tool failures are returned to the model as structured
+results; repeated calls, context pressure, and step budgets are runtime
+decisions rather than model instructions.
 
 ## Data strategy target
 

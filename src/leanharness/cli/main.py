@@ -6,8 +6,10 @@ import argparse
 import asyncio
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from leanharness import __version__
+from leanharness.application.agent_gateway import create_inspection_run
 from leanharness.application.model_gateway import check_model, stream_chat
 from leanharness.cli.doctor import collect_diagnostics
 from leanharness.config import (
@@ -20,6 +22,7 @@ from leanharness.config import (
 from leanharness.errors import LeanHarnessError, ModelError, ModelNotConfiguredError
 from leanharness.logging import configure_logging
 from leanharness.models import ModelConfig, load_model_config
+from leanharness.runtime.loop import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, MIN_MAX_STEPS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,10 +71,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat_parser = subparsers.add_parser("chat", help="Run one ephemeral streaming model turn.")
     chat_parser.add_argument("message", help="User message (1 to 32000 characters).")
+    run_parser = subparsers.add_parser(
+        "run", help="Inspect a workspace with the read-only agent loop."
+    )
+    run_parser.add_argument("task", help="Inspection task (1 to 32000 characters).")
+    run_parser.add_argument(
+        "--workspace",
+        help="Workspace directory; defaults to the current directory.",
+    )
+    run_parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=DEFAULT_MAX_STEPS,
+        choices=range(MIN_MAX_STEPS, MAX_MAX_STEPS + 1),
+        help=(
+            f"Model request budget ({MIN_MAX_STEPS}-{MAX_MAX_STEPS}, "
+            f"default: {DEFAULT_MAX_STEPS})."
+        ),
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    _configure_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -99,12 +121,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "chat":
             model_config = load_model_config()
             return asyncio.run(_chat(args.message, model_config))
+        if args.command == "run":
+            workspace = resolve_workspace(args.workspace)
+            return asyncio.run(_inspect(args.task, workspace, args.max_steps))
     except LeanHarnessError as exc:
         print(f"error [{exc.code}]: {exc.message}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("Run cancelled", file=sys.stderr)
+        return 130
 
     parser.print_help()
     return 0
+
+
+def _configure_stdio() -> None:
+    """Keep multilingual CLI progress readable on Windows code-page terminals."""
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            # Test capture streams and already-closed streams may reject this.
+            continue
 
 
 def _serve(config: AppConfig) -> int:
@@ -158,3 +200,34 @@ async def _chat(message: str, config: ModelConfig) -> int:
     if wrote_content and not failed:
         print()
     return 3 if failed else 0
+
+
+async def _inspect(task: str, workspace: Path, max_steps: int) -> int:
+    runtime = create_inspection_run(task, workspace, max_steps=max_steps)
+    exit_code = 0
+    async for event in runtime.run(task):
+        if event.type == "assistant.progress":
+            print(f"[step {event.step}] {event.summary}", file=sys.stderr)
+        elif event.type == "tool.requested":
+            print(f"[tool] {event.tool}", file=sys.stderr)
+        elif event.type == "tool.completed":
+            status = "ok" if event.metadata and event.metadata.get("ok") else "error"
+            print(f"[tool {status}] {event.tool}", file=sys.stderr)
+        elif event.type == "usage.reported" and event.usage:
+            if (total := event.usage.get("total_tokens")) is not None:
+                print(f"[usage] {total} tokens", file=sys.stderr)
+        elif event.type == "run.completed" and event.answer:
+            print(event.answer)
+        elif event.type == "run.incomplete":
+            if event.answer:
+                print(event.answer)
+            print(f"[incomplete] {event.summary}", file=sys.stderr)
+            exit_code = 4
+        elif event.type == "run.failed":
+            code = event.error_code or "RUN_FAILED"
+            print(f"error [{code}]: {event.error_message or 'Run failed'}", file=sys.stderr)
+            exit_code = 3 if code.startswith("MODEL_") else 4
+        elif event.type == "run.cancelled":
+            print("Run cancelled", file=sys.stderr)
+            exit_code = 130
+    return exit_code

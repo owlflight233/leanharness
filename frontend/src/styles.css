@@ -248,6 +248,10 @@ textarea:focus-visible {
 .mode-select {
   display: flex;
   align-items: center;
+  padding: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface-subtle);
 }
 
 .mode-button {
@@ -255,17 +259,17 @@ textarea:focus-visible {
   height: 30px;
   align-items: center;
   padding: 0 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: 5px;
+  border: 0;
+  border-radius: 4px;
   gap: 6px;
   color: #4f5956;
-  background: var(--surface);
+  background: transparent;
 }
 
 .mode-button.active {
-  border-color: #9ab8b3;
   color: var(--accent-dark);
-  background: var(--accent-soft);
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(22, 38, 35, 0.12);
 }
 
 .conversation {
@@ -303,6 +307,22 @@ textarea:focus-visible {
   background: #eef1f0;
 }
 
+.message-progress {
+  padding-top: 9px;
+  padding-bottom: 9px;
+  color: var(--muted);
+}
+
+.message-progress .message-icon {
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+}
+
+.message-progress .message-body p {
+  color: #596461;
+  font-size: 12px;
+}
+
 .message-body {
   min-width: 0;
 }
@@ -324,6 +344,10 @@ textarea:focus-visible {
 
 .message.is-error .message-body p {
   color: var(--danger);
+}
+
+.message.is-incomplete .message-body p {
+  color: var(--warning);
 }
 
 .message.is-cancelled .message-body p {

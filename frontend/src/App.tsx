@@ -2,7 +2,6 @@ import {
   Activity,
   Blocks,
   Bot,
-  ChevronDown,
   CircleDot,
   FolderGit2,
   Menu,
@@ -24,17 +23,20 @@ import {
   type ModelStatus,
   type ModelStatusLoader,
 } from "./api/model";
+import { streamRun, type RunEvent, type RunStreamer } from "./api/run";
 
 type InspectorTab = "plan" | "trace";
+type RunMode = "chat" | "inspect";
+type TraceEvent = TurnEvent | RunEvent;
 type LoadState<T> =
   | { status: "loading" }
   | { status: "ready"; data: T }
   | { status: "error" };
-type MessageStatus = "streaming" | "complete" | "error" | "cancelled";
+type MessageStatus = "streaming" | "complete" | "incomplete" | "error" | "cancelled";
 
 interface ConversationMessage {
   id: number;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "progress";
   content: string;
   status: MessageStatus;
 }
@@ -43,20 +45,23 @@ interface AppProps {
   healthLoader?: HealthLoader;
   modelStatusLoader?: ModelStatusLoader;
   chatStreamer?: ChatStreamer;
+  runStreamer?: RunStreamer;
 }
 
 function App({
   healthLoader = fetchHealth,
   modelStatusLoader = fetchModelStatus,
   chatStreamer = streamChat,
+  runStreamer = streamRun,
 }: AppProps) {
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("plan");
   const [health, setHealth] = useState<LoadState<HealthResponse>>({ status: "loading" });
   const [modelStatus, setModelStatus] = useState<LoadState<ModelStatus>>({ status: "loading" });
+  const [mode, setMode] = useState<RunMode>("chat");
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
-  const [trace, setTrace] = useState<TurnEvent[]>([]);
+  const [trace, setTrace] = useState<TraceEvent[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const nextMessageId = useRef(1);
@@ -112,51 +117,106 @@ function App({
     if (!canSubmit) return;
     const message = input;
     const userId = nextMessageId.current++;
-    const assistantId = nextMessageId.current++;
+    const assistantId = mode === "chat" ? nextMessageId.current++ : null;
     const controller = new AbortController();
     activeRequest.current = controller;
-    setMessages((current) => [
-      ...current,
-      { id: userId, role: "user", content: message, status: "complete" },
-      { id: assistantId, role: "assistant", content: "", status: "streaming" },
-    ]);
+    setMessages((current) => {
+      const next: ConversationMessage[] = [
+        ...current,
+        { id: userId, role: "user", content: message, status: "complete" },
+      ];
+      if (assistantId !== null) {
+        next.push({ id: assistantId, role: "assistant", content: "", status: "streaming" });
+      }
+      return next;
+    });
     setInput("");
     setTrace([]);
     setInspectorTab("trace");
     setIsStreaming(true);
 
     try {
-      await chatStreamer(
-        message,
-        (event) => {
-          setTrace((current) => [...current, event]);
-          if (event.type === "content.delta") {
-            updateMessage(assistantId, (current) => ({
-              ...current,
-              content: current.content + event.content,
-            }));
-          } else if (event.type === "turn.completed") {
-            updateMessage(assistantId, (current) => ({ ...current, status: "complete" }));
-          } else if (event.type === "turn.failed") {
-            updateMessage(assistantId, (current) => ({
-              ...current,
-              content: current.content || event.error.message,
-              status: "error",
-            }));
-          }
-        },
-        controller.signal,
-      );
+      if (mode === "chat" && assistantId !== null) {
+        await chatStreamer(
+          message,
+          (event) => {
+            setTrace((current) => [...current, event]);
+            if (event.type === "content.delta") {
+              updateMessage(assistantId, (current) => ({
+                ...current,
+                content: current.content + event.content,
+              }));
+            } else if (event.type === "turn.completed") {
+              updateMessage(assistantId, (current) => ({ ...current, status: "complete" }));
+            } else if (event.type === "turn.failed") {
+              updateMessage(assistantId, (current) => ({
+                ...current,
+                content: current.content || event.error.message,
+                status: "error",
+              }));
+            }
+          },
+          controller.signal,
+        );
+      } else {
+        await runStreamer(
+          message,
+          (event) => {
+            setTrace((current) => [...current, event]);
+            if (event.type === "assistant.progress") {
+              appendMessage("progress", event.summary, "complete");
+            } else if (event.type === "run.completed") {
+              appendMessage("assistant", event.answer, "complete");
+            } else if (event.type === "run.incomplete") {
+              appendMessage(
+                "assistant",
+                event.answer || event.summary || "运行预算已用完，任务尚未完成",
+                "incomplete",
+              );
+            } else if (event.type === "run.failed") {
+              appendMessage("assistant", event.error.message, "error");
+            } else if (event.type === "run.cancelled") {
+              appendMessage("assistant", "已停止运行", "cancelled");
+            }
+          },
+          controller.signal,
+        );
+      }
     } catch (error: unknown) {
-      updateMessage(assistantId, (current) => ({
-        ...current,
-        content: current.content || (isAbortError(error) ? "已停止生成" : errorMessage(error)),
-        status: isAbortError(error) ? "cancelled" : "error",
-      }));
+      const content = isAbortError(error)
+        ? mode === "chat"
+          ? "已停止生成"
+          : "已停止运行"
+        : errorMessage(error);
+      if (assistantId !== null) {
+        updateMessage(assistantId, (current) => ({
+          ...current,
+          content: current.content || content,
+          status: isAbortError(error) ? "cancelled" : "error",
+        }));
+      } else {
+        appendMessage("assistant", content, isAbortError(error) ? "cancelled" : "error");
+      }
     } finally {
       if (activeRequest.current === controller) activeRequest.current = null;
       setIsStreaming(false);
     }
+  }
+
+  function appendMessage(
+    role: ConversationMessage["role"],
+    content: string,
+    status: MessageStatus,
+  ) {
+    const id = nextMessageId.current++;
+    setMessages((current) => [...current, { id, role, content, status }]);
+  }
+
+  function selectMode(nextMode: RunMode) {
+    if (isStreaming || nextMode === mode) return;
+    setMode(nextMode);
+    setMessages([]);
+    setTrace([]);
   }
 
   function updateMessage(
@@ -182,7 +242,7 @@ function App({
           </section>
           <section className="rail-section sessions-section">
             <div className="section-label"><span>当前运行</span></div>
-            <div className="empty-row muted"><Bot size={16} /><span>临时单轮对话</span></div>
+            <div className="empty-row muted"><Bot size={16} /><span>{mode === "chat" ? "临时单轮对话" : "临时只读检查"}</span></div>
           </section>
         </nav>
         <div className="rail-footer">
@@ -194,8 +254,11 @@ function App({
       <main className="workspace">
         <header className="workspace-header">
           <button className="icon-button mobile-only" type="button" title="打开项目导航" aria-label="打开项目导航" onClick={() => setLeftOpen(true)}><Menu size={19} /></button>
-          <div className="session-identity"><span className="session-title">临时对话</span><span className="session-subtitle">{workspace}</span></div>
-          <div className="mode-select" aria-label="运行模式"><button type="button" className="mode-button active" disabled>单轮<ChevronDown size={14} /></button></div>
+          <div className="session-identity"><span className="session-title">{mode === "chat" ? "临时对话" : "只读检查"}</span><span className="session-subtitle">{workspace}</span></div>
+          <div className="mode-select" role="group" aria-label="运行模式">
+            <button type="button" className={`mode-button ${mode === "chat" ? "active" : ""}`} aria-pressed={mode === "chat"} disabled={isStreaming} onClick={() => selectMode("chat")}>单轮</button>
+            <button type="button" className={`mode-button ${mode === "inspect" ? "active" : ""}`} aria-pressed={mode === "inspect"} disabled={isStreaming} onClick={() => selectMode("inspect")}>检查</button>
+          </div>
           <button className="icon-button mobile-only" type="button" title="打开检查器" aria-label="打开检查器" onClick={() => setRightOpen(true)}><PanelRight size={19} /></button>
         </header>
 
@@ -210,9 +273,9 @@ function App({
             <div className="message-list">
               {messages.map((message) => (
                 <article key={message.id} className={`message message-${message.role} is-${message.status}`}>
-                  <div className="message-icon" aria-hidden="true">{message.role === "user" ? <UserRound size={16} /> : <Bot size={16} />}</div>
+                  <div className="message-icon" aria-hidden="true">{message.role === "user" ? <UserRound size={16} /> : message.role === "progress" ? <Activity size={16} /> : <Bot size={16} />}</div>
                   <div className="message-body">
-                    <strong>{message.role === "user" ? "你" : modelName || "模型"}</strong>
+                    <strong>{message.role === "user" ? "你" : message.role === "progress" ? "行动" : modelName || "模型"}</strong>
                     <p>{message.content || "正在生成..."}</p>
                   </div>
                 </article>
@@ -222,11 +285,11 @@ function App({
         </section>
 
         <form className="composer" onSubmit={(event) => { event.preventDefault(); void submitMessage(); }}>
-          <textarea aria-label="任务输入" placeholder={modelStatus.status === "ready" && !modelStatus.data.configured ? "请先配置模型环境变量" : "输入一条消息"} rows={2} value={input} maxLength={32_000} disabled={health.status !== "ready" || modelStatus.status !== "ready" || !modelStatus.data.configured || isStreaming} onChange={(event) => setInput(event.target.value)} />
+          <textarea aria-label="任务输入" placeholder={modelStatus.status === "ready" && !modelStatus.data.configured ? "请先配置模型环境变量" : mode === "chat" ? "输入一条消息" : "输入一个仓库分析任务"} rows={2} value={input} maxLength={32_000} disabled={health.status !== "ready" || modelStatus.status !== "ready" || !modelStatus.data.configured || isStreaming} onChange={(event) => setInput(event.target.value)} />
           <div className="composer-actions">
-            <span className="composer-state">{isStreaming ? "模型正在生成" : modelStatus.status === "ready" && modelStatus.data.configured ? "单轮对话 · 不保存历史" : `模型${modelCopy}`}</span>
+            <span className="composer-state">{isStreaming ? mode === "chat" ? "模型正在生成" : "Agent 正在检查" : modelStatus.status === "ready" && modelStatus.data.configured ? mode === "chat" ? "单轮对话 · 不保存历史" : "只读检查 · 不保存历史" : `模型${modelCopy}`}</span>
             {isStreaming ? (
-              <button className="send-button stop-button" type="button" aria-label="停止生成" title="停止生成" onClick={() => activeRequest.current?.abort()}><Square size={14} fill="currentColor" /></button>
+              <button className="send-button stop-button" type="button" aria-label={mode === "chat" ? "停止生成" : "停止运行"} title={mode === "chat" ? "停止生成" : "停止运行"} onClick={() => activeRequest.current?.abort()}><Square size={14} fill="currentColor" /></button>
             ) : (
               <button className="send-button" type="submit" aria-label="发送任务" disabled={!canSubmit}><Send size={17} /></button>
             )}
@@ -246,10 +309,10 @@ function App({
           <div className="inspector-body" role="tabpanel"><div className="panel-empty"><CircleDot size={18} /><strong>没有活动计划</strong><span>单轮对话不创建计划</span></div></div>
         ) : (
           <div className="inspector-body" role="tabpanel">
-            {trace.length === 0 ? <div className="panel-empty"><Activity size={18} /><strong>没有运行轨迹</strong><span>0 条事件</span></div> : <ol className="trace-list">{trace.map((event) => <li key={`${event.sequence}-${event.type}`}><span>{event.sequence}</span><strong>{event.type}</strong></li>)}</ol>}
+            {trace.length === 0 ? <div className="panel-empty"><Activity size={18} /><strong>没有运行轨迹</strong><span>0 条事件</span></div> : <ol className="trace-list">{trace.map((event) => <li key={`${"run_id" in event ? event.run_id : "turn"}-${event.sequence}-${event.type}`}><span>{event.sequence}</span><strong title={traceLabel(event)}>{traceLabel(event)}</strong></li>)}</ol>}
           </div>
         )}
-        <div className="inspector-summary"><div><span>模型</span><strong title={modelName ?? undefined}>{modelCopy}</strong></div><div><span>权限</span><strong>未启用</strong></div></div>
+        <div className="inspector-summary"><div><span>模型</span><strong title={modelName ?? undefined}>{modelCopy}</strong></div><div><span>权限</span><strong>{mode === "inspect" ? "只读" : "未启用"}</strong></div></div>
       </aside>
 
       <footer className="status-bar" aria-label="运行状态">
@@ -266,6 +329,12 @@ function isAbortError(error: unknown): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "模型请求失败";
+}
+
+function traceLabel(event: TraceEvent): string {
+  if ("tool" in event && event.tool) return `${event.type}: ${event.tool}`;
+  if ("summary" in event && event.summary) return `${event.type}: ${event.summary}`;
+  return event.type;
 }
 
 export default App;

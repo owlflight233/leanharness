@@ -9,6 +9,7 @@ from leanharness.cli.doctor import DiagnosticCheck
 from leanharness.cli.main import build_parser, main
 from leanharness.errors import ModelAuthError
 from leanharness.models import ModelConfig, ModelEvent, ModelUsage
+from leanharness.runtime import RuntimeEvent
 
 
 def test_development_version_is_exposed() -> None:
@@ -19,6 +20,25 @@ def test_empty_cli_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == 0
     captured = capsys.readouterr()
     assert "Local-first coding agent runtime" in captured.out
+
+
+def test_cli_configures_utf8_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, str]] = []
+
+    class Stream:
+        def reconfigure(self, **kwargs: str) -> None:
+            calls.append(kwargs)
+
+    monkeypatch.setattr("leanharness.cli.main.sys.stdout", Stream())
+    monkeypatch.setattr("leanharness.cli.main.sys.stderr", Stream())
+
+    from leanharness.cli.main import _configure_stdio
+
+    _configure_stdio()
+    assert calls == [
+        {"encoding": "utf-8", "errors": "replace"},
+        {"encoding": "utf-8", "errors": "replace"},
+    ]
 
 
 def test_serve_parser_applies_local_defaults() -> None:
@@ -112,3 +132,87 @@ def test_chat_cli_prints_content_and_usage(
     captured = capsys.readouterr()
     assert captured.out == "world\n"
     assert "usage: 4 tokens" in captured.err
+
+
+def test_run_parser_applies_read_only_defaults() -> None:
+    args = build_parser().parse_args(["run", "inspect"])
+
+    assert args.workspace is None
+    assert args.max_steps == 24
+
+
+def test_run_cli_separates_trace_and_final_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeRuntime:
+        async def run(self, task: str):
+            assert task == "inspect"
+            yield RuntimeEvent(
+                type="assistant.progress",
+                sequence=0,
+                run_id="r1",
+                step=1,
+                summary="Inspecting files",
+            )
+            yield RuntimeEvent(
+                type="tool.completed",
+                sequence=1,
+                run_id="r1",
+                step=1,
+                tool="workspace_list",
+                metadata={"ok": True},
+            )
+            yield RuntimeEvent(
+                type="run.completed",
+                sequence=2,
+                run_id="r1",
+                answer="Final answer",
+            )
+
+    monkeypatch.setattr(
+        "leanharness.cli.main.create_inspection_run",
+        lambda *_args, **_kwargs: FakeRuntime(),
+    )
+
+    assert main(["run", "inspect", "--workspace", str(tmp_path)]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "Final answer\n"
+    assert "Inspecting files" in captured.err
+    assert "workspace_list" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("terminal_type", "error_code", "expected"),
+    [
+        ("run.incomplete", None, 4),
+        ("run.failed", "RUN_STALLED", 4),
+        ("run.failed", "MODEL_UNAVAILABLE", 3),
+        ("run.cancelled", None, 130),
+    ],
+)
+def test_run_cli_maps_terminal_status_to_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_type: str,
+    error_code: str | None,
+    expected: int,
+) -> None:
+    class FakeRuntime:
+        async def run(self, task: str):
+            yield RuntimeEvent(
+                type=terminal_type,
+                sequence=0,
+                run_id="r1",
+                summary="not complete",
+                error_code=error_code,
+                error_message="failure" if error_code else None,
+            )
+
+    monkeypatch.setattr(
+        "leanharness.cli.main.create_inspection_run",
+        lambda *_args, **_kwargs: FakeRuntime(),
+    )
+
+    assert main(["run", "inspect", "--workspace", str(tmp_path)]) == expected

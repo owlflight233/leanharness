@@ -56,7 +56,12 @@ def test_health_contract_is_exact(tmp_path: Path) -> None:
         "name": "LeanHarness",
         "version": "0.1.0.dev0",
         "workspace": str(tmp_path.resolve()),
-        "capabilities": ["model.chat", "model.streaming"],
+        "capabilities": [
+            "model.chat",
+            "model.streaming",
+            "agent.inspect",
+            "agent.streaming",
+        ],
     }
 
 

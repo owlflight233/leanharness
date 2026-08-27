@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel
 
 from leanharness import __version__
+from leanharness.application.agent_gateway import create_inspection_run
 from leanharness.application.health import get_health
 from leanharness.application.model_gateway import (
     ModelClientFactory,
@@ -24,6 +25,7 @@ from leanharness.errors import (
     ChatInputError,
     LeanHarnessError,
     ModelNotConfiguredError,
+    RunInputError,
 )
 from leanharness.models import (
     ModelEvent,
@@ -35,6 +37,11 @@ from leanharness.models import (
 
 class ChatRequest(BaseModel):
     message: str
+
+
+class RunRequest(BaseModel):
+    task: str
+    max_steps: int = 24
 
 
 def default_frontend_dir() -> Path:
@@ -65,7 +72,7 @@ def create_app(
     @app.exception_handler(LeanHarnessError)
     async def application_error(_request: Request, exc: LeanHarnessError) -> JSONResponse:
         status_code = 503 if isinstance(exc, ModelNotConfiguredError) else 502
-        if isinstance(exc, ChatInputError):
+        if isinstance(exc, ChatInputError | RunInputError):
             status_code = 422
         return JSONResponse(
             status_code=status_code,
@@ -73,13 +80,18 @@ def create_app(
         )
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(_request: Request, _exc: RequestValidationError) -> JSONResponse:
+    async def validation_error(request: Request, _exc: RequestValidationError) -> JSONResponse:
+        is_run = request.url.path == "/api/v1/runs"
         return JSONResponse(
             status_code=422,
             content={
                 "error": {
-                    "code": "INVALID_CHAT_INPUT",
-                    "message": "Request body must contain a text message",
+                    "code": "INVALID_RUN_INPUT" if is_run else "INVALID_CHAT_INPUT",
+                    "message": (
+                        "Request body must contain a task"
+                        if is_run
+                        else "Request body must contain a text message"
+                    ),
                 }
             },
         )
@@ -121,6 +133,25 @@ def create_app(
             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         )
 
+    @app.post("/api/v1/runs")
+    async def run(payload: RunRequest) -> StreamingResponse:
+        runtime = create_inspection_run(
+            payload.task,
+            config.workspace,
+            max_steps=payload.max_steps,
+            client_factory=app.state.model_client_factory,
+        )
+
+        async def ndjson_events() -> AsyncIterator[bytes]:
+            async for event in runtime.run(payload.task):
+                yield _encode_payload(event.to_dict())
+
+        return StreamingResponse(
+            ndjson_events(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
+
     @app.get("/", include_in_schema=False)
     @app.get("/{requested_path:path}", include_in_schema=False)
     async def frontend(requested_path: str = "") -> Response:
@@ -148,6 +179,10 @@ def create_app(
 
 
 def _encode_event(event: ModelEvent) -> bytes:
-    return (json.dumps(event.to_dict(), ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+    return _encode_payload(event.to_dict())
+
+
+def _encode_payload(payload: dict[str, object]) -> bytes:
+    return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
         "utf-8"
     )

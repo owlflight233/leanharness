@@ -10,7 +10,7 @@ local server to a network.
 
 - The server binds to `127.0.0.1` unless the user explicitly overrides it.
 - Workspace access is confined to a resolved project root.
-- Plan and inspect modes cannot mutate the workspace.
+- Inspect mode cannot mutate the workspace. Plan mode is not yet exposed.
 - Missing approval channels and unknown permission states deny an action.
 - Subprocesses have time, output, and cancellation bounds.
 - External plugins run in child processes with explicit permissions.

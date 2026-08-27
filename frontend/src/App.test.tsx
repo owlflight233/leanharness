@@ -6,13 +6,14 @@ import App from "./App";
 import type { ChatStreamer } from "./api/chat";
 import type { HealthLoader, HealthResponse } from "./api/health";
 import type { ModelStatusLoader } from "./api/model";
+import type { RunStreamer } from "./api/run";
 
 const healthy: HealthResponse = {
   status: "ok",
   name: "LeanHarness",
   version: "0.1.0.dev0",
   workspace: "C:\\projects\\demo",
-  capabilities: ["model.chat", "model.streaming"],
+  capabilities: ["model.chat", "model.streaming", "agent.inspect", "agent.streaming"],
 };
 
 const successfulHealth: HealthLoader = async () => healthy;
@@ -130,5 +131,47 @@ describe("application shell", () => {
     await user.click(await screen.findByRole("button", { name: "停止生成" }));
 
     expect(await screen.findByText("已停止生成")).toBeInTheDocument();
+  });
+
+  it("runs a read-only inspection and separates progress from the final answer", async () => {
+    const user = userEvent.setup();
+    const inspection: RunStreamer = async (_task, onEvent) => {
+      onEvent({ type: "run.started", sequence: 0, run_id: "r1" });
+      onEvent({
+        type: "assistant.progress",
+        sequence: 1,
+        run_id: "r1",
+        step: 1,
+        summary: "读取 README",
+      });
+      onEvent({
+        type: "tool.completed",
+        sequence: 2,
+        run_id: "r1",
+        step: 1,
+        tool: "workspace_read",
+        metadata: { ok: true },
+      });
+      onEvent({
+        type: "run.completed",
+        sequence: 3,
+        run_id: "r1",
+        answer: "仓库包含 README。",
+      });
+    };
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        runStreamer={inspection}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "检查" }));
+    await user.type(await screen.findByLabelText("任务输入"), "分析仓库");
+    await user.click(screen.getByRole("button", { name: "发送任务" }));
+
+    expect(await screen.findByText("仓库包含 README。")).toBeInTheDocument();
+    expect(screen.getByText("读取 README")).toBeInTheDocument();
+    expect(screen.getByText(/tool.completed: workspace_read/)).toBeInTheDocument();
   });
 });

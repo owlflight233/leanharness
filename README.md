@@ -7,10 +7,10 @@ engineering assessment.
 ## Current status
 
 The current milestone provides an installable Python package, environment
-diagnostics, a provider-independent model gateway, and ephemeral single-turn
-streaming chat through both the CLI and responsive local web interface. Local
-tools, the agent loop, persistent sessions, and plugins are intentionally not
-implemented yet.
+diagnostics, a provider-independent model gateway, ephemeral single-turn
+streaming chat, and a bounded read-only inspection loop through both the CLI
+and responsive local web interface. File mutation, shell execution, persistent
+sessions, and plugins remain intentionally out of scope.
 
 ## Prerequisites
 
@@ -70,6 +70,7 @@ $env:LEANHARNESS_MODEL_NAME = "deepseek-chat"
 $env:LEANHARNESS_MODEL_API_KEY = "your-api-key"
 uv run leanharness model check
 uv run leanharness chat "Reply with one short sentence."
+uv run leanharness run "Inspect this repository and explain its structure."
 uv run leanharness serve
 ```
 
@@ -87,7 +88,8 @@ uv run leanharness serve
 `LEANHARNESS_MODEL_API_KEY` may be omitted for a local endpoint that does not
 require authentication. Plain HTTP is accepted only for `localhost`,
 `127.0.0.1`, or `::1`. Chat is currently stateless and does not read or modify
-the selected workspace.
+the selected workspace. The `run` command and the Web inspection mode perform
+read-only workspace inspection with bounded steps and no persistence.
 
 For frontend development, keep the Python server on port 4318 and run
 `pnpm dev` from `frontend/`; Vite proxies `/api` to the local server.
