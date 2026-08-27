@@ -204,7 +204,7 @@ def create_app(
         _, session = ensure_session(store, config.workspace, payload.session_id)
         session = apply_first_task_title(store, session, message)
         run = store.create_run(session.id, "chat", message, 1)
-        store.add_message(session.id, "user", message)
+        store.add_message(session.id, "user", message, run_id=run.id)
 
         async def ndjson_events() -> AsyncIterator[bytes]:
             content: list[str] = []
@@ -215,6 +215,7 @@ def create_app(
                     message,
                     config=model_config,
                     client_factory=app.state.model_client_factory,
+                    language=session.language or "same",
                 ):
                     last_sequence = event.sequence
                     persist_model_event(store, session, run, event)
@@ -223,7 +224,11 @@ def create_app(
                     if event.type == "turn.completed":
                         if content:
                             store.add_message(
-                                session.id, "assistant", "".join(content), "complete"
+                                session.id,
+                                "assistant",
+                                "".join(content),
+                                "complete",
+                                run_id=run.id,
                             )
                         store.update_run(run.id, state="COMPLETED", answer="".join(content))
                     terminal_seen = event.type in {"turn.completed", "turn.failed"}
@@ -258,8 +263,9 @@ def create_app(
             max_steps=payload.max_steps,
             client_factory=app.state.model_client_factory,
             run_id=run_record.id,
+            language=session.language or "same",
         )
-        store.add_message(session.id, "user", payload.task)
+        store.add_message(session.id, "user", payload.task, run_id=run_record.id)
 
         async def ndjson_events() -> AsyncIterator[bytes]:
             last_sequence = -1

@@ -113,9 +113,10 @@ def test_chat_cli_prints_content_and_usage(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    async def fake_stream(message: str, *, config: ModelConfig):
+    async def fake_stream(message: str, *, config: ModelConfig, language: str):
         assert message == "hello"
         assert config.model == "example"
+        assert language == "en"
         yield ModelEvent(type="turn.started", sequence=0)
         yield ModelEvent(type="content.delta", sequence=1, content="world")
         yield ModelEvent(

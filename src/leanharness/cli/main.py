@@ -230,13 +230,13 @@ async def _chat(
     _, session = ensure_session(store, workspace, session_id)
     session = apply_first_task_title(store, session, message)
     run = store.create_run(session.id, "chat", message, 1)
-    store.add_message(session.id, "user", message)
+    store.add_message(session.id, "user", message, run_id=run.id)
     print(f"[session] {session.id}", file=sys.stderr)
     print(f"[run] {run.id}", file=sys.stderr)
     wrote_content = False
     failed = False
     content: list[str] = []
-    async for event in stream_chat(message, config=config):
+    async for event in stream_chat(message, config=config, language=session.language or "same"):
         persist_model_event(store, session, run, event)
         if event.type == "content.delta" and event.content:
             print(event.content, end="", flush=True)
@@ -254,7 +254,9 @@ async def _chat(
             print(f"error [{error_code}]: {error_message}", file=sys.stderr)
             failed = True
     if wrote_content and not failed:
-        store.add_message(session.id, "assistant", "".join(content), "complete")
+        store.add_message(
+            session.id, "assistant", "".join(content), "complete", run_id=run.id
+        )
         store.update_run(run.id, state="COMPLETED", answer="".join(content))
     if wrote_content and not failed:
         print()
@@ -268,10 +270,16 @@ async def _inspect(
     _, session = ensure_session(store, workspace, session_id)
     session = apply_first_task_title(store, session, task)
     run = store.create_run(session.id, "inspect", task, max_steps)
-    store.add_message(session.id, "user", task)
+    store.add_message(session.id, "user", task, run_id=run.id)
     print(f"[session] {session.id}", file=sys.stderr)
     print(f"[run] {run.id}", file=sys.stderr)
-    runtime = create_inspection_run(task, workspace, max_steps=max_steps, run_id=run.id)
+    runtime = create_inspection_run(
+        task,
+        workspace,
+        max_steps=max_steps,
+        run_id=run.id,
+        language=session.language or "same",
+    )
     exit_code = 0
     async for event in runtime.run(task):
         persist_runtime_event(store, session, run, event)

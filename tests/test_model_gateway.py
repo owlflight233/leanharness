@@ -92,3 +92,34 @@ def test_stream_chat_normalizes_failure_after_partial_output() -> None:
     assert [event.type for event in events] == ["turn.started", "content.delta", "turn.failed"]
     assert events[-1].sequence == 2
     assert events[-1].error_code == "MODEL_AUTH_FAILED"
+
+
+@pytest.mark.parametrize(
+    ("message", "language", "expected"),
+    [
+        ("请解释这个项目", "zh", "Use Chinese"),
+        ("Explain this project", "en", "Use English"),
+        ("Объясни проект", "same", "same natural language"),
+    ],
+)
+def test_stream_chat_injects_session_language(
+    message: str, language: str, expected: str
+) -> None:
+    client = FakeClient(events=(ModelEvent(type="turn.completed", sequence=0),))
+
+    async def collect() -> None:
+        async for _event in stream_chat(
+            message,
+            language=language,
+            client_factory=lambda _config: client,
+        ):
+            pass
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        for name, value in ENV.items():
+            monkeypatch.setenv(name, value)
+        asyncio.run(collect())
+
+    assert client.request is not None
+    assert client.request.messages[0].role == "system"
+    assert expected in client.request.messages[0].content

@@ -22,7 +22,7 @@ from leanharness.errors import InvalidPermissionError, SessionNotFoundError, Sto
 from leanharness.logging import redact_text
 
 PERMISSION_MODES = frozenset({"inspect", "approve", "unrestricted"})
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _TRACE_WRITE_LOCK = threading.Lock()
 _HIDDEN_REASONING_BLOCK = re.compile(
     r"(?is)<(?:think|thinking)>.*?</(?:think|thinking)>"
@@ -83,6 +83,7 @@ class SessionRecord:
     project_id: str
     title: str
     permission_mode: str
+    language: str | None
     created_at: str
     updated_at: str
     last_run_state: str | None = None
@@ -106,6 +107,7 @@ class MessageRecord:
     content: str
     status: str
     created_at: str
+    run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +118,7 @@ class RunRecord:
     task: str
     state: str
     max_steps: int
+    permission_mode: str
     answer: str | None
     error_code: str | None
     started_at: str
@@ -192,19 +195,38 @@ class LocalStore:
         return ProjectRecord(project_id, str(root), permission_mode, now, now)
 
     def create_session(
-        self, project: ProjectRecord, *, title: str = "新会话", permission_mode: str | None = None
+        self,
+        project: ProjectRecord,
+        *,
+        title: str = "新会话",
+        permission_mode: str | None = None,
+        language: str | None = None,
     ) -> SessionRecord:
         mode = permission_mode or project.permission_mode
         _validate_permission(mode)
         now = utc_now()
         session_id = str(uuid.uuid4())
         self.connection.execute(
-            "INSERT INTO sessions(id, project_id, title, permission_mode, created_at, updated_at) VALUES(?,?,?,?,?,?)",
-            (session_id, project.id, self.redactor.text(title or "新会话"), mode, now, now),
+            "INSERT INTO sessions(id, project_id, title, permission_mode, language, created_at, updated_at) VALUES(?,?,?,?,?,?,?)",
+            (
+                session_id,
+                project.id,
+                self.redactor.text(title or "新会话"),
+                mode,
+                language,
+                now,
+                now,
+            ),
         )
         self.connection.commit()
         return SessionRecord(
-            session_id, project.id, self.redactor.text(title or "新会话"), mode, now, now
+            session_id,
+            project.id,
+            self.redactor.text(title or "新会话"),
+            mode,
+            language,
+            now,
+            now,
         )
 
     def list_sessions(self, project: ProjectRecord) -> list[SessionRecord]:
@@ -228,17 +250,23 @@ class LocalStore:
         return self._session_row(row)
 
     def update_session(
-        self, session_id: str, *, title: str | None = None, permission_mode: str | None = None
+        self,
+        session_id: str,
+        *,
+        title: str | None = None,
+        permission_mode: str | None = None,
+        language: str | None = None,
     ) -> SessionRecord:
         self.get_session(session_id)
         if permission_mode is not None:
             _validate_permission(permission_mode)
         now = utc_now()
         self.connection.execute(
-            "UPDATE sessions SET title = COALESCE(?, title), permission_mode = COALESCE(?, permission_mode), updated_at = ? WHERE id = ?",
+            "UPDATE sessions SET title = COALESCE(?, title), permission_mode = COALESCE(?, permission_mode), language = COALESCE(?, language), updated_at = ? WHERE id = ?",
             (
                 self.redactor.text(title) if title is not None else None,
                 permission_mode,
+                language,
                 now,
                 session_id,
             ),
@@ -258,21 +286,36 @@ class LocalStore:
             raise StorageError("Session trace could not be deleted") from exc
 
     def add_message(
-        self, session_id: str, role: str, content: str, status: str = "complete"
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        status: str = "complete",
+        *,
+        run_id: str | None = None,
     ) -> MessageRecord:
         self.get_session(session_id)
         safe_content = self.redactor.text(content)
         message_id = str(uuid.uuid4())
         created_at = utc_now()
         row = self.connection.execute(
-            """INSERT INTO messages(id, session_id, sequence, role, content, status, created_at)
-               SELECT ?, ?, COALESCE(MAX(sequence), -1) + 1, ?, ?, ?, ?
+            """INSERT INTO messages(id, session_id, sequence, role, content, status, created_at, run_id)
+               SELECT ?, ?, COALESCE(MAX(sequence), -1) + 1, ?, ?, ?, ?, ?
                FROM messages WHERE session_id=? RETURNING sequence""",
-            (message_id, session_id, role, safe_content, status, created_at, session_id),
+            (
+                message_id,
+                session_id,
+                role,
+                safe_content,
+                status,
+                created_at,
+                run_id,
+                session_id,
+            ),
         ).fetchone()
         sequence = int(row["sequence"])
         message = MessageRecord(
-            message_id, session_id, sequence, role, safe_content, status, created_at
+            message_id, session_id, sequence, role, safe_content, status, created_at, run_id
         )
         with self.connection:
             self.connection.execute(
@@ -297,16 +340,27 @@ class LocalStore:
                         "content",
                         "status",
                         "created_at",
+                        "run_id",
                     )
                 )
             )
             for row in rows
         ]
 
-    def create_run(self, session_id: str, mode: str, task: str, max_steps: int) -> RunRecord:
+    def create_run(
+        self,
+        session_id: str,
+        mode: str,
+        task: str,
+        max_steps: int,
+        *,
+        permission_mode: str | None = None,
+    ) -> RunRecord:
         self.get_session(session_id)
         now = utc_now()
         safe_task = self.redactor.text(task)
+        selected_permission = permission_mode or self.get_session(session_id).permission_mode
+        _validate_permission(selected_permission)
         run = RunRecord(
             str(uuid.uuid4()),
             session_id,
@@ -314,6 +368,7 @@ class LocalStore:
             safe_task,
             "CREATED",
             max_steps,
+            selected_permission,
             None,
             None,
             now,
@@ -321,7 +376,7 @@ class LocalStore:
         )
         with self.connection:
             self.connection.execute(
-                "INSERT INTO runs(id, session_id, mode, task, state, max_steps, answer, error_code, started_at, finished_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO runs(id, session_id, mode, task, state, max_steps, permission_mode, answer, error_code, started_at, finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run.id,
                     run.session_id,
@@ -329,6 +384,7 @@ class LocalStore:
                     run.task,
                     run.state,
                     run.max_steps,
+                    run.permission_mode,
                     run.answer,
                     run.error_code,
                     run.started_at,
@@ -360,6 +416,7 @@ class LocalStore:
                     "task",
                     "state",
                     "max_steps",
+                    "permission_mode",
                     "answer",
                     "error_code",
                     "started_at",
@@ -419,6 +476,7 @@ class LocalStore:
                         "task",
                         "state",
                         "max_steps",
+                        "permission_mode",
                         "answer",
                         "error_code",
                         "started_at",
@@ -462,6 +520,18 @@ class LocalStore:
                     INSERT INTO schema_migrations(version, applied_at) VALUES(1, CURRENT_TIMESTAMP);
                     """
                 )
+            if current < 2:
+                self.connection.executescript(
+                    """
+                    ALTER TABLE sessions ADD COLUMN language TEXT;
+                    ALTER TABLE messages ADD COLUMN run_id TEXT REFERENCES runs(id) ON DELETE SET NULL;
+                    ALTER TABLE runs ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'inspect';
+                    CREATE TABLE approvals(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, tool_call_id TEXT NOT NULL, tool_name TEXT NOT NULL, request_json TEXT NOT NULL, state TEXT NOT NULL, requested_at TEXT NOT NULL, decided_at TEXT);
+                    CREATE INDEX messages_run ON messages(run_id, sequence);
+                    CREATE INDEX approvals_run ON approvals(run_id, requested_at);
+                    INSERT INTO schema_migrations(version, applied_at) VALUES(2, CURRENT_TIMESTAMP);
+                    """
+                )
 
     @staticmethod
     def _project_row(
@@ -482,6 +552,7 @@ class LocalStore:
             row["project_id"],
             row["title"],
             row["permission_mode"],
+            row["language"],
             row["created_at"],
             row["updated_at"],
             row["last_run_state"],

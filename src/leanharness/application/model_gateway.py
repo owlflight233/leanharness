@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import Protocol
 
+from leanharness.application.language import language_instruction
 from leanharness.errors import ChatInputError, ModelError, ModelProtocolError
 from leanharness.models import (
     ModelConfig,
@@ -68,6 +69,7 @@ async def stream_chat(
     *,
     config: ModelConfig | None = None,
     client_factory: ModelClientFactory = OpenAICompatibleClient,
+    language: str = "same",
 ) -> AsyncIterator[ModelEvent]:
     """Run one stateless user message and normalize post-start failures as events."""
 
@@ -78,7 +80,10 @@ async def stream_chat(
     try:
         async for event in client.stream(
             ModelRequest(
-                messages=(ModelMessage(role="user", content=validated),),
+                messages=(
+                    ModelMessage(role="system", content=language_instruction(language)),
+                    ModelMessage(role="user", content=validated),
+                ),
                 stream=True,
             )
         ):

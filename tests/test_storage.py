@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from leanharness.errors import InvalidPermissionError, SessionNotFoundError
 from leanharness.storage import LocalStore, TraceRedactor, default_data_dir, redact_payload
+
+# Migration fixtures intentionally keep their SQL schema definitions readable.
+# ruff: noqa: E501
 
 
 def test_store_migrates_and_recovers_sessions(tmp_path: Path) -> None:
@@ -125,3 +129,47 @@ def test_messages_and_run_records_are_redacted(tmp_path: Path) -> None:
     assert "secret-key" not in store.get_session(session.id).title
     assert "secret-key" not in store.list_runs(session.id)[0].task
     assert "secret-key" not in (store.list_runs(session.id)[0].answer or "")
+
+
+@pytest.mark.parametrize(
+    ("task", "expected"),
+    [("请分析仓库", "zh"), ("Inspect the repository", "en"), ("Проверь проект", "same")],
+)
+def test_first_task_locks_session_language(
+    tmp_path: Path, task: str, expected: str
+) -> None:
+    from leanharness.application.session_gateway import apply_first_task_title
+
+    store = LocalStore(tmp_path / "data")
+    session = store.create_session(store.ensure_project(tmp_path))
+    updated = apply_first_task_title(store, session, task)
+    assert updated.language == expected
+
+
+def test_v1_database_migrates_without_losing_history(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    database = data / "leanharness.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+            CREATE TABLE projects(id TEXT PRIMARY KEY, root_path TEXT NOT NULL UNIQUE, permission_mode TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE sessions(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, title TEXT NOT NULL, permission_mode TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE messages(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(session_id, sequence));
+            CREATE TABLE runs(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, mode TEXT NOT NULL, task TEXT NOT NULL, state TEXT NOT NULL, max_steps INTEGER NOT NULL, answer TEXT, error_code TEXT, started_at TEXT NOT NULL, finished_at TEXT);
+            CREATE TABLE run_events(run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(run_id, sequence));
+            INSERT INTO schema_migrations VALUES(1, '2026-01-01T00:00:00+00:00');
+            INSERT INTO projects VALUES('p1', 'ROOT', 'inspect', 't', 't');
+            INSERT INTO sessions VALUES('s1', 'p1', 'Legacy', 'inspect', 't', 't');
+            """.replace("ROOT", str(tmp_path).replace("'", "''"))
+        )
+
+    with LocalStore(data) as store:
+        legacy = store.get_session("s1")
+        assert legacy.title == "Legacy"
+        assert legacy.language is None
+        versions = store.connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert [row["version"] for row in versions] == [1, 2]

@@ -61,11 +61,8 @@ def test_run_endpoint_streams_runtime_contract(tmp_path: Path, monkeypatch) -> N
     assert events[0]["run_id"] == events[-1]["run_id"]
     detail = asyncio.run(_get(app, f"/api/v1/sessions/{events[0]['session_id']}")).json()
     assert detail["session"]["title"] == "Inspect the repository"
-    assert [message["role"] for message in detail["messages"]] == [
-        "user",
-        "progress",
-        "assistant",
-    ]
+    assert [message["role"] for message in detail["messages"]] == ["user", "assistant"]
+    assert all(message["run_id"] == events[0]["run_id"] for message in detail["messages"])
     assert detail["runs"][0]["state"] == "COMPLETED"
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from leanharness.application.language import detect_session_language
 from leanharness.models import ModelEvent
 from leanharness.runtime.events import RuntimeEvent
 from leanharness.storage import LocalStore, ProjectRecord, RunRecord, SessionRecord
@@ -34,6 +35,7 @@ def session_to_dict(session: SessionRecord) -> dict[str, object]:
         "project_id": session.project_id,
         "title": session.title,
         "permission_mode": session.permission_mode,
+        "language": session.language,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
         "last_run_state": session.last_run_state,
@@ -48,6 +50,7 @@ def run_to_dict(run: RunRecord) -> dict[str, object]:
         "task": run.task,
         "state": run.state,
         "max_steps": run.max_steps,
+        "permission_mode": run.permission_mode,
         "answer": run.answer,
         "error_code": run.error_code,
         "started_at": run.started_at,
@@ -56,11 +59,14 @@ def run_to_dict(run: RunRecord) -> dict[str, object]:
 
 
 def apply_first_task_title(store: LocalStore, session: SessionRecord, task: str) -> SessionRecord:
-    """Name an untouched default session from its first submitted task."""
-    if session.title != "新会话":
+    """Name an untouched session and lock its default response language."""
+    title = None
+    if session.title == "新会话":
+        title = " ".join(task.strip().split())[:40] or "新会话"
+    language = detect_session_language(task) if session.language is None else None
+    if title is None and language is None:
         return session
-    normalized = " ".join(task.strip().split())[:40]
-    return store.update_session(session.id, title=normalized or "新会话")
+    return store.update_session(session.id, title=title, language=language)
 
 
 def session_detail(store: LocalStore, session_id: str) -> dict[str, object]:
@@ -88,6 +94,7 @@ def session_detail(store: LocalStore, session_id: str) -> dict[str, object]:
                 "content": message.content,
                 "status": message.status,
                 "created_at": message.created_at,
+                "run_id": message.run_id,
             }
             for message in store.list_messages(session_id)
         ],
@@ -100,9 +107,7 @@ def persist_runtime_event(
 ) -> None:
     payload = event.to_dict()
     store.append_event(session.id, run.id, event.sequence, event.type, payload)
-    if event.type == "assistant.progress" and event.summary:
-        store.add_message(session.id, "progress", event.summary)
-    elif event.type in {"run.completed", "run.incomplete", "run.failed", "run.cancelled"}:
+    if event.type in {"run.completed", "run.incomplete", "run.failed", "run.cancelled"}:
         content = event.answer or event.summary or event.error_message or event.type
         status = {
             "run.completed": "complete",
@@ -110,7 +115,7 @@ def persist_runtime_event(
             "run.failed": "error",
             "run.cancelled": "cancelled",
         }[event.type]
-        store.add_message(session.id, "assistant", content, status)
+        store.add_message(session.id, "assistant", content, status, run_id=run.id)
         store.update_run(
             run.id,
             state={
@@ -134,7 +139,11 @@ def persist_model_event(
         return
     if event.type == "turn.failed":
         store.add_message(
-            session.id, "assistant", event.error_message or "Model request failed", "error"
+            session.id,
+            "assistant",
+            event.error_message or "Model request failed",
+            "error",
+            run_id=run.id,
         )
         store.update_run(run.id, state="FAILED", error_code=event.error_code)
     elif event.type == "turn.completed":
@@ -166,5 +175,6 @@ def persist_stream_cancellation(
         "assistant",
         partial_answer or summary,
         "cancelled",
+        run_id=run.id,
     )
     store.update_run(run.id, state="CANCELLED", answer=partial_answer)
