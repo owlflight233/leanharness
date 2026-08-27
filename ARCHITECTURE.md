@@ -65,11 +65,19 @@ workspace-scoped tools: `workspace_list`, `workspace_read`, and
 results; repeated calls, context pressure, and step budgets are runtime
 decisions rather than model instructions.
 
-## Data strategy target
+## Data strategy
 
-SQLite will be the source of business state. A separate append-only JSONL trace
-will support inspection and demonstration. Replaying traces will render what
-happened but will not replace relational recovery of sessions and plans.
+SQLite is the source of local business state for projects, sessions, messages,
+runs, and ordered run events. A separate append-only JSONL trace is written for
+each run under the application data directory. Both sinks receive the same
+`TraceRedactor` output: credentials, hidden reasoning, and raw tool/file
+content are excluded. Replaying traces can render what happened but does not
+replace relational recovery. Session history is presentation-only and is not
+automatically added to a subsequent model request.
+
+The storage adapter applies numbered migrations, enables WAL and foreign keys,
+and uses UUID identifiers with UTC ISO-8601 timestamps. Deleting a session
+cascades its relational records and removes its run trace directory.
 
 ## Interface deployment
 

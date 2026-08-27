@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -26,6 +27,7 @@ from leanharness.application.session_gateway import (
     ensure_session,
     persist_model_event,
     persist_runtime_event,
+    persist_stream_cancellation,
     session_detail,
     session_to_dict,
 )
@@ -45,6 +47,7 @@ from leanharness.models import (
     get_model_config_status,
     load_model_config,
 )
+from leanharness.runtime import RuntimeEvent
 from leanharness.storage import LocalStore
 
 
@@ -205,19 +208,37 @@ def create_app(
 
         async def ndjson_events() -> AsyncIterator[bytes]:
             content: list[str] = []
-            async for event in stream_chat(
-                message,
-                config=model_config,
-                client_factory=app.state.model_client_factory,
-            ):
-                persist_model_event(store, session, run, event)
-                if event.type == "content.delta" and event.content:
-                    content.append(event.content)
-                if event.type == "turn.completed":
-                    if content:
-                        store.add_message(session.id, "assistant", "".join(content), "complete")
-                    store.update_run(run.id, state="COMPLETED", answer="".join(content))
-                yield _encode_event(event, session_id=session.id, run_id=run.id)
+            last_sequence = -1
+            terminal_seen = False
+            try:
+                async for event in stream_chat(
+                    message,
+                    config=model_config,
+                    client_factory=app.state.model_client_factory,
+                ):
+                    last_sequence = event.sequence
+                    persist_model_event(store, session, run, event)
+                    if event.type == "content.delta" and event.content:
+                        content.append(event.content)
+                    if event.type == "turn.completed":
+                        if content:
+                            store.add_message(
+                                session.id, "assistant", "".join(content), "complete"
+                            )
+                        store.update_run(run.id, state="COMPLETED", answer="".join(content))
+                    terminal_seen = event.type in {"turn.completed", "turn.failed"}
+                    yield _encode_event(event, session_id=session.id, run_id=run.id)
+            except (asyncio.CancelledError, GeneratorExit):
+                if not terminal_seen:
+                    persist_stream_cancellation(
+                        store,
+                        session,
+                        run,
+                        sequence=last_sequence + 1,
+                        mode="chat",
+                        partial_answer="".join(content) or None,
+                    )
+                raise
 
         return StreamingResponse(
             ndjson_events(),
@@ -241,9 +262,31 @@ def create_app(
         store.add_message(session.id, "user", payload.task)
 
         async def ndjson_events() -> AsyncIterator[bytes]:
-            async for event in runtime.run(payload.task):
-                persist_runtime_event(store, session, run_record, event)
-                yield _encode_payload(event.to_dict(), session_id=session.id, run_id=run_record.id)
+            last_sequence = -1
+            terminal_seen = False
+            try:
+                async for event in runtime.run(payload.task):
+                    last_sequence = event.sequence
+                    persist_runtime_event(store, session, run_record, event)
+                    terminal_seen = event.type in {
+                        "run.completed",
+                        "run.incomplete",
+                        "run.failed",
+                        "run.cancelled",
+                    }
+                    yield _encode_payload(
+                        event.to_dict(), session_id=session.id, run_id=run_record.id
+                    )
+            except (asyncio.CancelledError, GeneratorExit):
+                if not terminal_seen:
+                    cancellation = RuntimeEvent(
+                        type="run.cancelled",
+                        sequence=last_sequence + 1,
+                        run_id=run_record.id,
+                        summary="Run cancelled",
+                    )
+                    persist_runtime_event(store, session, run_record, cancellation)
+                raise
 
         return StreamingResponse(
             ndjson_events(),

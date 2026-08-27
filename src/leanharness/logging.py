@@ -12,7 +12,7 @@ from typing import Any
 _REDACTION_PATTERNS = (
     re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"),
     re.compile(r"(?i)((?:api[_-]?key|access[_-]?token|password)\s*[:=]\s*)[^\s,;]+"),
-    re.compile(r"\b(?:sk|gho|ghp|github_pat)_[A-Za-z0-9_-]{12,}\b"),
+    re.compile(r"\b(?:sk[-_]|gho_|ghp_|github_pat_)[A-Za-z0-9_-]{12,}\b"),
 )
 
 

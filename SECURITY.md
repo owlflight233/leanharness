@@ -15,6 +15,9 @@ local server to a network.
 - Subprocesses have time, output, and cancellation bounds.
 - External plugins run in child processes with explicit permissions.
 - Credentials never enter Git, model-visible traces, or frontend responses.
+- Session permission preferences (`inspect`, `approve`, `unrestricted`) are
+  validated and persisted, but this milestone registers read-only tools for
+  every mode.
 
 ## Credentials
 
@@ -26,7 +29,10 @@ committed, revoke it immediately; deleting a later commit is not sufficient.
 
 Log structured event names and safe metadata. Do not log request headers,
 cookies, access tokens, API keys, or the entire process environment. Paths and
-tool output will be bounded and redacted before persistence.
+tool output will be bounded and redacted before persistence. SQLite and JSONL
+share one `TraceRedactor`; raw file contents, environment snapshots, and
+hidden reasoning markers are not stored. Browser or CLI cancellation is
+recorded as a terminal cancelled run when a stream ends early.
 
 ## Reporting
 

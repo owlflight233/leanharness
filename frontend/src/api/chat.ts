@@ -10,27 +10,29 @@ export interface TurnError {
 }
 
 export type TurnEvent =
-  | { type: "turn.started"; sequence: number }
-  | { type: "content.delta"; sequence: number; content: string }
-  | { type: "usage.reported"; sequence: number; usage: Usage }
-  | { type: "turn.completed"; sequence: number; finish_reason?: string }
-  | { type: "turn.failed"; sequence: number; error: TurnError };
+  | { type: "turn.started"; sequence: number; session_id?: string; run_id?: string }
+  | { type: "content.delta"; sequence: number; content: string; session_id?: string; run_id?: string }
+  | { type: "usage.reported"; sequence: number; usage: Usage; session_id?: string; run_id?: string }
+  | { type: "turn.completed"; sequence: number; finish_reason?: string; session_id?: string; run_id?: string }
+  | { type: "turn.failed"; sequence: number; error: TurnError; session_id?: string; run_id?: string };
 
 export type ChatStreamer = (
   message: string,
   onEvent: (event: TurnEvent) => void,
   signal: AbortSignal,
+  sessionId?: string,
 ) => Promise<void>;
 
 export async function streamChat(
   message: string,
   onEvent: (event: TurnEvent) => void,
   signal: AbortSignal,
+  sessionId?: string,
 ): Promise<void> {
   const response = await fetch("/api/v1/chat", {
     method: "POST",
     headers: { Accept: "application/x-ndjson", "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, ...(sessionId ? { session_id: sessionId } : {}) }),
     signal,
   });
   if (!response.ok) {

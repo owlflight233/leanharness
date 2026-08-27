@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from leanharness.errors import InvalidPermissionError, SessionNotFoundError
-from leanharness.storage import LocalStore, default_data_dir, redact_payload
+from leanharness.storage import LocalStore, TraceRedactor, default_data_dir, redact_payload
 
 
 def test_store_migrates_and_recovers_sessions(tmp_path: Path) -> None:
@@ -92,3 +92,36 @@ def test_default_title_is_replaced_only_by_first_task(tmp_path: Path) -> None:
 
     explicit = store.create_session(project, title="我的会话")
     assert apply_first_task_title(store, explicit, "task").title == "我的会话"
+
+
+def test_trace_redactor_removes_secret_shapes_and_hidden_reasoning() -> None:
+    redactor = TraceRedactor(secrets=("test-secret",))
+    payload = {
+        "type": "assistant.progress",
+        "summary": "<think>private plan</think> use test-secret sk-test_123456789012",
+        "analysis": "must not persist",
+    }
+
+    safe = redactor.payload(payload)
+    text = json.dumps(safe, ensure_ascii=False)
+    assert "private plan" not in text
+    assert "test-secret" not in text
+    assert "sk-test_123456789012" not in text
+    assert "analysis" not in safe
+
+
+def test_messages_and_run_records_are_redacted(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path / "data", redactor=TraceRedactor(secrets=("secret-key",)))
+    project = store.ensure_project(tmp_path)
+    session = store.create_session(project)
+    message = store.add_message(
+        session.id, "user", "secret-key <thinking>private plan</thinking> visible"
+    )
+    run = store.create_run(session.id, "chat", "secret-key task", 1)
+    store.update_run(run.id, state="COMPLETED", answer="secret-key answer")
+
+    assert "secret-key" not in message.content
+    assert "private plan" not in message.content
+    assert "secret-key" not in store.get_session(session.id).title
+    assert "secret-key" not in store.list_runs(session.id)[0].task
+    assert "secret-key" not in (store.list_runs(session.id)[0].answer or "")

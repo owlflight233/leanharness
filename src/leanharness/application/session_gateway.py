@@ -65,6 +65,19 @@ def apply_first_task_title(store: LocalStore, session: SessionRecord, task: str)
 
 def session_detail(store: LocalStore, session_id: str) -> dict[str, object]:
     session = store.get_session(session_id)
+    runs = []
+    for run in store.list_runs(session_id):
+        summary = run_to_dict(run)
+        events = store.list_events(run.id)
+        summary["trace"] = [
+            {
+                key: event[key]
+                for key in ("sequence", "type", "step", "tool", "summary", "error")
+                if key in event
+            }
+            for event in events
+        ]
+        runs.append(summary)
     return {
         "session": session_to_dict(session),
         "messages": [
@@ -78,7 +91,7 @@ def session_detail(store: LocalStore, session_id: str) -> dict[str, object]:
             }
             for message in store.list_messages(session_id)
         ],
-        "runs": [run_to_dict(run) for run in store.list_runs(session_id)],
+        "runs": runs,
     }
 
 
@@ -126,3 +139,32 @@ def persist_model_event(
         store.update_run(run.id, state="FAILED", error_code=event.error_code)
     elif event.type == "turn.completed":
         store.update_run(run.id, state="COMPLETED")
+
+
+def persist_stream_cancellation(
+    store: LocalStore,
+    session: SessionRecord,
+    run: RunRecord,
+    *,
+    sequence: int,
+    mode: str,
+    partial_answer: str | None = None,
+) -> None:
+    """Record cancellation when a stream consumer disconnects before a terminal event."""
+
+    event_type = "turn.cancelled" if mode == "chat" else "run.cancelled"
+    summary = "Generation cancelled" if mode == "chat" else "Run cancelled"
+    store.append_event(
+        session.id,
+        run.id,
+        sequence,
+        event_type,
+        {"type": event_type, "sequence": sequence, "run_id": run.id, "summary": summary},
+    )
+    store.add_message(
+        session.id,
+        "assistant",
+        partial_answer or summary,
+        "cancelled",
+    )
+    store.update_run(run.id, state="CANCELLED", answer=partial_answer)

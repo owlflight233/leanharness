@@ -8,7 +8,10 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
+import shutil
 import sqlite3
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,9 +19,44 @@ from pathlib import Path
 from typing import Any
 
 from leanharness.errors import InvalidPermissionError, SessionNotFoundError, StorageError
+from leanharness.logging import redact_text
 
 PERMISSION_MODES = frozenset({"inspect", "approve", "unrestricted"})
 SCHEMA_VERSION = 1
+_TRACE_WRITE_LOCK = threading.Lock()
+_HIDDEN_REASONING_BLOCK = re.compile(
+    r"(?is)<(?:think|thinking)>.*?</(?:think|thinking)>"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TraceRedactor:
+    """Create the single public representation used by SQLite and JSONL traces."""
+
+    secrets: tuple[str, ...] = ()
+    max_text_chars: int = 64_000
+
+    @classmethod
+    def from_environment(cls) -> TraceRedactor:
+        api_key = os.environ.get("LEANHARNESS_MODEL_API_KEY", "")
+        return cls(secrets=(api_key,) if api_key else ())
+
+    def text(self, value: str) -> str:
+        safe = _HIDDEN_REASONING_BLOCK.sub("[hidden reasoning redacted]", value)
+        safe = redact_text(safe)
+        for secret in self.secrets:
+            if secret:
+                safe = safe.replace(secret, "[REDACTED]")
+        if len(safe) > self.max_text_chars:
+            return safe[: self.max_text_chars] + "...[truncated]"
+        return safe
+
+    def payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return _redact_mapping(
+            payload,
+            event_type=str(payload.get("type", "")),
+            redactor=self,
+        )
 
 
 def default_data_dir() -> Path:
@@ -87,10 +125,13 @@ class RunRecord:
 class LocalStore:
     """Small synchronous repository for local, user-owned application state."""
 
-    def __init__(self, data_dir: Path | None = None) -> None:
+    def __init__(
+        self, data_dir: Path | None = None, *, redactor: TraceRedactor | None = None
+    ) -> None:
         self.data_dir = (data_dir or default_data_dir()).expanduser().resolve()
         self.trace_dir = self.data_dir / "traces"
         self.db_path = self.data_dir / "leanharness.sqlite3"
+        self.redactor = redactor or TraceRedactor.from_environment()
         self._connection: sqlite3.Connection | None = None
 
     def __enter__(self) -> LocalStore:
@@ -159,10 +200,12 @@ class LocalStore:
         session_id = str(uuid.uuid4())
         self.connection.execute(
             "INSERT INTO sessions(id, project_id, title, permission_mode, created_at, updated_at) VALUES(?,?,?,?,?,?)",
-            (session_id, project.id, title or "新会话", mode, now, now),
+            (session_id, project.id, self.redactor.text(title or "新会话"), mode, now, now),
         )
         self.connection.commit()
-        return SessionRecord(session_id, project.id, title or "新会话", mode, now, now)
+        return SessionRecord(
+            session_id, project.id, self.redactor.text(title or "新会话"), mode, now, now
+        )
 
     def list_sessions(self, project: ProjectRecord) -> list[SessionRecord]:
         rows = self.connection.execute(
@@ -193,54 +236,45 @@ class LocalStore:
         now = utc_now()
         self.connection.execute(
             "UPDATE sessions SET title = COALESCE(?, title), permission_mode = COALESCE(?, permission_mode), updated_at = ? WHERE id = ?",
-            (title, permission_mode, now, session_id),
+            (
+                self.redactor.text(title) if title is not None else None,
+                permission_mode,
+                now,
+                session_id,
+            ),
         )
         self.connection.commit()
         return self.get_session(session_id)
 
     def delete_session(self, session_id: str) -> None:
         session = self.get_session(session_id)
-        run_ids = [
-            row["id"]
-            for row in self.connection.execute(
-                "SELECT id FROM runs WHERE session_id=?", (session_id,)
-            )
-        ]
         with self.connection:
             self.connection.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-        paths = [self._trace_path(session.project_id, session_id, run_id) for run_id in run_ids]
-        for path in paths:
-            try:
-                if path.exists():
-                    path.unlink()
-            except OSError as exc:
-                raise StorageError("Session trace could not be deleted") from exc
+        trace_session_dir = self.trace_dir / session.project_id / session_id
+        try:
+            if trace_session_dir.exists():
+                shutil.rmtree(trace_session_dir)
+        except OSError as exc:
+            raise StorageError("Session trace could not be deleted") from exc
 
     def add_message(
         self, session_id: str, role: str, content: str, status: str = "complete"
     ) -> MessageRecord:
         self.get_session(session_id)
+        safe_content = self.redactor.text(content)
+        message_id = str(uuid.uuid4())
+        created_at = utc_now()
         row = self.connection.execute(
-            "SELECT COALESCE(MAX(sequence), -1) + 1 AS next_sequence FROM messages WHERE session_id=?",
-            (session_id,),
+            """INSERT INTO messages(id, session_id, sequence, role, content, status, created_at)
+               SELECT ?, ?, COALESCE(MAX(sequence), -1) + 1, ?, ?, ?, ?
+               FROM messages WHERE session_id=? RETURNING sequence""",
+            (message_id, session_id, role, safe_content, status, created_at, session_id),
         ).fetchone()
-        sequence = int(row["next_sequence"])
+        sequence = int(row["sequence"])
         message = MessageRecord(
-            str(uuid.uuid4()), session_id, sequence, role, content, status, utc_now()
+            message_id, session_id, sequence, role, safe_content, status, created_at
         )
         with self.connection:
-            self.connection.execute(
-                "INSERT INTO messages(id, session_id, sequence, role, content, status, created_at) VALUES(?,?,?,?,?,?,?)",
-                (
-                    message.id,
-                    message.session_id,
-                    message.sequence,
-                    message.role,
-                    message.content,
-                    message.status,
-                    message.created_at,
-                ),
-            )
             self.connection.execute(
                 "UPDATE sessions SET updated_at=? WHERE id=?", (message.created_at, session_id)
             )
@@ -272,8 +306,18 @@ class LocalStore:
     def create_run(self, session_id: str, mode: str, task: str, max_steps: int) -> RunRecord:
         self.get_session(session_id)
         now = utc_now()
+        safe_task = self.redactor.text(task)
         run = RunRecord(
-            str(uuid.uuid4()), session_id, mode, task, "CREATED", max_steps, None, None, now, None
+            str(uuid.uuid4()),
+            session_id,
+            mode,
+            safe_task,
+            "CREATED",
+            max_steps,
+            None,
+            None,
+            now,
+            None,
         )
         with self.connection:
             self.connection.execute(
@@ -297,10 +341,11 @@ class LocalStore:
         self, run_id: str, *, state: str, answer: str | None = None, error_code: str | None = None
     ) -> RunRecord:
         now = utc_now() if state in {"COMPLETED", "EXHAUSTED", "FAILED", "CANCELLED"} else None
+        safe_answer = self.redactor.text(answer) if answer is not None else None
         with self.connection:
             self.connection.execute(
                 "UPDATE runs SET state=?, answer=COALESCE(?,answer), error_code=COALESCE(?,error_code), finished_at=COALESCE(?,finished_at) WHERE id=?",
-                (state, answer, error_code, now, run_id),
+                (state, safe_answer, error_code, now, run_id),
             )
         row = self.connection.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if not row:
@@ -326,7 +371,7 @@ class LocalStore:
     def append_event(
         self, session_id: str, run_id: str, sequence: int, event_type: str, payload: dict[str, Any]
     ) -> None:
-        safe = redact_payload(payload)
+        safe = self.redactor.payload(payload)
         with self.connection:
             self.connection.execute(
                 "INSERT INTO run_events(run_id, sequence, event_type, payload_json, created_at) VALUES(?,?,?,?,?)",
@@ -340,17 +385,22 @@ class LocalStore:
             )
         try:
             path = self.trace_path(session_id, run_id)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(
-                    json.dumps(
-                        {"sequence": sequence, "type": event_type, **safe},
-                        ensure_ascii=False,
-                        separators=(",", ":"),
+            with _TRACE_WRITE_LOCK:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        json.dumps(
+                            {"sequence": sequence, "type": event_type, **safe},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
                     )
-                    + "\n"
-                )
         except OSError as exc:
+            with self.connection:
+                self.connection.execute(
+                    "DELETE FROM run_events WHERE run_id=? AND sequence=?", (run_id, sequence)
+                )
             raise StorageError("Run trace could not be written") from exc
 
     def list_runs(self, session_id: str) -> list[RunRecord]:
@@ -445,26 +495,33 @@ def _validate_permission(value: str) -> None:
 
 def redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Keep public event metadata while removing secrets and raw tool content."""
-    return _redact_mapping(payload, event_type=str(payload.get("type", "")))
+    return TraceRedactor.from_environment().payload(payload)
 
 
-def _redact_mapping(value: dict[str, Any], *, event_type: str) -> dict[str, Any]:
+def _redact_mapping(
+    value: dict[str, Any], *, event_type: str, redactor: TraceRedactor
+) -> dict[str, Any]:
     result: dict[str, Any] = {}
     forbidden = {"api_key", "authorization", "headers", "environment", "env", "cookie"}
+    hidden_reasoning = {"analysis", "chain_of_thought", "reasoning", "thinking"}
     for key, item in value.items():
-        if key.casefold() in forbidden:
+        if key.casefold() in forbidden | hidden_reasoning:
             continue
         if key == "content" and event_type.startswith("tool"):
             result[key] = "[tool result redacted]"
         elif isinstance(item, dict):
-            result[key] = _redact_mapping(item, event_type=event_type)
+            result[key] = _redact_mapping(item, event_type=event_type, redactor=redactor)
         elif isinstance(item, list):
             result[key] = [
-                _redact_mapping(entry, event_type=event_type) if isinstance(entry, dict) else entry
+                _redact_mapping(entry, event_type=event_type, redactor=redactor)
+                if isinstance(entry, dict)
+                else redactor.text(entry)
+                if isinstance(entry, str)
+                else entry
                 for entry in item[:100]
             ]
-        elif key in {"content", "answer", "summary"} and isinstance(item, str):
-            result[key] = item[:64_000] + ("...[truncated]" if len(item) > 64_000 else "")
+        elif isinstance(item, str):
+            result[key] = redactor.text(item)
         else:
             result[key] = item
     return result

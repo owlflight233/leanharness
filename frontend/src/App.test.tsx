@@ -1,12 +1,13 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import App from "./App";
+import App, { type SessionClient } from "./App";
 import type { ChatStreamer } from "./api/chat";
 import type { HealthLoader, HealthResponse } from "./api/health";
 import type { ModelStatusLoader } from "./api/model";
 import type { RunStreamer } from "./api/run";
+import type { PermissionMode, SessionDetail, SessionSummary } from "./api/sessions";
 
 const healthy: HealthResponse = {
   status: "ok",
@@ -26,6 +27,76 @@ const unconfiguredModel: ModelStatusLoader = async () => ({
   configured: false,
   protocol: "openai-compatible",
   model: null,
+});
+
+const baseSession: SessionSummary = {
+  id: "session-1",
+  project_id: "project-1",
+  title: "分析仓库结构",
+  permission_mode: "inspect",
+  created_at: "2026-08-27T10:00:00+00:00",
+  updated_at: "2026-08-27T10:00:00+00:00",
+  last_run_state: "COMPLETED",
+};
+
+function sessionDetail(session = baseSession): SessionDetail {
+  return {
+    session,
+    messages: [
+      {
+        id: "message-1",
+        sequence: 0,
+        role: "user",
+        content: "分析仓库结构",
+        status: "complete",
+        created_at: session.created_at,
+      },
+      {
+        id: "message-2",
+        sequence: 1,
+        role: "assistant",
+        content: "已保存的结论",
+        status: "complete",
+        created_at: session.updated_at,
+      },
+    ],
+    runs: [
+      {
+        id: "run-1",
+        session_id: session.id,
+        mode: "inspect",
+        task: "分析仓库结构",
+        state: "COMPLETED",
+        max_steps: 24,
+        answer: "已保存的结论",
+        error_code: null,
+        started_at: session.created_at,
+        finished_at: session.updated_at,
+      },
+    ],
+  };
+}
+
+function mockSessionClient(initial = baseSession): SessionClient {
+  let current = initial;
+  return {
+    list: vi.fn(async () => [current]),
+    get: vi.fn(async () => sessionDetail(current)),
+    create: vi.fn(async (permissionMode: PermissionMode = "inspect") => {
+      current = { ...baseSession, id: "session-new", title: "新会话", permission_mode: permissionMode };
+      return current;
+    }),
+    update: vi.fn(async (_id, patch) => {
+      current = { ...current, ...patch };
+      return current;
+    }),
+    delete: vi.fn(async (id) => ({ deleted: true, session_id: id })),
+  };
+}
+
+beforeEach(() => {
+  window.localStorage.clear();
+  vi.restoreAllMocks();
 });
 
 describe("application shell", () => {
@@ -173,5 +244,108 @@ describe("application shell", () => {
     expect(await screen.findByText("仓库包含 README。")).toBeInTheDocument();
     expect(screen.getByText("读取 README")).toBeInTheDocument();
     expect(screen.getByText(/tool.completed: workspace_read/)).toBeInTheDocument();
+  });
+
+  it("restores the most recent persisted session and its run summary", async () => {
+    const client = mockSessionClient();
+    window.localStorage.setItem("leanharness.session", baseSession.id);
+
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        sessionClient={client}
+      />,
+    );
+
+    expect(await screen.findByText("已保存的结论")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "轨迹" }));
+    expect(screen.getByText("COMPLETED: 分析仓库结构")).toBeInTheDocument();
+    expect(client.get).toHaveBeenCalledWith(baseSession.id);
+  });
+
+  it("creates a new session using the selected permission", async () => {
+    const user = userEvent.setup();
+    const client = mockSessionClient();
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        sessionClient={client}
+      />,
+    );
+    await screen.findByText("已保存的结论");
+    await user.selectOptions(screen.getByLabelText("权限"), "approve");
+    await user.click(screen.getByRole("button", { name: "新建会话" }));
+
+    await waitFor(() => expect(client.create).toHaveBeenCalledWith("approve"));
+    expect(window.localStorage.getItem("leanharness.session")).toBe("session-new");
+  });
+
+  it("renames a session and saves permission changes", async () => {
+    const user = userEvent.setup();
+    const client = mockSessionClient();
+    vi.spyOn(window, "prompt").mockReturnValue("新的名称");
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        sessionClient={client}
+      />,
+    );
+    await screen.findByText("已保存的结论");
+
+    await user.click(screen.getByRole("button", { name: `重命名会话 ${baseSession.title}` }));
+    expect((await screen.findAllByText("新的名称")).length).toBeGreaterThanOrEqual(1);
+    await user.selectOptions(screen.getByLabelText("权限"), "unrestricted");
+    await waitFor(() =>
+      expect(client.update).toHaveBeenCalledWith(baseSession.id, {
+        permission_mode: "unrestricted",
+      }),
+    );
+  });
+
+  it("requires confirmation before deleting one session", async () => {
+    const user = userEvent.setup();
+    const client = mockSessionClient();
+    const confirmation = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        sessionClient={client}
+      />,
+    );
+    await screen.findByText("已保存的结论");
+    const deleteButton = screen.getByRole("button", { name: `删除会话 ${baseSession.title}` });
+
+    await user.click(deleteButton);
+    expect(client.delete).not.toHaveBeenCalled();
+    await user.click(deleteButton);
+    expect(confirmation).toHaveBeenCalledTimes(2);
+    expect(client.delete).toHaveBeenCalledWith(baseSession.id);
+  });
+
+  it("binds the active session to chat requests", async () => {
+    const user = userEvent.setup();
+    const client = mockSessionClient();
+    const chat = vi.fn<ChatStreamer>(async (_message, onEvent) => {
+      onEvent({ type: "turn.started", sequence: 0, session_id: baseSession.id, run_id: "run-2" });
+      onEvent({ type: "turn.completed", sequence: 1, session_id: baseSession.id, run_id: "run-2" });
+    });
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        chatStreamer={chat}
+        sessionClient={client}
+      />,
+    );
+    await screen.findByText("已保存的结论");
+    await user.type(screen.getByLabelText("任务输入"), "继续分析");
+    await user.click(screen.getByRole("button", { name: "发送任务" }));
+
+    await waitFor(() => expect(chat).toHaveBeenCalled());
+    expect(chat.mock.calls[0]?.[3]).toBe(baseSession.id);
   });
 });

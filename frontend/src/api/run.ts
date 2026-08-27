@@ -3,6 +3,7 @@ import type { TurnError, Usage } from "./chat";
 interface RunEventBase {
   sequence: number;
   run_id: string;
+  session_id?: string;
   step?: number;
 }
 
@@ -26,6 +27,7 @@ export type RunStreamer = (
   onEvent: (event: RunEvent) => void,
   signal: AbortSignal,
   maxSteps?: number,
+  sessionId?: string,
 ) => Promise<void>;
 
 export async function streamRun(
@@ -33,11 +35,12 @@ export async function streamRun(
   onEvent: (event: RunEvent) => void,
   signal: AbortSignal,
   maxSteps = 24,
+  sessionId?: string,
 ): Promise<void> {
   const response = await fetch("/api/v1/runs", {
     method: "POST",
     headers: { Accept: "application/x-ndjson", "Content-Type": "application/json" },
-    body: JSON.stringify({ task, max_steps: maxSteps }),
+    body: JSON.stringify({ task, max_steps: maxSteps, ...(sessionId ? { session_id: sessionId } : {}) }),
     signal,
   });
   if (!response.ok) throw new Error(await readApiError(response));

@@ -6,6 +6,7 @@ from leanharness.storage.store import (
     ProjectRecord,
     RunRecord,
     SessionRecord,
+    TraceRedactor,
     default_data_dir,
     redact_payload,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "ProjectRecord",
     "RunRecord",
     "SessionRecord",
+    "TraceRedactor",
     "default_data_dir",
     "redact_payload",
 ]

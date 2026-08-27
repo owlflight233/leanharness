@@ -182,6 +182,63 @@ textarea:focus-visible {
   color: var(--muted);
 }
 
+.session-error {
+  margin: 4px 0 8px;
+  color: var(--danger);
+  font-size: 11px;
+}
+
+.session-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  margin: 2px 0;
+  border-radius: 5px;
+}
+
+.session-row.active {
+  background: var(--accent-soft);
+}
+
+.session-select {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  padding: 7px 5px;
+  border: 0;
+  gap: 7px;
+  color: #58625f;
+  background: transparent;
+  text-align: left;
+  font-size: 11px;
+}
+
+.session-select span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-menu {
+  display: grid;
+  width: 24px;
+  height: 26px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+}
+
+.session-menu:not(:disabled):hover {
+  color: var(--accent-dark);
+}
+
+.session-menu.danger:not(:disabled):hover {
+  color: var(--danger);
+}
+
 .rail-footer {
   padding: 8px;
   border-top: 1px solid var(--border);
@@ -424,6 +481,25 @@ textarea:focus-visible {
 .composer-state {
   flex: 1;
   color: var(--muted);
+  font-size: 11px;
+}
+
+.composer-settings {
+  display: flex;
+  align-items: center;
+  margin-right: 10px;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.composer-settings select {
+  max-width: 176px;
+  padding: 4px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  background: var(--surface);
   font-size: 11px;
 }
 
@@ -740,6 +816,14 @@ textarea:focus-visible {
   .message-list {
     width: calc(100% - 20px);
     padding-top: 12px;
+  }
+
+  .composer-settings label {
+    display: none;
+  }
+
+  .composer-settings select {
+    max-width: 132px;
   }
 }
 

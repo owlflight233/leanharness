@@ -7,10 +7,10 @@ engineering assessment.
 ## Current status
 
 The current milestone provides an installable Python package, environment
-diagnostics, a provider-independent model gateway, ephemeral single-turn
-streaming chat, and a bounded read-only inspection loop through both the CLI
-and responsive local web interface. File mutation, shell execution, persistent
-sessions, and plugins remain intentionally out of scope.
+diagnostics, a provider-independent model gateway, single-turn streaming chat,
+a bounded read-only inspection loop, and persistent local sessions through both
+the CLI and responsive local web interface. File mutation, shell execution,
+Plan Mode, and plugins remain intentionally out of scope.
 
 ## Prerequisites
 
@@ -87,9 +87,27 @@ uv run leanharness serve
 
 `LEANHARNESS_MODEL_API_KEY` may be omitted for a local endpoint that does not
 require authentication. Plain HTTP is accepted only for `localhost`,
-`127.0.0.1`, or `::1`. Chat is currently stateless and does not read or modify
-the selected workspace. The `run` command and the Web inspection mode perform
-read-only workspace inspection with bounded steps and no persistence.
+`127.0.0.1`, or `::1`. Chat and inspection runs persist public messages,
+summaries, and redacted event traces locally, but old messages are never
+injected into a later model request. The selected workspace is only inspected,
+never modified.
+
+## Local data
+
+Sessions and audit records use SQLite plus append-only JSONL traces. The default
+location is `%LOCALAPPDATA%\\LeanHarness` on Windows,
+`~/Library/Application Support/LeanHarness` on macOS, and
+`${XDG_DATA_HOME:-~/.local/share}/leanharness` on Linux. Set
+`LEANHARNESS_DATA_DIR` or pass `--data-dir` for a portable/test location.
+
+Session commands are available from the CLI:
+
+```sh
+uv run leanharness session list
+uv run leanharness session new --title "Repository review"
+uv run leanharness session rename SESSION_ID "New title"
+uv run leanharness session delete SESSION_ID
+```
 
 For frontend development, keep the Python server on port 4318 and run
 `pnpm dev` from `frontend/`; Vite proxies `/api` to the local server.
