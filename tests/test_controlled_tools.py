@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+from leanharness.models import ToolCall
+from leanharness.permissions.policy import PermissionMode
+from leanharness.tools import ToolRegistry
+
+
+def call(name: str, **arguments: object) -> ToolCall:
+    return ToolCall(id=f"call-{name}", name=name, arguments=arguments)
+
+
+def test_patch_creates_modifies_and_deletes_utf8_files(tmp_path: Path) -> None:
+    (tmp_path / "old.txt").write_text("old\nkeep\n", encoding="utf-8")
+    (tmp_path / "delete.txt").write_text("bye\n", encoding="utf-8")
+    registry = ToolRegistry(tmp_path, mode=PermissionMode.UNRESTRICTED)
+    patch = """--- a/old.txt
++++ b/old.txt
+@@ -1,2 +1,2 @@
+-old
++new
+ keep
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,2 @@
++hello
++世界
+--- a/delete.txt
++++ /dev/null
+@@ -1,1 +0,0 @@
+-bye
+"""
+
+    result = registry.execute(call("workspace_patch", patch=patch))
+
+    assert result.ok is True
+    assert (tmp_path / "old.txt").read_text(encoding="utf-8") == "new\nkeep\n"
+    assert (tmp_path / "new.txt").read_text(encoding="utf-8") == "hello\n世界\n"
+    assert not (tmp_path / "delete.txt").exists()
+    assert result.public_metadata["created"] == 1
+    assert result.public_metadata["deleted"] == 1
+
+
+def test_patch_validates_all_hunks_before_writing(tmp_path: Path) -> None:
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("one\n", encoding="utf-8")
+    second.write_text("two\n", encoding="utf-8")
+    patch = """--- a/first.txt
++++ b/first.txt
+@@ -1 +1 @@
+-one
++changed
+--- a/second.txt
++++ b/second.txt
+@@ -1 +1 @@
+-stale
++changed
+"""
+
+    result = ToolRegistry(tmp_path, mode=PermissionMode.UNRESTRICTED).execute(
+        call("workspace_patch", patch=patch)
+    )
+
+    assert result.ok is False and result.error is not None
+    assert result.error.code == "PATCH_CONTEXT_MISMATCH"
+    assert first.read_text(encoding="utf-8") == "one\n"
+    assert second.read_text(encoding="utf-8") == "two\n"
+
+
+@pytest.mark.parametrize(
+    ("patch", "code"),
+    [
+        ("--- a/../escape.txt\n+++ b/../escape.txt\n@@ -0,0 +1 @@\n+x\n", "PATH_OUTSIDE_WORKSPACE"),
+        ("--- a/a.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-a\n+b\n", "PATCH_RENAME_DENIED"),
+    ],
+)
+def test_patch_rejects_unsafe_paths(tmp_path: Path, patch: str, code: str) -> None:
+    (tmp_path / "a.txt").write_text("a\n", encoding="utf-8")
+    result = ToolRegistry(tmp_path, mode=PermissionMode.UNRESTRICTED).execute(
+        call("workspace_patch", patch=patch)
+    )
+    assert result.ok is False and result.error is not None and result.error.code == code
+
+
+def test_patch_approval_snapshot_detects_external_change(tmp_path: Path) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("before\n", encoding="utf-8")
+    registry = ToolRegistry(tmp_path, mode=PermissionMode.APPROVE)
+    tool_call = call(
+        "workspace_patch",
+        patch="--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-before\n+after\n",
+    )
+    preview = registry.preview(tool_call)
+    source.write_text("external\n", encoding="utf-8")
+
+    result = registry.execute_approved(
+        tool_call, expected_hashes=preview["target_hashes"]  # type: ignore[arg-type]
+    )
+
+    assert result.ok is False and result.error is not None
+    assert result.error.code == "PATCH_STALE"
+    assert source.read_text(encoding="utf-8") == "external\n"
+
+
+def test_inspect_mode_registers_only_read_tools(tmp_path: Path) -> None:
+    registry = ToolRegistry(tmp_path, mode=PermissionMode.INSPECT)
+    names = {definition.name for definition in registry.definitions}
+    assert "git_inspect" in names
+    assert "workspace_patch" not in names
+    assert "workspace_command" not in names
+
+
+def test_command_rejects_unknown_profiles_and_dangerous_arguments(tmp_path: Path) -> None:
+    registry = ToolRegistry(tmp_path, mode=PermissionMode.UNRESTRICTED)
+
+    unknown = registry.execute(call("workspace_command", profile="powershell"))
+    dangerous = registry.execute(
+        call("workspace_command", profile="pytest", args=["tests", "&&", "whoami"])
+    )
+
+    assert unknown.error is not None and unknown.error.code == "COMMAND_NOT_ALLOWED"
+    assert dangerous.error is not None and dangerous.error.code == "COMMAND_ARGUMENT_DENIED"
+
+
+def test_command_uses_minimal_environment_and_captures_nonzero(tmp_path: Path) -> None:
+    os.environ["LEANHARNESS_MODEL_API_KEY"] = "must-not-be-inherited"
+    registry = ToolRegistry(tmp_path, mode=PermissionMode.UNRESTRICTED)
+    result = registry.execute(
+        call("workspace_command", profile="python-test", args=["missing-test-file.py"])
+    )
+    assert result.ok is False and result.error is not None
+    assert result.error.code == "COMMAND_FAILED"
+    assert result.to_model_dict()["result"]["exit_code"] != 0
+    assert "must-not-be-inherited" not in str(result)
+
+
+def test_git_inspect_reports_status_and_rejects_writes(tmp_path: Path) -> None:
+    os.system(f'git -C "{tmp_path}" init -q')
+    (tmp_path / "tracked.txt").write_text("content\n", encoding="utf-8")
+    registry = ToolRegistry(tmp_path)
+
+    status = registry.execute(call("git_inspect", operation="status"))
+    denied = registry.execute(call("git_inspect", operation="commit"))
+
+    assert status.ok is True and status.data is not None
+    assert "tracked.txt" in status.data["output"]
+    assert denied.ok is False and denied.error is not None
+    assert denied.error.code == "GIT_OPERATION_DENIED"

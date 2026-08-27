@@ -152,11 +152,12 @@ def test_symlink_escape_is_rejected_when_supported(tmp_path: Path) -> None:
     assert result.error is not None and result.error.code == "PATH_OUTSIDE_WORKSPACE"
 
 
-def test_tool_definitions_expose_only_read_capabilities(tmp_path: Path) -> None:
+def test_tool_definitions_expose_only_inspection_capabilities(tmp_path: Path) -> None:
     definitions = ToolRegistry(tmp_path).definitions
 
     assert [definition.name for definition in definitions] == [
         "workspace_list",
         "workspace_read",
         "workspace_search",
+        "git_inspect",
     ]

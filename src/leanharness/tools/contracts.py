@@ -38,6 +38,8 @@ class ToolResult:
             payload["result"] = self.data
         elif self.error is not None:
             payload["error"] = self.error.to_dict()
+            if self.data is not None:
+                payload["result"] = self.data
         return payload
 
     def to_model_content(self) -> str:

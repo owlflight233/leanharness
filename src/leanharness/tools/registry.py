@@ -7,6 +7,7 @@ from pathlib import Path
 from leanharness.models import ToolCall, ToolDefinition
 from leanharness.permissions.policy import PermissionMode, authorize_tool
 from leanharness.tools.contracts import BuiltinTool, ToolErrorInfo, ToolExecutionError, ToolResult
+from leanharness.tools.controlled import GitInspectTool, WorkspaceCommandTool, WorkspacePatchTool
 from leanharness.tools.workspace import (
     WorkspaceBoundary,
     WorkspaceListTool,
@@ -22,9 +23,16 @@ class ToolRegistry:
             WorkspaceListTool(boundary),
             WorkspaceReadTool(boundary),
             WorkspaceSearchTool(boundary),
+            GitInspectTool(boundary),
+            WorkspacePatchTool(boundary),
+            WorkspaceCommandTool(boundary),
         )
-        self._tools = {tool.definition.name: tool for tool in builtins}
         self._mode = mode
+        self._tools = {
+            tool.definition.name: tool
+            for tool in builtins
+            if authorize_tool(mode, tool.definition.name).allowed
+        }
 
     @property
     def definitions(self) -> tuple[ToolDefinition, ...]:
@@ -53,6 +61,31 @@ class ToolRegistry:
                     recoverable=False,
                 ),
             )
+
+    def approval_required(self, call: ToolCall) -> bool:
+        return authorize_tool(self._mode, call.name).requires_approval
+
+    def preview(self, call: ToolCall) -> dict[str, object]:
+        tool = self._tools.get(call.name)
+        if tool is None:
+            raise ToolExecutionError("TOOL_NOT_FOUND", "Unknown tool")
+        preview = getattr(tool, "preview", None)
+        if preview is None:
+            return {"tool": call.name}
+        return preview(call.arguments)
+
+    def execute_approved(
+        self, call: ToolCall, *, expected_hashes: dict[str, str | None] | None = None
+    ) -> ToolResult:
+        tool = self._tools.get(call.name)
+        if tool is None:
+            return _error_result(call, ToolExecutionError("TOOL_NOT_FOUND", "Unknown tool"))
+        try:
+            if isinstance(tool, WorkspacePatchTool):
+                return tool.execute(call.id, call.arguments, expected_hashes=expected_hashes)
+            return tool.execute(call.id, call.arguments)
+        except ToolExecutionError as exc:
+            return _error_result(call, exc)
 
 
 def _error_result(call: ToolCall, exc: ToolExecutionError) -> ToolResult:

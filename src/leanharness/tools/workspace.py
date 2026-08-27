@@ -54,6 +54,32 @@ class WorkspaceBoundary:
         relative = resolved.relative_to(self.root).as_posix()
         return resolved, relative or "."
 
+    def resolve_output(self, value: object) -> tuple[Path, str]:
+        """Resolve a possibly new file while rejecting every symlinked path component."""
+
+        path_text = _require_string(value, "path")
+        relative = Path(path_text)
+        if relative.is_absolute() or relative.drive or ".." in relative.parts:
+            raise ToolExecutionError(
+                "PATH_OUTSIDE_WORKSPACE", "Path must stay inside the workspace"
+            )
+        candidate = self.root.joinpath(relative)
+        current = self.root
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ToolExecutionError("PATH_SYMLINK", "Symbolic links cannot be modified")
+        try:
+            resolved_parent = candidate.parent.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ToolExecutionError("PATH_NOT_FOUND", "Parent directory does not exist") from exc
+        if not resolved_parent.is_relative_to(self.root):
+            raise ToolExecutionError(
+                "PATH_OUTSIDE_WORKSPACE", "Path must stay inside the workspace"
+            )
+        normalized = candidate.relative_to(self.root).as_posix()
+        return candidate, normalized
+
 
 class WorkspaceListTool:
     definition = ToolDefinition(
