@@ -11,6 +11,12 @@ from pathlib import Path
 from leanharness import __version__
 from leanharness.application.agent_gateway import create_inspection_run
 from leanharness.application.model_gateway import check_model, stream_chat
+from leanharness.application.session_gateway import (
+    apply_first_task_title,
+    ensure_session,
+    persist_model_event,
+    persist_runtime_event,
+)
 from leanharness.cli.doctor import collect_diagnostics
 from leanharness.config import (
     DEFAULT_HOST,
@@ -23,6 +29,7 @@ from leanharness.errors import LeanHarnessError, ModelError, ModelNotConfiguredE
 from leanharness.logging import configure_logging
 from leanharness.models import ModelConfig, load_model_config
 from leanharness.runtime.loop import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, MIN_MAX_STEPS
+from leanharness.storage import LocalStore
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--workspace",
         help="Workspace directory; defaults to the current directory.",
     )
+    doctor_parser.add_argument("--data-dir", help="Local application data directory.")
 
     serve_parser = subparsers.add_parser("serve", help="Start the local LeanHarness web server.")
     serve_parser.add_argument(
@@ -64,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"),
         help="Structured log threshold.",
     )
+    serve_parser.add_argument("--data-dir", help="Local application data directory.")
 
     model_parser = subparsers.add_parser("model", help="Inspect the configured model gateway.")
     model_subparsers = model_parser.add_subparsers(dest="model_command", required=True)
@@ -71,6 +80,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat_parser = subparsers.add_parser("chat", help="Run one ephemeral streaming model turn.")
     chat_parser.add_argument("message", help="User message (1 to 32000 characters).")
+    chat_parser.add_argument("--session", dest="session_id", help="Existing session ID.")
+    chat_parser.add_argument("--data-dir", help="Local application data directory.")
     run_parser = subparsers.add_parser(
         "run", help="Inspect a workspace with the read-only agent loop."
     )
@@ -85,10 +96,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_STEPS,
         choices=range(MIN_MAX_STEPS, MAX_MAX_STEPS + 1),
         help=(
-            f"Model request budget ({MIN_MAX_STEPS}-{MAX_MAX_STEPS}, "
-            f"default: {DEFAULT_MAX_STEPS})."
+            f"Model request budget ({MIN_MAX_STEPS}-{MAX_MAX_STEPS}, default: {DEFAULT_MAX_STEPS})."
         ),
     )
+    run_parser.add_argument("--session", dest="session_id", help="Existing session ID.")
+    run_parser.add_argument("--data-dir", help="Local application data directory.")
+
+    session_parser = subparsers.add_parser("session", help="Manage local persistent sessions.")
+    session_subparsers = session_parser.add_subparsers(dest="session_command", required=True)
+    list_parser = session_subparsers.add_parser("list", help="List sessions for a workspace.")
+    list_parser.add_argument("--workspace")
+    list_parser.add_argument("--data-dir")
+    new_parser = session_subparsers.add_parser("new", help="Create a session.")
+    new_parser.add_argument("--workspace")
+    new_parser.add_argument("--data-dir")
+    new_parser.add_argument("--title", default="新会话")
+    new_parser.add_argument(
+        "--permission", default="inspect", choices=("inspect", "approve", "unrestricted")
+    )
+    rename_parser = session_subparsers.add_parser("rename", help="Rename a session.")
+    rename_parser.add_argument("session_id")
+    rename_parser.add_argument("title")
+    rename_parser.add_argument("--data-dir")
+    delete_parser = session_subparsers.add_parser("delete", help="Delete a session.")
+    delete_parser.add_argument("session_id")
+    delete_parser.add_argument("--data-dir")
     return parser
 
 
@@ -100,7 +132,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "doctor":
             workspace = resolve_workspace(args.workspace)
-            checks = collect_diagnostics(workspace)
+            checks = (
+                collect_diagnostics(workspace, data_dir=args.data_dir)
+                if args.data_dir
+                else collect_diagnostics(workspace)
+            )
             for check in checks:
                 marker = "PASS" if check.ok else "FAIL"
                 print(f"[{marker}] {check.name}: {check.detail}")
@@ -112,6 +148,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 host=args.host,
                 port=args.port,
                 log_level=args.log_level,
+                data_dir=args.data_dir,
             )
             return _serve(config)
 
@@ -120,10 +157,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "chat":
             model_config = load_model_config()
-            return asyncio.run(_chat(args.message, model_config))
+            workspace = resolve_workspace(None)
+            return asyncio.run(
+                _chat(args.message, model_config, workspace, args.session_id, args.data_dir)
+            )
         if args.command == "run":
             workspace = resolve_workspace(args.workspace)
-            return asyncio.run(_inspect(args.task, workspace, args.max_steps))
+            return asyncio.run(
+                _inspect(args.task, workspace, args.max_steps, args.session_id, args.data_dir)
+            )
+        if args.command == "session":
+            return _session_command(args)
     except LeanHarnessError as exc:
         print(f"error [{exc.code}]: {exc.message}", file=sys.stderr)
         return 2
@@ -179,12 +223,24 @@ async def _check_model() -> int:
     return 0
 
 
-async def _chat(message: str, config: ModelConfig) -> int:
+async def _chat(
+    message: str, config: ModelConfig, workspace: Path, session_id: str | None, data_dir: str | None
+) -> int:
+    store = LocalStore(Path(data_dir).expanduser() if data_dir else None)
+    _, session = ensure_session(store, workspace, session_id)
+    session = apply_first_task_title(store, session, message)
+    run = store.create_run(session.id, "chat", message, 1)
+    store.add_message(session.id, "user", message)
+    print(f"[session] {session.id}", file=sys.stderr)
+    print(f"[run] {run.id}", file=sys.stderr)
     wrote_content = False
     failed = False
+    content: list[str] = []
     async for event in stream_chat(message, config=config):
+        persist_model_event(store, session, run, event)
         if event.type == "content.delta" and event.content:
             print(event.content, end="", flush=True)
+            content.append(event.content)
             wrote_content = True
         elif event.type == "usage.reported" and event.usage:
             total = event.usage.total_tokens
@@ -198,14 +254,27 @@ async def _chat(message: str, config: ModelConfig) -> int:
             print(f"error [{error_code}]: {error_message}", file=sys.stderr)
             failed = True
     if wrote_content and not failed:
+        store.add_message(session.id, "assistant", "".join(content), "complete")
+        store.update_run(run.id, state="COMPLETED", answer="".join(content))
+    if wrote_content and not failed:
         print()
     return 3 if failed else 0
 
 
-async def _inspect(task: str, workspace: Path, max_steps: int) -> int:
-    runtime = create_inspection_run(task, workspace, max_steps=max_steps)
+async def _inspect(
+    task: str, workspace: Path, max_steps: int, session_id: str | None, data_dir: str | None
+) -> int:
+    store = LocalStore(Path(data_dir).expanduser() if data_dir else None)
+    _, session = ensure_session(store, workspace, session_id)
+    session = apply_first_task_title(store, session, task)
+    run = store.create_run(session.id, "inspect", task, max_steps)
+    store.add_message(session.id, "user", task)
+    print(f"[session] {session.id}", file=sys.stderr)
+    print(f"[run] {run.id}", file=sys.stderr)
+    runtime = create_inspection_run(task, workspace, max_steps=max_steps, run_id=run.id)
     exit_code = 0
     async for event in runtime.run(task):
+        persist_runtime_event(store, session, run, event)
         if event.type == "assistant.progress":
             print(f"[step {event.step}] {event.summary}", file=sys.stderr)
         elif event.type == "tool.requested":
@@ -231,3 +300,31 @@ async def _inspect(task: str, workspace: Path, max_steps: int) -> int:
             print("Run cancelled", file=sys.stderr)
             exit_code = 130
     return exit_code
+
+
+def _session_command(args: argparse.Namespace) -> int:
+    data_dir = Path(args.data_dir).expanduser() if getattr(args, "data_dir", None) else None
+    with LocalStore(data_dir) as store:
+        if args.session_command in {"list", "new"}:
+            workspace = resolve_workspace(getattr(args, "workspace", None))
+            project = store.ensure_project(workspace)
+            if args.session_command == "list":
+                for session in store.list_sessions(project):
+                    print(
+                        f"{session.id}\t{session.title}\t{session.permission_mode}\t"
+                        f"{session.last_run_state or '-'}"
+                    )
+                return 0
+            session = store.create_session(
+                project, title=args.title, permission_mode=args.permission
+            )
+            print(session.id)
+            return 0
+        if args.session_command == "rename":
+            print(store.update_session(args.session_id, title=args.title).id)
+            return 0
+        if args.session_command == "delete":
+            store.delete_session(args.session_id)
+            print(args.session_id)
+            return 0
+    return 0

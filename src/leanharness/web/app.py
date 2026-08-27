@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -20,12 +21,23 @@ from leanharness.application.model_gateway import (
     stream_chat,
     validate_chat_message,
 )
+from leanharness.application.session_gateway import (
+    apply_first_task_title,
+    ensure_session,
+    persist_model_event,
+    persist_runtime_event,
+    session_detail,
+    session_to_dict,
+)
 from leanharness.config import AppConfig
 from leanharness.errors import (
     ChatInputError,
+    InvalidPermissionError,
     LeanHarnessError,
     ModelNotConfiguredError,
     RunInputError,
+    SessionNotFoundError,
+    StorageError,
 )
 from leanharness.models import (
     ModelEvent,
@@ -33,15 +45,28 @@ from leanharness.models import (
     get_model_config_status,
     load_model_config,
 )
+from leanharness.storage import LocalStore
 
 
 class ChatRequest(BaseModel):
     message: str
+    session_id: str | None = None
 
 
 class RunRequest(BaseModel):
     task: str
     max_steps: int = 24
+    session_id: str | None = None
+
+
+class SessionCreateRequest(BaseModel):
+    title: str | None = None
+    permission_mode: str = "inspect"
+
+
+class SessionUpdateRequest(BaseModel):
+    title: str | None = None
+    permission_mode: str | None = None
 
 
 def default_frontend_dir() -> Path:
@@ -58,22 +83,38 @@ def create_app(
 ) -> FastAPI:
     """Create the local API without broad cross-origin access."""
 
+    store = LocalStore(config.data_dir)
+    store.open()
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        store.close()
+
     app = FastAPI(
         title="LeanHarness API",
         version=__version__,
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
         redoc_url=None,
+        lifespan=lifespan,
     )
     app.state.config = config
     app.state.frontend_dir = (frontend_dir or default_frontend_dir()).resolve()
     app.state.model_client_factory = model_client_factory
+    app.state.store = store
 
     @app.exception_handler(LeanHarnessError)
     async def application_error(_request: Request, exc: LeanHarnessError) -> JSONResponse:
         status_code = 503 if isinstance(exc, ModelNotConfiguredError) else 502
         if isinstance(exc, ChatInputError | RunInputError):
             status_code = 422
+        elif isinstance(exc, SessionNotFoundError):
+            status_code = 404
+        elif isinstance(exc, InvalidPermissionError):
+            status_code = 422
+        elif isinstance(exc, StorageError):
+            status_code = 500
         return JSONResponse(
             status_code=status_code,
             content={"error": {"code": exc.code, "message": exc.message}},
@@ -109,6 +150,44 @@ def create_app(
             "model": status.model,
         }
 
+    @app.get("/api/v1/sessions")
+    async def sessions() -> dict[str, object]:
+        store: LocalStore = app.state.store
+        project = store.ensure_project(config.workspace)
+        return {"sessions": [session_to_dict(session) for session in store.list_sessions(project)]}
+
+    @app.post("/api/v1/sessions")
+    async def create_session(payload: SessionCreateRequest) -> dict[str, object]:
+        store: LocalStore = app.state.store
+        project = store.ensure_project(config.workspace, permission_mode=payload.permission_mode)
+        session = store.create_session(
+            project,
+            title=payload.title or "新会话",
+            permission_mode=payload.permission_mode,
+        )
+        return session_to_dict(session)
+
+    @app.get("/api/v1/sessions/{session_id}")
+    async def get_session(session_id: str) -> dict[str, object]:
+        ensure_session(app.state.store, config.workspace, session_id)
+        return session_detail(app.state.store, session_id)
+
+    @app.patch("/api/v1/sessions/{session_id}")
+    async def update_session(session_id: str, payload: SessionUpdateRequest) -> dict[str, object]:
+        ensure_session(app.state.store, config.workspace, session_id)
+        session = app.state.store.update_session(
+            session_id,
+            title=payload.title,
+            permission_mode=payload.permission_mode,
+        )
+        return session_to_dict(session)
+
+    @app.delete("/api/v1/sessions/{session_id}")
+    async def delete_session(session_id: str) -> dict[str, object]:
+        ensure_session(app.state.store, config.workspace, session_id)
+        app.state.store.delete_session(session_id)
+        return {"deleted": True, "session_id": session_id}
+
     @app.post("/api/v1/model/check")
     async def model_check() -> dict[str, object]:
         result = await check_model(client_factory=app.state.model_client_factory)
@@ -118,14 +197,27 @@ def create_app(
     async def chat(payload: ChatRequest) -> StreamingResponse:
         message = validate_chat_message(payload.message)
         model_config = load_model_config()
+        store: LocalStore = app.state.store
+        _, session = ensure_session(store, config.workspace, payload.session_id)
+        session = apply_first_task_title(store, session, message)
+        run = store.create_run(session.id, "chat", message, 1)
+        store.add_message(session.id, "user", message)
 
         async def ndjson_events() -> AsyncIterator[bytes]:
+            content: list[str] = []
             async for event in stream_chat(
                 message,
                 config=model_config,
                 client_factory=app.state.model_client_factory,
             ):
-                yield _encode_event(event)
+                persist_model_event(store, session, run, event)
+                if event.type == "content.delta" and event.content:
+                    content.append(event.content)
+                if event.type == "turn.completed":
+                    if content:
+                        store.add_message(session.id, "assistant", "".join(content), "complete")
+                    store.update_run(run.id, state="COMPLETED", answer="".join(content))
+                yield _encode_event(event, session_id=session.id, run_id=run.id)
 
         return StreamingResponse(
             ndjson_events(),
@@ -135,16 +227,23 @@ def create_app(
 
     @app.post("/api/v1/runs")
     async def run(payload: RunRequest) -> StreamingResponse:
+        store: LocalStore = app.state.store
+        _, session = ensure_session(store, config.workspace, payload.session_id)
+        session = apply_first_task_title(store, session, payload.task)
+        run_record = store.create_run(session.id, "inspect", payload.task, payload.max_steps)
         runtime = create_inspection_run(
             payload.task,
             config.workspace,
             max_steps=payload.max_steps,
             client_factory=app.state.model_client_factory,
+            run_id=run_record.id,
         )
+        store.add_message(session.id, "user", payload.task)
 
         async def ndjson_events() -> AsyncIterator[bytes]:
             async for event in runtime.run(payload.task):
-                yield _encode_payload(event.to_dict())
+                persist_runtime_event(store, session, run_record, event)
+                yield _encode_payload(event.to_dict(), session_id=session.id, run_id=run_record.id)
 
         return StreamingResponse(
             ndjson_events(),
@@ -178,11 +277,17 @@ def create_app(
     return app
 
 
-def _encode_event(event: ModelEvent) -> bytes:
-    return _encode_payload(event.to_dict())
+def _encode_event(
+    event: ModelEvent, *, session_id: str | None = None, run_id: str | None = None
+) -> bytes:
+    return _encode_payload(event.to_dict(), session_id=session_id, run_id=run_id)
 
 
-def _encode_payload(payload: dict[str, object]) -> bytes:
-    return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
-        "utf-8"
-    )
+def _encode_payload(
+    payload: dict[str, object], *, session_id: str | None = None, run_id: str | None = None
+) -> bytes:
+    if session_id is not None:
+        payload = {**payload, "session_id": session_id}
+    if run_id is not None:
+        payload = {**payload, "run_id": run_id}
+    return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")

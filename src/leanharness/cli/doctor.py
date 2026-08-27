@@ -10,6 +10,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from leanharness.storage import LocalStore
+
 
 @dataclass(frozen=True, slots=True)
 class DiagnosticCheck:
@@ -48,6 +50,7 @@ def collect_diagnostics(
     workspace: Path,
     *,
     command_probe: CommandProbe = probe_command,
+    data_dir: str | Path | None = None,
 ) -> tuple[DiagnosticCheck, ...]:
     """Inspect prerequisites without writing to the selected workspace."""
 
@@ -56,8 +59,7 @@ def collect_diagnostics(
             name="python",
             ok=sys.version_info >= (3, 12),
             detail=(
-                f"Python {sys.version_info.major}."
-                f"{sys.version_info.minor}.{sys.version_info.micro}"
+                f"Python {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
             ),
         )
     ]
@@ -86,4 +88,13 @@ def collect_diagnostics(
             ),
         ]
     )
+    target = Path(data_dir).expanduser() if data_dir is not None else None
+    try:
+        with LocalStore(target) as store:
+            store.connection.execute("SELECT 1")
+        checks.append(
+            DiagnosticCheck("data-storage", True, str(target or "default user data directory"))
+        )
+    except Exception:
+        checks.append(DiagnosticCheck("data-storage", False, "SQLite data directory unavailable"))
     return tuple(checks)

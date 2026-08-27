@@ -109,6 +109,7 @@ def test_model_check_cli_maps_remote_failure_to_exit_three(
 
 
 def test_chat_cli_prints_content_and_usage(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -128,7 +129,7 @@ def test_chat_cli_prints_content_and_usage(
     monkeypatch.setenv("LEANHARNESS_MODEL_NAME", "example")
     monkeypatch.setattr("leanharness.cli.main.stream_chat", fake_stream)
 
-    assert main(["chat", "hello"]) == 0
+    assert main(["chat", "hello", "--data-dir", str(tmp_path / "data")]) == 0
     captured = capsys.readouterr()
     assert captured.out == "world\n"
     assert "usage: 4 tokens" in captured.err
@@ -139,6 +140,14 @@ def test_run_parser_applies_read_only_defaults() -> None:
 
     assert args.workspace is None
     assert args.max_steps == 24
+
+
+def test_session_parser_supports_lifecycle_commands() -> None:
+    parser = build_parser()
+    assert parser.parse_args(["session", "new", "--permission", "approve"]).permission == "approve"
+    renamed = parser.parse_args(["session", "rename", "session-id", "New title"])
+    assert renamed.session_id == "session-id"
+    assert renamed.title == "New title"
 
 
 def test_run_cli_separates_trace_and_final_answer(
@@ -176,7 +185,19 @@ def test_run_cli_separates_trace_and_final_answer(
         lambda *_args, **_kwargs: FakeRuntime(),
     )
 
-    assert main(["run", "inspect", "--workspace", str(tmp_path)]) == 0
+    assert (
+        main(
+            [
+                "run",
+                "inspect",
+                "--workspace",
+                str(tmp_path),
+                "--data-dir",
+                str(tmp_path / "data"),
+            ]
+        )
+        == 0
+    )
     captured = capsys.readouterr()
     assert captured.out == "Final answer\n"
     assert "Inspecting files" in captured.err
@@ -215,4 +236,16 @@ def test_run_cli_maps_terminal_status_to_exit_code(
         lambda *_args, **_kwargs: FakeRuntime(),
     )
 
-    assert main(["run", "inspect", "--workspace", str(tmp_path)]) == expected
+    assert (
+        main(
+            [
+                "run",
+                "inspect",
+                "--workspace",
+                str(tmp_path),
+                "--data-dir",
+                str(tmp_path / "data"),
+            ]
+        )
+        == expected
+    )

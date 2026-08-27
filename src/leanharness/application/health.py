@@ -33,5 +33,12 @@ def get_health(config: AppConfig) -> HealthSnapshot:
         name="LeanHarness",
         version=__version__,
         workspace=str(config.workspace),
-        capabilities=("model.chat", "model.streaming", "agent.inspect", "agent.streaming"),
+        capabilities=(
+            "model.chat",
+            "model.streaming",
+            "agent.inspect",
+            "agent.streaming",
+            "session.persistence",
+            "run.trace",
+        ),
     )
