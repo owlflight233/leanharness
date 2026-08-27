@@ -14,6 +14,7 @@ from leanharness.models.contracts import (
     ModelResponse,
     ModelUsage,
 )
+from leanharness.models.openai_compatible import OpenAICompatibleClient
 
 __all__ = [
     "MODEL_PROTOCOL",
@@ -24,6 +25,7 @@ __all__ = [
     "ModelRequest",
     "ModelResponse",
     "ModelUsage",
+    "OpenAICompatibleClient",
     "get_model_config_status",
     "load_model_config",
 ]
