@@ -149,6 +149,40 @@ def test_tool_error_returns_to_model_and_can_recover(tmp_path: Path) -> None:
     assert json.loads(first_result.content)["error"]["code"] == "PATH_NOT_FOUND"
 
 
+def test_tool_call_overflow_returns_recoverable_results_and_can_continue(tmp_path: Path) -> None:
+    calls = tuple(
+        ToolCall(
+            id=f"call-{index}",
+            name="workspace_list",
+            arguments={"path": ".", "max_depth": index},
+        )
+        for index in range(1, 6)
+    )
+    model = ScriptedModel(
+        [
+            ModelResponse(content="I will inspect the workspace.", tool_calls=calls),
+            ModelResponse(content="The workspace inspection is complete."),
+        ]
+    )
+
+    events = collect(ReadOnlyAgent(tmp_path, model, max_steps=3))
+
+    assert events[-1].type == "run.completed"
+    tool_messages = [message for message in model.requests[1].messages if message.role == "tool"]
+    assert len(tool_messages) == 5
+    assert all(json.loads(message.content)["ok"] for message in tool_messages[:4])
+    overflow = json.loads(tool_messages[4].content)
+    assert overflow["error"]["code"] == "TOOL_CALL_LIMIT"
+    assert overflow["error"]["recoverable"] is True
+    completed = [event for event in events if event.type == "tool.completed"]
+    assert completed[-1].metadata == {
+        "error_code": "TOOL_CALL_LIMIT",
+        "recoverable": True,
+        "tool_call_id": "call-5",
+        "ok": False,
+    }
+
+
 def test_runtime_maps_model_failure_and_cancellation(tmp_path: Path) -> None:
     failed = collect(
         ReadOnlyAgent(tmp_path, ScriptedModel([ModelUnavailableError("offline")]))

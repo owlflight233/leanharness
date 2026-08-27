@@ -318,6 +318,37 @@ def test_complete_serializes_tools_and_linked_tool_results() -> None:
     ]
 
 
+def test_complete_accepts_more_calls_than_the_runtime_step_limit() -> None:
+    tool_calls = [
+        {
+            "id": f"call-{index}",
+            "type": "function",
+            "function": {"name": "workspace_list", "arguments": "{}"},
+        }
+        for index in range(5)
+    ]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "", "tool_calls": tool_calls},
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        )
+
+    client = OpenAICompatibleClient(config(), transport=httpx.MockTransport(handler))
+    response = run(
+        client.complete(ModelRequest(messages=(ModelMessage(role="user", content="inspect"),)))
+    )
+
+    assert len(response.tool_calls) == 5
+
+
 def test_stream_assembles_fragmented_tool_calls() -> None:
     stream = ChunkedStream(
         [

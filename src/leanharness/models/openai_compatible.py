@@ -28,7 +28,9 @@ from leanharness.models.contracts import (
 
 MAX_RESPONSE_BYTES = 1_048_576
 MAX_TOOL_ARGUMENT_BYTES = 32 * 1024
-MAX_TOOL_CALLS = 4
+# Provider responses may contain more calls than the runtime will execute in one
+# step. Keep the transport protocol-complete and let the runtime apply that policy.
+MAX_MODEL_TOOL_CALLS = 64
 DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
 
 
@@ -323,7 +325,7 @@ def _serialize_message(message: ModelMessage) -> dict[str, object]:
 def _parse_tool_calls(value: object) -> tuple[ToolCall, ...]:
     if value is None:
         return ()
-    if not isinstance(value, list) or len(value) > MAX_TOOL_CALLS:
+    if not isinstance(value, list) or len(value) > MAX_MODEL_TOOL_CALLS:
         raise ModelProtocolError("Model response has an invalid number of tool calls")
     calls: list[ToolCall] = []
     seen_ids: set[str] = set()
@@ -356,7 +358,7 @@ def _accumulate_tool_call_deltas(
         index = item.get("index")
         if isinstance(index, bool) or not isinstance(index, int) or index < 0:
             raise ModelProtocolError("Model stream tool call has an invalid index")
-        if index >= MAX_TOOL_CALLS:
+        if index >= MAX_MODEL_TOOL_CALLS:
             raise ModelProtocolError("Model response has too many tool calls")
         buffer = buffers.setdefault(index, {"id": "", "name": "", "arguments": ""})
         call_id = item.get("id")
