@@ -43,4 +43,3 @@ def _bounded_utf8(value: str, limit: int) -> str:
     if len(encoded) <= limit:
         return value
     return encoded[: max(0, limit - 3)].decode("utf-8", errors="ignore") + "..."
-

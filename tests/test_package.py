@@ -182,7 +182,7 @@ def test_run_cli_separates_trace_and_final_answer(
             )
 
     monkeypatch.setattr(
-        "leanharness.cli.main.create_inspection_run",
+        "leanharness.cli.main.create_coding_run",
         lambda *_args, **_kwargs: FakeRuntime(),
     )
 
@@ -233,7 +233,7 @@ def test_run_cli_maps_terminal_status_to_exit_code(
             )
 
     monkeypatch.setattr(
-        "leanharness.cli.main.create_inspection_run",
+        "leanharness.cli.main.create_coding_run",
         lambda *_args, **_kwargs: FakeRuntime(),
     )
 

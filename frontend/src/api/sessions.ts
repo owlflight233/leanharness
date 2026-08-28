@@ -25,7 +25,7 @@ export interface SessionDetail {
   runs: Array<{
     id: string;
     session_id: string;
-    mode: "chat" | "inspect";
+    mode: "chat" | "coding" | "inspect";
     task: string;
     state: string;
     max_steps: number;
@@ -40,6 +40,8 @@ export interface SessionDetail {
       tool?: string;
       summary?: string;
       error?: { code: string; message: string };
+      metadata?: Record<string, unknown>;
+      usage?: Record<string, number | null>;
     }>;
   }>;
 }

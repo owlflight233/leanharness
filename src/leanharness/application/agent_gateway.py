@@ -8,11 +8,16 @@ from leanharness.application.model_gateway import ModelClientFactory
 from leanharness.errors import RunInputError
 from leanharness.models import OpenAICompatibleClient, load_model_config
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
-from leanharness.runtime import CodingAgent, RunControlError, validate_run_task
+from leanharness.runtime import (
+    CodingAgent,
+    ContinuationContext,
+    RunControlError,
+    validate_run_task,
+)
 from leanharness.runtime.loop import MAX_MAX_STEPS, MIN_MAX_STEPS
 
 
-def create_inspection_run(
+def create_coding_run(
     task: str,
     workspace: Path,
     *,
@@ -23,6 +28,7 @@ def create_inspection_run(
     permission_mode: str = "inspect",
     session_id: str = "ephemeral",
     approvals: ApprovalCoordinator | None = None,
+    continuation: ContinuationContext | None = None,
 ) -> CodingAgent:
     """Validate public input and create a bounded coding runtime."""
 
@@ -46,7 +52,9 @@ def create_inspection_run(
         permission_mode=mode,
         session_id=session_id,
         approvals=approvals,
+        continuation=continuation,
     )
 
 
-create_coding_run = create_inspection_run
+# Compatibility for clients created before guarded coding tools were introduced.
+create_inspection_run = create_coding_run

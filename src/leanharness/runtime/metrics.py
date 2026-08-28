@@ -28,4 +28,3 @@ class RunMetrics:
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
         }
-

@@ -9,10 +9,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from leanharness import __version__
-from leanharness.application.agent_gateway import create_inspection_run
+from leanharness.application.agent_gateway import create_coding_run
 from leanharness.application.model_gateway import check_model, stream_chat
 from leanharness.application.session_gateway import (
     apply_first_task_title,
+    continuation_for_session,
     ensure_session,
     persist_model_event,
     persist_runtime_event,
@@ -290,9 +291,10 @@ async def _inspect(
     )
     session = apply_first_task_title(store, session, task)
     selected_permission = permission or session.permission_mode
+    continuation = continuation_for_session(store, session)
     run = store.create_run(
         session.id,
-        "inspect",
+        "coding",
         task,
         max_steps,
         permission_mode=selected_permission,
@@ -315,7 +317,7 @@ async def _inspect(
         on_resolve=lambda request, decision: store.resolve_approval(request.id, decision),
         on_expire=lambda request: store.expire_approval(request.id),
     )
-    runtime = create_inspection_run(
+    runtime = create_coding_run(
         task,
         workspace,
         max_steps=max_steps,
@@ -324,6 +326,7 @@ async def _inspect(
         permission_mode=selected_permission,
         session_id=session.id,
         approvals=approvals,
+        continuation=continuation,
     )
     exit_code = 0
     async for event in runtime.run(task):

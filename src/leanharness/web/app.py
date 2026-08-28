@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel
 
 from leanharness import __version__
-from leanharness.application.agent_gateway import create_inspection_run
+from leanharness.application.agent_gateway import create_coding_run
 from leanharness.application.health import get_health
 from leanharness.application.model_gateway import (
     ModelClientFactory,
@@ -25,6 +25,7 @@ from leanharness.application.model_gateway import (
 )
 from leanharness.application.session_gateway import (
     apply_first_task_title,
+    continuation_for_session,
     ensure_session,
     persist_model_event,
     persist_runtime_event,
@@ -300,15 +301,16 @@ def create_app(
         _, session = ensure_session(store, config.workspace, payload.session_id)
         session = apply_first_task_title(store, session, payload.task)
         active_runs.assert_available(session.id)
+        continuation = continuation_for_session(store, session)
         run_record = store.create_run(
             session.id,
-            "inspect",
+            "coding",
             payload.task,
             payload.max_steps,
             permission_mode=session.permission_mode,
         )
         active_runs.acquire(session.id, run_record.id)
-        runtime = create_inspection_run(
+        runtime = create_coding_run(
             payload.task,
             config.workspace,
             max_steps=payload.max_steps,
@@ -318,6 +320,7 @@ def create_app(
             permission_mode=session.permission_mode,
             session_id=session.id,
             approvals=approvals,
+            continuation=continuation,
         )
         store.add_message(session.id, "user", payload.task, run_id=run_record.id)
 

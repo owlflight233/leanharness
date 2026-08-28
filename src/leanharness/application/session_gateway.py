@@ -7,6 +7,7 @@ from typing import Any
 
 from leanharness.application.language import detect_session_language
 from leanharness.models import ModelEvent
+from leanharness.runtime import ContinuationContext
 from leanharness.runtime.events import RuntimeEvent
 from leanharness.storage import LocalStore, ProjectRecord, RunRecord, SessionRecord
 
@@ -78,7 +79,16 @@ def session_detail(store: LocalStore, session_id: str) -> dict[str, object]:
         summary["trace"] = [
             {
                 key: event[key]
-                for key in ("sequence", "type", "step", "tool", "summary", "error")
+                for key in (
+                    "sequence",
+                    "type",
+                    "step",
+                    "tool",
+                    "summary",
+                    "error",
+                    "metadata",
+                    "usage",
+                )
                 if key in event
             }
             for event in events
@@ -100,6 +110,52 @@ def session_detail(store: LocalStore, session_id: str) -> dict[str, object]:
         ],
         "runs": runs,
     }
+
+
+def continuation_for_session(
+    store: LocalStore,
+    session: SessionRecord,
+) -> ContinuationContext | None:
+    """Return a bounded public capsule for the immediately preceding terminal run."""
+
+    runs = store.list_runs(session.id)
+    terminal = next(
+        (
+            run
+            for run in reversed(runs)
+            if run.state in {"COMPLETED", "EXHAUSTED", "FAILED", "CANCELLED"}
+        ),
+        None,
+    )
+    if terminal is None:
+        return None
+    events = store.list_events(terminal.id)
+    terminal_event = next(
+        (
+            event
+            for event in reversed(events)
+            if event.get("type")
+            in {"run.completed", "run.incomplete", "run.failed", "run.cancelled"}
+        ),
+        {},
+    )
+    metadata = terminal_event.get("metadata")
+    evidence = metadata.get("evidence") if isinstance(metadata, dict) else None
+    changed = evidence.get("changed_files") if isinstance(evidence, dict) else None
+    changed_files = (
+        tuple(str(path) for path in changed[:50]) if isinstance(changed, list) else ()
+    )
+    reason = terminal.error_code
+    if reason is None and isinstance(metadata, dict):
+        candidate = metadata.get("incomplete_reason")
+        reason = str(candidate) if candidate else None
+    return ContinuationContext(
+        previous_task=terminal.task,
+        previous_state=terminal.state,
+        changed_files=changed_files,
+        incomplete_reason=reason,
+        permission_mode=session.permission_mode,
+    )
 
 
 def persist_runtime_event(
