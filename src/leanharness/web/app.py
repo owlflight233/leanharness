@@ -23,6 +23,7 @@ from leanharness.application.model_gateway import (
     stream_chat,
     validate_chat_message,
 )
+from leanharness.application.plan_gateway import create_plan_generator, plan_to_dict
 from leanharness.application.session_gateway import (
     apply_first_task_title,
     continuation_for_session,
@@ -42,6 +43,9 @@ from leanharness.errors import (
     InvalidPermissionError,
     LeanHarnessError,
     ModelNotConfiguredError,
+    PlanConflictError,
+    PlanNotFoundError,
+    PlanStateError,
     RunConflictError,
     RunInputError,
     SessionNotFoundError,
@@ -54,6 +58,8 @@ from leanharness.models import (
     load_model_config,
 )
 from leanharness.permissions import ActiveRunRegistry, ApprovalCoordinator, ApprovalRequest
+from leanharness.planning import PlanController, PlanState, PlanStep, render_plan_markdown
+from leanharness.planning.generator import GeneratedPlan
 from leanharness.runtime import RuntimeEvent
 from leanharness.storage import LocalStore
 
@@ -67,6 +73,24 @@ class RunRequest(BaseModel):
     task: str
     max_steps: int = 24
     session_id: str | None = None
+
+
+class PlanCreateRequest(BaseModel):
+    task: str
+    session_id: str | None = None
+
+
+class PlanStepUpdate(BaseModel):
+    id: str
+    title: str
+    instruction: str
+    enabled: bool = True
+
+
+class PlanUpdateRequest(BaseModel):
+    title: str
+    steps: list[PlanStepUpdate]
+    version: int
 
 
 class SessionCreateRequest(BaseModel):
@@ -120,6 +144,7 @@ def create_app(
         on_expire=lambda request: store.expire_approval(request.id),
     )
     active_runs = ActiveRunRegistry()
+    plan_cancellations: dict[str, asyncio.Event] = {}
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -156,8 +181,10 @@ def create_app(
             status_code = 409
         elif isinstance(exc, ApprovalExpiredError):
             status_code = 410
-        elif isinstance(exc, ApprovalNotFoundError):
+        elif isinstance(exc, (ApprovalNotFoundError, PlanNotFoundError)):
             status_code = 404
+        elif isinstance(exc, (PlanConflictError, PlanStateError)):
+            status_code = 409
         return JSONResponse(
             status_code=status_code,
             content={"error": {"code": exc.code, "message": exc.message}},
@@ -359,6 +386,197 @@ def create_app(
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         )
+
+    @app.post("/api/v1/plans")
+    async def create_plan(payload: PlanCreateRequest) -> dict[str, object]:
+        task = payload.task.strip()
+        if not task or len(task) > 32_000:
+            raise RunInputError("Plan task must be between 1 and 32000 characters")
+        store: LocalStore = app.state.store
+        _, session = ensure_session(store, config.workspace, payload.session_id)
+        session = apply_first_task_title(store, session, task)
+        generator = create_plan_generator(
+            config.workspace,
+            language=session.language or "same",
+            client_factory=app.state.model_client_factory,
+        )
+        generated: GeneratedPlan | None = None
+        async for item in generator.generate(task):
+            if isinstance(item, GeneratedPlan):
+                generated = item
+        if generated is None:
+            raise RunInputError("The model did not return a valid plan")
+        plan = store.create_plan(
+            session.id,
+            title=generated.title,
+            task=task,
+            source_markdown=generated.markdown,
+            steps=generated.steps,
+        )
+        return plan_to_dict(plan)
+
+    @app.get("/api/v1/plans/{plan_id}")
+    async def get_plan(plan_id: str) -> dict[str, object]:
+        plan = app.state.store.get_plan(plan_id)
+        session = app.state.store.get_session(plan.session_id)
+        if session.project_id != app.state.store.ensure_project(config.workspace).id:
+            raise SessionNotFoundError("Plan does not belong to the current workspace")
+        return plan_to_dict(plan)
+
+    @app.patch("/api/v1/plans/{plan_id}")
+    async def update_plan(plan_id: str, payload: PlanUpdateRequest) -> dict[str, object]:
+        current = app.state.store.get_plan(plan_id)
+        if not payload.title.strip() or not 1 <= len(payload.steps) <= 32:
+            raise RunInputError("A plan requires 1 to 32 non-empty steps")
+        if any(
+            not step.title.strip()
+            or not step.instruction.strip()
+            or len(step.instruction) > 2_000
+            for step in payload.steps
+        ):
+            raise RunInputError("Plan step title and instruction are required and bounded")
+        steps = tuple(
+            PlanStep(
+                id=step.id,
+                sequence=index + 1,
+                title=step.title,
+                instruction=step.instruction,
+                enabled=step.enabled,
+            )
+            for index, step in enumerate(payload.steps)
+        )
+        updated = app.state.store.update_plan(
+            plan_id,
+            version=payload.version,
+            title=payload.title,
+            source_markdown=render_plan_markdown(current, steps),
+            steps=steps,
+        )
+        return plan_to_dict(updated)
+
+    @app.post("/api/v1/plans/{plan_id}/reject")
+    async def reject_plan(plan_id: str) -> dict[str, object]:
+        plan = app.state.store.update_plan_state(plan_id, PlanState.CANCELLED)
+        return plan_to_dict(plan)
+
+    async def execute_plan(plan_id: str, *, resume: bool = False) -> StreamingResponse:
+        store: LocalStore = app.state.store
+        plan = store.get_plan(plan_id)
+        if resume:
+            if plan.state is not PlanState.PAUSED:
+                raise LeanHarnessError("Only a paused plan can be resumed")
+        elif plan.state is not PlanState.AWAITING_CONFIRMATION:
+            raise LeanHarnessError("Only an unconfirmed plan can be confirmed")
+        session = store.get_session(plan.session_id)
+        active_runs.assert_available(session.id)
+        if resume and plan.run_id:
+            run = store.get_run(plan.run_id)
+        else:
+            run = store.create_run(
+                session.id, "plan", plan.task, 24, permission_mode=session.permission_mode
+            )
+            store.attach_plan_run(plan.id, run.id)
+        plan = store.get_plan(plan.id)
+        active_runs.acquire(session.id, run.id)
+        model = app.state.model_client_factory(load_model_config())
+        existing_events = store.list_events(run.id)
+        controller = PlanController(
+            plan,
+            config.workspace,
+            model,
+            permission_mode=session.permission_mode,
+            language=session.language or "same",
+            approvals=approvals,
+            on_step=lambda step_id, state, evidence, error: store.update_plan_step(
+                step_id, state, evidence=evidence, error_code=error
+            ),
+            initial_sequence=(int(existing_events[-1].get("sequence", -1)) + 1)
+            if existing_events
+            else 0,
+            cancel_event=plan_cancellations.setdefault(run.id, asyncio.Event()),
+        )
+
+        async def events() -> AsyncIterator[bytes]:
+            terminal = False
+            try:
+                async for event in controller.run():
+                    payload = event.to_dict()
+                    store.append_event(
+                        session.id, run.id, int(payload["sequence"]), event.type, payload
+                    )
+                    if event.type == "plan.completed":
+                        store.update_plan_state(plan.id, PlanState.COMPLETED)
+                    elif event.type == "plan.paused":
+                        store.update_plan_state(plan.id, PlanState.PAUSED)
+                    elif event.type == "plan.failed":
+                        store.update_plan_state(
+                            plan.id, PlanState.FAILED, error_code=event.error_code
+                        )
+                    elif event.type == "plan.cancelled":
+                        store.update_plan_state(plan.id, PlanState.CANCELLED)
+                    if event.type in {
+                        "run.completed",
+                        "run.incomplete",
+                        "run.failed",
+                        "run.cancelled",
+                    }:
+                        terminal = True
+                        answer = getattr(event, "answer", None)
+                        if answer:
+                            store.add_message(
+                                session.id,
+                                "assistant",
+                                answer,
+                                {
+                                    "run.completed": "complete",
+                                    "run.incomplete": "incomplete",
+                                    "run.failed": "error",
+                                    "run.cancelled": "cancelled",
+                                }[event.type],
+                                run_id=run.id,
+                            )
+                        store.update_run(
+                            run.id,
+                            state={
+                                "run.completed": "COMPLETED",
+                                "run.incomplete": "EXHAUSTED",
+                                "run.failed": "FAILED",
+                                "run.cancelled": "CANCELLED",
+                            }[event.type],
+                            answer=answer,
+                            error_code=getattr(event, "error_code", None),
+                        )
+                    yield _encode_payload(payload, session_id=session.id, run_id=run.id)
+            except asyncio.CancelledError:
+                if not terminal:
+                    store.update_plan_state(plan.id, PlanState.PAUSED)
+                raise
+            finally:
+                approvals.cancel_run(run.id)
+                active_runs.release(session.id, run.id)
+                plan_cancellations.pop(run.id, None)
+
+        return StreamingResponse(
+            events(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
+
+    @app.post("/api/v1/plans/{plan_id}/confirm")
+    async def confirm_plan(plan_id: str) -> StreamingResponse:
+        return await execute_plan(plan_id)
+
+    @app.post("/api/v1/plans/{plan_id}/resume")
+    async def resume_plan(plan_id: str) -> StreamingResponse:
+        return await execute_plan(plan_id, resume=True)
+
+    @app.post("/api/v1/plans/{plan_id}/cancel")
+    async def cancel_plan(plan_id: str) -> dict[str, object]:
+        plan = app.state.store.get_plan(plan_id)
+        if plan.run_id and plan.run_id in plan_cancellations:
+            plan_cancellations[plan.run_id].set()
+        plan = app.state.store.update_plan_state(plan_id, PlanState.CANCELLED)
+        return plan_to_dict(plan)
 
     @app.post("/api/v1/runs/{run_id}/approvals/{approval_id}")
     async def resolve_approval(

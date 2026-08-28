@@ -419,6 +419,17 @@ class LocalStore:
             for row in rows
         ]
 
+    def get_run(self, run_id: str) -> RunRecord:
+        row = self.connection.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row is None:
+            raise StorageError("Run was not found")
+        return RunRecord(
+            *(row[key] for key in (
+                "id", "session_id", "mode", "task", "state", "max_steps",
+                "permission_mode", "answer", "error_code", "started_at", "finished_at",
+            ))
+        )
+
     def list_events(self, run_id: str) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             "SELECT payload_json FROM run_events WHERE run_id=? ORDER BY sequence", (run_id,)
@@ -744,6 +755,10 @@ class LocalStore:
             )
             self.connection.execute(
                 "UPDATE approvals SET state='EXPIRED', decided_at=? WHERE state='PENDING'",
+                (now,),
+            )
+            self.connection.execute(
+                "UPDATE plans SET state='PAUSED', updated_at=? WHERE state='RUNNING'",
                 (now,),
             )
         return cursor.rowcount

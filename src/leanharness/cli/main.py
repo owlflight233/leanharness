@@ -11,6 +11,7 @@ from pathlib import Path
 from leanharness import __version__
 from leanharness.application.agent_gateway import create_coding_run
 from leanharness.application.model_gateway import check_model, stream_chat
+from leanharness.application.plan_gateway import create_plan_generator
 from leanharness.application.session_gateway import (
     apply_first_task_title,
     continuation_for_session,
@@ -28,8 +29,9 @@ from leanharness.config import (
 )
 from leanharness.errors import LeanHarnessError, ModelError, ModelNotConfiguredError
 from leanharness.logging import configure_logging
-from leanharness.models import ModelConfig, load_model_config
-from leanharness.permissions import ApprovalCoordinator
+from leanharness.models import ModelConfig, OpenAICompatibleClient, load_model_config
+from leanharness.permissions import ApprovalCoordinator, PermissionMode
+from leanharness.planning import PlanController, PlanState
 from leanharness.runtime.loop import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, MIN_MAX_STEPS
 from leanharness.storage import LocalStore
 
@@ -128,13 +130,32 @@ def build_parser() -> argparse.ArgumentParser:
     delete_parser = session_subparsers.add_parser("delete", help="Delete a session.")
     delete_parser.add_argument("session_id")
     delete_parser.add_argument("--data-dir")
+
+    plan_parser = subparsers.add_parser("plan", help="Generate and manage persistent plans.")
+    plan_subparsers = plan_parser.add_subparsers(dest="plan_command", required=True)
+    generate_parser = plan_subparsers.add_parser("generate", help="Generate a draft plan.")
+    generate_parser.add_argument("task")
+    generate_parser.add_argument("--workspace")
+    generate_parser.add_argument("--session", dest="session_id")
+    generate_parser.add_argument("--data-dir")
+    # `leanharness plan TASK` is the concise form documented for plan generation.
+    for command in ("show", "confirm", "reject", "resume", "cancel"):
+        command_parser = plan_subparsers.add_parser(command)
+        command_parser.add_argument("plan_id")
+        command_parser.add_argument("--workspace")
+        command_parser.add_argument("--data-dir")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     _configure_stdio()
     parser = build_parser()
-    args = parser.parse_args(argv)
+    normalized_argv = list(argv) if argv is not None else sys.argv[1:]
+    if len(normalized_argv) >= 2 and normalized_argv[0] == "plan" and normalized_argv[1] not in {
+        "generate", "show", "confirm", "reject", "resume", "cancel"
+    }:
+        normalized_argv.insert(1, "generate")
+    args = parser.parse_args(normalized_argv)
 
     try:
         if args.command == "doctor":
@@ -182,6 +203,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.command == "session":
             return _session_command(args)
+        if args.command == "plan":
+            if args.plan_command == "generate":
+                return asyncio.run(
+                    _plan_generate(
+                        args.task,
+                        resolve_workspace(args.workspace),
+                        args.session_id,
+                        args.data_dir,
+                    )
+                )
+            return asyncio.run(
+                _plan_lifecycle(
+                    args.plan_command,
+                    args.plan_id,
+                    resolve_workspace(args.workspace),
+                    args.data_dir,
+                )
+            )
     except LeanHarnessError as exc:
         print(f"error [{exc.code}]: {exc.message}", file=sys.stderr)
         return 2
@@ -396,4 +435,89 @@ def _session_command(args: argparse.Namespace) -> int:
             store.delete_session(args.session_id)
             print(args.session_id)
             return 0
+    return 0
+
+
+async def _plan_generate(
+    task: str, workspace: Path, session_id: str | None, data_dir: str | None
+) -> int:
+    store = LocalStore(Path(data_dir).expanduser() if data_dir else None)
+    _, session = ensure_session(store, workspace, session_id)
+    session = apply_first_task_title(store, session, task)
+    generator = create_plan_generator(workspace, language=session.language or "same")
+    generated = None
+    try:
+        async for item in generator.generate(task):
+            if hasattr(item, "markdown"):
+                generated = item
+    except LeanHarnessError:
+        raise
+    if generated is None:
+        raise LeanHarnessError("The model did not return a valid plan")
+    plan = store.create_plan(
+        session.id,
+        title=generated.title,
+        task=task,
+        source_markdown=generated.markdown,
+        steps=generated.steps,
+    )
+    print(generated.markdown)
+    print(f"[plan] {plan.id} (awaiting confirmation)", file=sys.stderr)
+    return 0
+
+
+async def _plan_lifecycle(
+    command: str, plan_id: str, workspace: Path, data_dir: str | None
+) -> int:
+    store = LocalStore(Path(data_dir).expanduser() if data_dir else None)
+    plan = store.get_plan(plan_id)
+    if command == "show":
+        print(plan.source_markdown)
+        print(f"state: {plan.state.value}\nversion: {plan.version}", file=sys.stderr)
+        return 0
+    if command == "reject":
+        store.update_plan_state(plan_id, PlanState.CANCELLED)
+        print(f"Plan {plan_id} rejected", file=sys.stderr)
+        return 0
+    if command == "cancel":
+        store.update_plan_state(plan_id, PlanState.CANCELLED)
+        print(f"Plan {plan_id} cancelled", file=sys.stderr)
+        return 0
+    if command not in {"confirm", "resume"}:
+        raise LeanHarnessError(f"Unknown plan command: {command}")
+    session = store.get_session(plan.session_id)
+    if command == "resume" and plan.run_id:
+        run = store.get_run(plan.run_id)
+    else:
+        run = store.create_run(
+            session.id, "plan", plan.task, 24, permission_mode=session.permission_mode
+        )
+        store.attach_plan_run(plan.id, run.id)
+    approvals = ApprovalCoordinator()
+    controller = PlanController(
+        store.get_plan(plan.id),
+        workspace=workspace,
+        model_client=OpenAICompatibleClient(load_model_config()),
+        permission_mode=PermissionMode(session.permission_mode),
+        language=session.language or "same",
+        approvals=approvals,
+    )
+    answer = None
+    async for event in controller.run():
+        if event.type.startswith("run."):
+            persist_runtime_event(store, session, run, event)
+        else:
+            store.append_event(session.id, run.id, event.sequence, event.type, event.to_dict())
+        if event.type == "approval.required" and event.metadata:
+            decision = await asyncio.to_thread(input, "Approve this plan action? [y/N] ")
+            approvals.resolve(
+                run.id,
+                str(event.metadata.get("approval_id", "")),
+                "approve" if decision.strip().casefold() in {"y", "yes"} else "reject",
+            )
+        if event.type == "run.completed":
+            answer = event.answer
+        print(f"[{event.type}] {event.summary or ''}", file=sys.stderr)
+    if answer:
+        print(answer)
     return 0
