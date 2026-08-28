@@ -8,55 +8,27 @@ from __future__ import annotations
 import json
 import os
 import platform
-import re
 import shutil
 import sqlite3
 import threading
 import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from leanharness.errors import InvalidPermissionError, SessionNotFoundError, StorageError
-from leanharness.logging import redact_text
+from leanharness.storage.migrations import apply_migrations
+from leanharness.storage.records import (
+    ApprovalRecord,
+    MessageRecord,
+    ProjectRecord,
+    RunRecord,
+    SessionRecord,
+)
+from leanharness.storage.redaction import TraceRedactor
 
 PERMISSION_MODES = frozenset({"inspect", "approve", "unrestricted"})
-SCHEMA_VERSION = 2
 _TRACE_WRITE_LOCK = threading.Lock()
-_HIDDEN_REASONING_BLOCK = re.compile(
-    r"(?is)<(?:think|thinking)>.*?</(?:think|thinking)>"
-)
-
-
-@dataclass(frozen=True, slots=True)
-class TraceRedactor:
-    """Create the single public representation used by SQLite and JSONL traces."""
-
-    secrets: tuple[str, ...] = ()
-    max_text_chars: int = 64_000
-
-    @classmethod
-    def from_environment(cls) -> TraceRedactor:
-        api_key = os.environ.get("LEANHARNESS_MODEL_API_KEY", "")
-        return cls(secrets=(api_key,) if api_key else ())
-
-    def text(self, value: str) -> str:
-        safe = _HIDDEN_REASONING_BLOCK.sub("[hidden reasoning redacted]", value)
-        safe = redact_text(safe)
-        for secret in self.secrets:
-            if secret:
-                safe = safe.replace(secret, "[REDACTED]")
-        if len(safe) > self.max_text_chars:
-            return safe[: self.max_text_chars] + "...[truncated]"
-        return safe
-
-    def payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return _redact_mapping(
-            payload,
-            event_type=str(payload.get("type", "")),
-            redactor=self,
-        )
 
 
 def default_data_dir() -> Path:
@@ -75,66 +47,6 @@ def default_data_dir() -> Path:
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
-
-
-@dataclass(frozen=True, slots=True)
-class SessionRecord:
-    id: str
-    project_id: str
-    title: str
-    permission_mode: str
-    language: str | None
-    created_at: str
-    updated_at: str
-    last_run_state: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectRecord:
-    id: str
-    root_path: str
-    permission_mode: str
-    created_at: str
-    updated_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class MessageRecord:
-    id: str
-    session_id: str
-    sequence: int
-    role: str
-    content: str
-    status: str
-    created_at: str
-    run_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class RunRecord:
-    id: str
-    session_id: str
-    mode: str
-    task: str
-    state: str
-    max_steps: int
-    permission_mode: str
-    answer: str | None
-    error_code: str | None
-    started_at: str
-    finished_at: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class ApprovalRecord:
-    id: str
-    run_id: str
-    tool_call_id: str
-    tool_name: str
-    request: dict[str, Any]
-    state: str
-    requested_at: str
-    decided_at: str | None
 
 
 class LocalStore:
@@ -167,7 +79,7 @@ class LocalStore:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA journal_mode = WAL")
             self._connection = connection
-            self._migrate()
+            apply_migrations(connection)
         except (OSError, sqlite3.Error) as exc:
             self.close()
             raise StorageError("Local session storage could not be opened") from exc
@@ -605,38 +517,6 @@ class LocalStore:
     def _trace_path(self, project_id: str, session_id: str, run_id: str) -> Path:
         return self.trace_dir / project_id / session_id / f"{run_id}.jsonl"
 
-    def _migrate(self) -> None:
-        with self.connection:
-            self.connection.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
-            )
-            current = self.connection.execute(
-                "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations"
-            ).fetchone()["version"]
-            if current < 1:
-                self.connection.executescript(
-                    """
-                    CREATE TABLE projects(id TEXT PRIMARY KEY, root_path TEXT NOT NULL UNIQUE, permission_mode TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-                    CREATE TABLE sessions(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, title TEXT NOT NULL, permission_mode TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-                    CREATE TABLE messages(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(session_id, sequence));
-                    CREATE TABLE runs(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, mode TEXT NOT NULL, task TEXT NOT NULL, state TEXT NOT NULL, max_steps INTEGER NOT NULL, answer TEXT, error_code TEXT, started_at TEXT NOT NULL, finished_at TEXT);
-                    CREATE TABLE run_events(run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, event_type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(run_id, sequence));
-                    CREATE INDEX sessions_project_updated ON sessions(project_id, updated_at DESC);
-                    INSERT INTO schema_migrations(version, applied_at) VALUES(1, CURRENT_TIMESTAMP);
-                    """
-                )
-            if current < 2:
-                self.connection.executescript(
-                    """
-                    ALTER TABLE sessions ADD COLUMN language TEXT;
-                    ALTER TABLE messages ADD COLUMN run_id TEXT REFERENCES runs(id) ON DELETE SET NULL;
-                    ALTER TABLE runs ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'inspect';
-                    CREATE TABLE approvals(id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, tool_call_id TEXT NOT NULL, tool_name TEXT NOT NULL, request_json TEXT NOT NULL, state TEXT NOT NULL, requested_at TEXT NOT NULL, decided_at TEXT);
-                    CREATE INDEX messages_run ON messages(run_id, sequence);
-                    CREATE INDEX approvals_run ON approvals(run_id, requested_at);
-                    INSERT INTO schema_migrations(version, applied_at) VALUES(2, CURRENT_TIMESTAMP);
-                    """
-                )
 
     @staticmethod
     def _project_row(
@@ -667,51 +547,3 @@ class LocalStore:
 def _validate_permission(value: str) -> None:
     if value not in PERMISSION_MODES:
         raise InvalidPermissionError("Permission mode is invalid")
-
-
-def redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Keep public event metadata while removing secrets and raw tool content."""
-    return TraceRedactor.from_environment().payload(payload)
-
-
-def _redact_mapping(
-    value: dict[str, Any], *, event_type: str, redactor: TraceRedactor
-) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    forbidden = {
-        "api_key",
-        "authorization",
-        "headers",
-        "environment",
-        "env",
-        "cookie",
-        "preview",
-        "patch",
-        "diff",
-        "stdout",
-        "stderr",
-        "output",
-        "target_hashes",
-    }
-    hidden_reasoning = {"analysis", "chain_of_thought", "reasoning", "thinking"}
-    for key, item in value.items():
-        if key.casefold() in forbidden | hidden_reasoning:
-            continue
-        if key == "content" and event_type.startswith("tool"):
-            result[key] = "[tool result redacted]"
-        elif isinstance(item, dict):
-            result[key] = _redact_mapping(item, event_type=event_type, redactor=redactor)
-        elif isinstance(item, list):
-            result[key] = [
-                _redact_mapping(entry, event_type=event_type, redactor=redactor)
-                if isinstance(entry, dict)
-                else redactor.text(entry)
-                if isinstance(entry, str)
-                else entry
-                for entry in item[:100]
-            ]
-        elif isinstance(item, str):
-            result[key] = redactor.text(item)
-        else:
-            result[key] = item
-    return result
