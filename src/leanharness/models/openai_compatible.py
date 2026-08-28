@@ -79,6 +79,9 @@ class OpenAICompatibleClient:
             content = ""
         if not isinstance(content, str):
             raise ModelProtocolError("Model response assistant content must be text")
+        reasoning_content = message.get("reasoning_content", "")
+        if not isinstance(reasoning_content, str):
+            raise ModelProtocolError("Model response reasoning content must be text")
 
         finish_reason = choice.get("finish_reason")
         if finish_reason is not None and not isinstance(finish_reason, str):
@@ -88,6 +91,7 @@ class OpenAICompatibleClient:
             finish_reason=finish_reason,
             usage=_parse_usage(data.get("usage")),
             tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
         )
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:

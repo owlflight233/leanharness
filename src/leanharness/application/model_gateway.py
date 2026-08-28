@@ -58,7 +58,7 @@ async def check_model(
             max_tokens=16,
         )
     )
-    if not response.content.strip():
+    if not response.content.strip() and not response.reasoning_content.strip():
         raise ModelProtocolError("Model check returned an empty response")
     latency_ms = max(0, round((perf_counter() - started) * 1000))
     return ModelCheckResult(status="ok", model=config.model, latency_ms=latency_ms)

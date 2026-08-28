@@ -73,6 +73,9 @@ class ModelResponse:
     finish_reason: str | None = None
     usage: ModelUsage | None = None
     tool_calls: tuple[ToolCall, ...] = ()
+    # Providers may spend a short probe entirely on hidden reasoning. This is
+    # retained only for connectivity checks and is never serialized publicly.
+    reasoning_content: str = ""
 
 
 @dataclass(frozen=True, slots=True)

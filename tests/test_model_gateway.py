@@ -60,6 +60,16 @@ def test_model_check_rejects_empty_reply() -> None:
         asyncio.run(check_model(environ=ENV, client_factory=lambda _config: client))
 
 
+def test_model_check_accepts_reasoning_only_probe_reply() -> None:
+    """Thinking models may consume a tiny probe entirely as hidden reasoning."""
+
+    client = FakeClient(response=ModelResponse(content="", reasoning_content="internal"))
+
+    result = asyncio.run(check_model(environ=ENV, client_factory=lambda _config: client))
+
+    assert result.status == "ok"
+
+
 @pytest.mark.parametrize("message", ["", "   ", "x" * 32_001])
 def test_chat_input_is_bounded(message: str) -> None:
     with pytest.raises(ChatInputError):
