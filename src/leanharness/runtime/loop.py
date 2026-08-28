@@ -57,6 +57,8 @@ class CodingAgent:
         session_id: str = "ephemeral",
         approvals: ApprovalCoordinator | None = None,
         continuation: ContinuationContext | None = None,
+        task_requirements: TaskRequirements | None = None,
+        initial_sequence: int = 0,
     ) -> None:
         if not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
             raise ValueError(f"max_steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}")
@@ -73,7 +75,8 @@ class CodingAgent:
         self.session_id = session_id
         self.approvals = approvals
         self.continuation = continuation
-        self._sequence = 0
+        self.task_requirements = task_requirements
+        self._sequence = initial_sequence
         self.evidence = CompletionLedger()
         self.metrics = RunMetrics()
         self._repeat_key: tuple[str, str] | None = None
@@ -81,16 +84,53 @@ class CodingAgent:
         self._failure_counts: dict[tuple[str, str], int] = {}
 
     async def run(self, task: str) -> AsyncIterator[RuntimeEvent]:
+        async for event in self._run_task(task, initialize_context=True):
+            yield event
+
+    async def continue_task(
+        self,
+        task: str,
+        *,
+        requirements: TaskRequirements | None = None,
+    ) -> AsyncIterator[RuntimeEvent]:
+        if self.state not in {
+            RunState.COMPLETED,
+            RunState.EXHAUSTED,
+            RunState.FAILED,
+            RunState.CANCELLED,
+        }:
+            raise RunControlError("RUN_NOT_TERMINAL", "Previous task is still active")
+        self.state = RunState.CREATED
+        self.evidence = CompletionLedger()
+        self.task_requirements = requirements
+        self._repeat_key = None
+        self._repeat_count = 0
+        self._failure_counts.clear()
+        async for event in self._run_task(task, initialize_context=False):
+            yield event
+
+    def set_event_sequence(self, sequence: int) -> None:
+        if sequence < self._sequence:
+            raise ValueError("Runtime event sequence cannot move backwards")
+        self._sequence = sequence
+
+    async def _run_task(
+        self,
+        task: str,
+        *,
+        initialize_context: bool,
+    ) -> AsyncIterator[RuntimeEvent]:
         validated_task = validate_run_task(task)
-        requirements = TaskRequirements.infer(validated_task)
+        requirements = self.task_requirements or TaskRequirements.infer(validated_task)
         self.state = transition(self.state, RunState.PREPARING)
-        self.context.append(
-            ModelMessage(
-                role="system",
-                content=system_prompt(self.language, self.permission_mode),
+        if initialize_context:
+            self.context.append(
+                ModelMessage(
+                    role="system",
+                    content=system_prompt(self.language, self.permission_mode),
+                )
             )
-        )
-        if self.continuation is not None:
+        if initialize_context and self.continuation is not None:
             self.context.append(
                 ModelMessage(role="system", content=self.continuation.to_model_message())
             )

@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+from leanharness.models import ModelRequest, ModelResponse, ToolCall
+from leanharness.permissions import PermissionMode
+from leanharness.planning import Plan, PlanController, PlanState, PlanStep, PlanStepState
+
+
+class ScriptedModel:
+    def __init__(self, responses: list[ModelResponse]) -> None:
+        self.responses = responses
+        self.requests: list[ModelRequest] = []
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        return self.responses[len(self.requests) - 1]
+
+
+def make_plan() -> Plan:
+    steps = (
+        PlanStep("step-1", 1, "Inspect files", "Inspect the repository"),
+        PlanStep("step-2", 2, "Inspect tests", "Inspect the tests"),
+    )
+    return Plan(
+        id="plan-1",
+        session_id="session-1",
+        title="Demo",
+        task="Understand the project",
+        state=PlanState.RUNNING,
+        version=1,
+        source_markdown="# Demo",
+        run_id="run-1",
+        created_at="now",
+        updated_at="now",
+        steps=steps,
+    )
+
+
+def tool_response(call_id: str, path: str = ".") -> ModelResponse:
+    return ModelResponse(
+        content="Inspecting.",
+        tool_calls=(
+            ToolCall(
+                id=call_id,
+                name="workspace_list",
+                arguments={"path": path},
+            ),
+        ),
+    )
+
+
+def test_controller_executes_all_steps_in_one_agent_context(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response("call-1"),
+            ModelResponse(content="Repository inspected."),
+            tool_response("call-2"),
+            ModelResponse(content="Tests inspected."),
+        ]
+    )
+    updates: list[tuple[str, PlanStepState]] = []
+    controller = PlanController(
+        make_plan(),
+        tmp_path,
+        model,
+        permission_mode=PermissionMode.INSPECT,
+        language="en",
+        max_steps=4,
+        on_step=lambda step_id, state, _evidence, _error: updates.append((step_id, state)),
+    )
+
+    async def collect():
+        return [event async for event in controller.run()]
+
+    events = asyncio.run(collect())
+    assert [event.type for event in events if event.type.startswith("plan.step")] == [
+        "plan.step.started",
+        "plan.step.completed",
+        "plan.step.started",
+        "plan.step.completed",
+    ]
+    assert events[-2].type == "plan.completed"
+    assert events[-1].type == "run.completed"
+    assert [event.sequence for event in events] == list(range(len(events)))
+    assert updates[-1] == ("step-2", PlanStepState.COMPLETED)
+    assert any(
+        "Completed steps: ['Inspect files']" in message.content
+        for message in model.requests[2].messages
+    )
+
+
+def test_controller_pauses_when_step_is_incomplete(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response("call-1"),
+            ModelResponse(content="Summary without finishing."),
+        ]
+    )
+    controller = PlanController(
+        make_plan(),
+        tmp_path,
+        model,
+        permission_mode=PermissionMode.INSPECT,
+        language="en",
+        max_steps=2,
+    )
+
+    async def collect():
+        return [event async for event in controller.run()]
+
+    events = asyncio.run(collect())
+    assert events[-2].type == "plan.paused"
+    assert events[-1].type == "run.incomplete"
+    assert not any(event.type == "plan.completed" for event in events)
