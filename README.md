@@ -1,15 +1,19 @@
 # LeanHarness
 
-LeanHarness is a clean-room, local-first coding agent runtime written in
-Python. The project is being developed from an empty repository for a software
-engineering assessment.
+LeanHarness is a local-first Python coding-agent runtime with a same-origin
+web client. The current release supports persistent sessions, a bounded model
+gateway, a read-only inspection loop, and controlled coding execution.
+
+For the permission model and execution limits, see
+[`CONTROLLED_EXECUTION.md`](CONTROLLED_EXECUTION.md).
 
 ## Current status
 
 The current milestone provides an installable Python package, environment
 diagnostics, a provider-independent model gateway, single-turn streaming chat,
-a bounded read-only inspection loop, and persistent local sessions through both
-the CLI and responsive local web interface. File mutation, shell execution,
+a bounded coding loop, persistent local sessions, guarded unified-diff edits,
+verification command profiles, and read-only Git inspection through both the
+CLI and responsive local web interface. Arbitrary shell execution, Git writes,
 Plan Mode, and plugins remain intentionally out of scope.
 
 ## Prerequisites
@@ -70,7 +74,8 @@ $env:LEANHARNESS_MODEL_NAME = "deepseek-chat"
 $env:LEANHARNESS_MODEL_API_KEY = "your-api-key"
 uv run leanharness model check
 uv run leanharness chat "Reply with one short sentence."
-uv run leanharness run "Inspect this repository and explain its structure."
+uv run leanharness run "Inspect this repository and explain its structure." --permission inspect
+uv run leanharness run "Fix the failing test." --permission approve
 uv run leanharness serve
 ```
 
@@ -82,15 +87,18 @@ export LEANHARNESS_MODEL_NAME="deepseek-chat"
 export LEANHARNESS_MODEL_API_KEY="your-api-key"
 uv run leanharness model check
 uv run leanharness chat "Reply with one short sentence."
+uv run leanharness run "Fix the failing test." --permission approve
 uv run leanharness serve
 ```
 
 `LEANHARNESS_MODEL_API_KEY` may be omitted for a local endpoint that does not
 require authentication. Plain HTTP is accepted only for `localhost`,
-`127.0.0.1`, or `::1`. Chat and inspection runs persist public messages,
+`127.0.0.1`, or `::1`. Chat and coding runs persist public messages,
 summaries, and redacted event traces locally, but old messages are never
-injected into a later model request. The selected workspace is only inspected,
-never modified.
+injected into a later model request. Workspace changes are disabled in
+`inspect`, require per-call confirmation in `approve`, and execute directly in
+`unrestricted` while still enforcing tool-level path, command, timeout, and
+output limits.
 
 ## Local data
 
