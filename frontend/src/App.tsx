@@ -17,9 +17,6 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import rehypeHighlight from "rehype-highlight";
-import remarkGfm from "remark-gfm";
 
 import { streamChat, type ChatStreamer, type TurnEvent } from "./api/chat";
 import { fetchHealth, type HealthLoader, type HealthResponse } from "./api/health";
@@ -45,6 +42,8 @@ import {
   type SessionDetail,
   type SessionSummary,
 } from "./api/sessions";
+import { Markdown } from "./components/Markdown";
+import { RunProcess } from "./components/RunProcess";
 
 type InspectorTab = "plan" | "trace";
 type RunMode = "chat" | "inspect";
@@ -107,6 +106,7 @@ interface PersistedTraceEvent {
   tool?: string;
   summary?: string;
   error?: { code: string; message: string };
+  metadata?: Record<string, unknown>;
 }
 
 interface PendingApproval {
@@ -625,64 +625,6 @@ function App({
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
-}
-
-function Markdown({ content }: { content: string }) {
-  return (
-    <div className="markdown-body">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
-        skipHtml
-        urlTransform={(url) => /^(https?:|mailto:)/i.test(url) ? url : ""}
-        components={{
-          img: () => null,
-          a: ({ node: _node, ...props }) => (
-            <a {...props} target="_blank" rel="noreferrer noopener" />
-          ),
-        }}
-      >
-        {content}
-      </ReactMarkdown>
-    </div>
-  );
-}
-
-function RunProcess({
-  trace,
-  open,
-  onToggle,
-  running,
-}: {
-  trace: Array<TraceEvent | SavedRunTrace | PersistedTraceEvent>;
-  open: boolean;
-  onToggle: () => void;
-  running: boolean;
-}) {
-  const actions = trace.filter((event) =>
-    ["assistant.progress", "tool.requested", "tool.started", "tool.completed", "approval.required", "approval.resolved"].includes(event.type),
-  );
-  if (!actions.length) return null;
-  return (
-    <section className={`run-process ${open ? "is-open" : "is-closed"}`}>
-      <button type="button" className="run-process-header" onClick={onToggle} aria-expanded={open}>
-        <Activity size={15} />
-        <span>{running ? "执行过程" : "执行过程已结束"}</span>
-        <span className="run-process-count">{actions.length} 个动作</span>
-        <span className="run-process-chevron" aria-hidden="true">{open ? "−" : "+"}</span>
-      </button>
-      {open && (
-        <ol className="run-process-list">
-          {actions.map((event) => (
-            <li key={`${event.run_id ?? "run"}-${event.sequence}`}>
-              <span>{event.sequence}</span>
-              <strong>{traceLabel(event)}</strong>
-            </li>
-          ))}
-        </ol>
-      )}
-    </section>
-  );
 }
 
 function errorMessage(error: unknown): string {

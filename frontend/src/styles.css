@@ -457,6 +457,7 @@ textarea:focus-visible {
 .run-process-list { margin: 0; padding: 4px 10px 8px 32px; list-style: none; }
 .run-process-list li { display: grid; grid-template-columns: 24px minmax(0, 1fr); min-height: 28px; align-items: center; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .run-process-list strong { overflow: hidden; color: #4c5654; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.run-process-metrics { padding: 7px 10px 9px 32px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .run-process-finish { color: var(--accent-dark); }
 
 .message.is-error .message-body p {

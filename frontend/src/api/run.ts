@@ -5,6 +5,7 @@ interface RunEventBase {
   run_id: string;
   session_id?: string;
   step?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export type RunEvent =
