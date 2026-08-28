@@ -17,6 +17,9 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
+import remarkGfm from "remark-gfm";
 
 import { streamChat, type ChatStreamer, type TurnEvent } from "./api/chat";
 import { fetchHealth, type HealthLoader, type HealthResponse } from "./api/health";
@@ -25,7 +28,13 @@ import {
   type ModelStatus,
   type ModelStatusLoader,
 } from "./api/model";
-import { streamRun, type RunEvent, type RunStreamer } from "./api/run";
+import {
+  resolveRunApproval,
+  streamRun,
+  type ApprovalResolver,
+  type RunEvent,
+  type RunStreamer,
+} from "./api/run";
 import {
   createSession,
   deleteSession,
@@ -51,6 +60,7 @@ interface ConversationMessage {
   role: "user" | "assistant" | "progress";
   content: string;
   status: MessageStatus;
+  runId?: string;
 }
 
 interface AppProps {
@@ -58,6 +68,7 @@ interface AppProps {
   modelStatusLoader?: ModelStatusLoader;
   chatStreamer?: ChatStreamer;
   runStreamer?: RunStreamer;
+  approvalResolver?: ApprovalResolver;
   sessionClient?: SessionClient;
 }
 
@@ -98,11 +109,21 @@ interface PersistedTraceEvent {
   error?: { code: string; message: string };
 }
 
+interface PendingApproval {
+  id: string;
+  runId: string;
+  tool: string;
+  summary: string;
+  parameters: Record<string, unknown>;
+  preview?: string;
+}
+
 function App({
   healthLoader = fetchHealth,
   modelStatusLoader = fetchModelStatus,
   chatStreamer = streamChat,
   runStreamer = streamRun,
+  approvalResolver = resolveRunApproval,
   sessionClient = defaultSessionClient,
 }: AppProps) {
   const [leftOpen, setLeftOpen] = useState(false);
@@ -113,6 +134,10 @@ function App({
   const [mode, setMode] = useState<RunMode>("chat");
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [trace, setTrace] = useState<Array<TraceEvent | SavedRunTrace | PersistedTraceEvent>>([]);
+  const [openProcesses, setOpenProcesses] = useState<Record<string, boolean>>({});
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [approvalSubmitting, setApprovalSubmitting] = useState(false);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -207,7 +232,7 @@ function App({
       return next;
     });
     setInput("");
-    setTrace([]);
+    setActiveRunId(null);
     setInspectorTab("trace");
     setIsStreaming(true);
 
@@ -217,6 +242,11 @@ function App({
           message,
           (event) => {
             setTrace((current) => [...current, event]);
+            if (event.run_id) {
+              setActiveRunId(event.run_id);
+              updateMessage(userId, (current) => ({ ...current, runId: event.run_id }));
+              updateMessage(assistantId, (current) => ({ ...current, runId: event.run_id }));
+            }
             if (event.session_id && event.session_id !== resolvedSessionId) {
               resolvedSessionId = event.session_id;
               setSessionId(event.session_id);
@@ -245,25 +275,46 @@ function App({
           message,
           (event) => {
             setTrace((current) => [...current, event]);
+            setActiveRunId(event.run_id);
+            updateMessage(userId, (current) => ({ ...current, runId: event.run_id }));
             if (event.session_id && event.session_id !== resolvedSessionId) {
               resolvedSessionId = event.session_id;
               setSessionId(event.session_id);
               window.localStorage.setItem("leanharness.session", event.session_id);
             }
             if (event.type === "assistant.progress") {
-              appendMessage("progress", event.summary, "complete");
+              setProcessVisibility(event.run_id, true);
+            } else if (event.type === "approval.required") {
+              const metadata = event.metadata ?? {};
+              setPendingApproval({
+                id: String(metadata.approval_id),
+                runId: event.run_id,
+                tool: event.tool,
+                summary: event.summary ?? "此操作需要批准",
+                parameters: isRecord(metadata.parameters) ? metadata.parameters : {},
+                preview: typeof metadata.preview === "string" ? metadata.preview : undefined,
+              });
+              setProcessVisibility(event.run_id, true);
+            } else if (event.type === "approval.resolved") {
+              setPendingApproval(null);
+              setApprovalSubmitting(false);
             } else if (event.type === "run.completed") {
-              appendMessage("assistant", event.answer, "complete");
+              appendMessage("assistant", event.answer, "complete", event.run_id);
+              setProcessVisibility(event.run_id, false);
             } else if (event.type === "run.incomplete") {
               appendMessage(
                 "assistant",
                 event.answer || event.summary || "运行预算已用完，任务尚未完成",
                 "incomplete",
+                event.run_id,
               );
+              setProcessVisibility(event.run_id, false);
             } else if (event.type === "run.failed") {
-              appendMessage("assistant", event.error.message, "error");
+              appendMessage("assistant", event.error.message, "error", event.run_id);
+              setProcessVisibility(event.run_id, false);
             } else if (event.type === "run.cancelled") {
-              appendMessage("assistant", "已停止运行", "cancelled");
+              appendMessage("assistant", "已停止运行", "cancelled", event.run_id);
+              setProcessVisibility(event.run_id, false);
             }
           },
           controller.signal,
@@ -288,6 +339,8 @@ function App({
       }
     } finally {
       if (activeRequest.current === controller) activeRequest.current = null;
+      setPendingApproval(null);
+      setApprovalSubmitting(false);
       setIsStreaming(false);
       await refreshSessionList(resolvedSessionId);
     }
@@ -297,15 +350,15 @@ function App({
     role: ConversationMessage["role"],
     content: string,
     status: MessageStatus,
+    runId?: string,
   ) {
     const id = nextMessageId.current++;
-    setMessages((current) => [...current, { id, role, content, status }]);
+    setMessages((current) => [...current, { id, role, content, status, runId }]);
   }
 
   function selectMode(nextMode: RunMode) {
     if (isStreaming || nextMode === mode) return;
     setMode(nextMode);
-    setTrace([]);
   }
 
   async function selectSession(id: string) {
@@ -320,6 +373,7 @@ function App({
           role: message.role,
           content: message.content,
           status: (message.status as MessageStatus) || "complete",
+          runId: message.run_id ?? undefined,
         })),
       );
       setTrace(
@@ -338,6 +392,9 @@ function App({
           ],
         ),
       );
+      setOpenProcesses({});
+      setActiveRunId(null);
+      setPendingApproval(null);
       window.localStorage.setItem("leanharness.session", id);
       setSessionError(null);
     } catch (error: unknown) {
@@ -410,6 +467,21 @@ function App({
     }
   }
 
+  async function decideApproval(decision: "approve" | "reject") {
+    if (!pendingApproval || approvalSubmitting) return;
+    setApprovalSubmitting(true);
+    try {
+      await approvalResolver(pendingApproval.runId, pendingApproval.id, decision);
+    } catch (error: unknown) {
+      setSessionError(errorMessage(error));
+      setApprovalSubmitting(false);
+    }
+  }
+
+  function setProcessVisibility(runId: string, open: boolean) {
+    setOpenProcesses((current) => ({ ...current, [runId]: open }));
+  }
+
   function updateMessage(
     id: number,
     update: (message: ConversationMessage) => ConversationMessage,
@@ -452,10 +524,10 @@ function App({
       <main className="workspace">
         <header className="workspace-header">
           <button className="icon-button mobile-only" type="button" title="打开项目导航" aria-label="打开项目导航" onClick={() => setLeftOpen(true)}><Menu size={19} /></button>
-          <div className="session-identity"><span className="session-title">{sessions.find((item) => item.id === sessionId)?.title || (mode === "chat" ? "新会话" : "只读检查")}</span><span className="session-subtitle">{workspace}</span></div>
+          <div className="session-identity"><span className="session-title">{sessions.find((item) => item.id === sessionId)?.title || (mode === "chat" ? "新会话" : "编码任务")}</span><span className="session-subtitle">{workspace}</span></div>
           <div className="mode-select" role="group" aria-label="运行模式">
             <button type="button" className={`mode-button ${mode === "chat" ? "active" : ""}`} aria-pressed={mode === "chat"} disabled={isStreaming} onClick={() => selectMode("chat")}>单轮</button>
-            <button type="button" className={`mode-button ${mode === "inspect" ? "active" : ""}`} aria-pressed={mode === "inspect"} disabled={isStreaming} onClick={() => selectMode("inspect")}>检查</button>
+            <button type="button" className={`mode-button ${mode === "inspect" ? "active" : ""}`} aria-pressed={mode === "inspect"} disabled={isStreaming} onClick={() => selectMode("inspect")}>Agent</button>
           </div>
           <button className="icon-button mobile-only" type="button" title="打开检查器" aria-label="打开检查器" onClick={() => setRightOpen(true)}><PanelRight size={19} /></button>
         </header>
@@ -470,22 +542,52 @@ function App({
           ) : (
             <div className="message-list">
               {messages.map((message) => (
-                <article key={message.id} className={`message message-${message.role} is-${message.status}`}>
+                <div key={message.id}>
+                {!isStreaming && message.role === "assistant" && message.runId && trace.some((event) => event.run_id === message.runId) && (
+                  <RunProcess
+                    trace={trace.filter((event) => event.run_id === message.runId)}
+                    open={openProcesses[message.runId] ?? false}
+                    onToggle={() => setProcessVisibility(message.runId!, !(openProcesses[message.runId!] ?? false))}
+                    running={false}
+                  />
+                )}
+                <article className={`message message-${message.role} is-${message.status}`}>
                   <div className="message-icon" aria-hidden="true">{message.role === "user" ? <UserRound size={16} /> : message.role === "progress" ? <Activity size={16} /> : <Bot size={16} />}</div>
                   <div className="message-body">
                     <strong>{message.role === "user" ? "你" : message.role === "progress" ? "行动" : modelName || "模型"}</strong>
-                    <p>{message.content || "正在生成..."}</p>
+                    <div className="message-content">
+                      {message.content ? (message.role === "assistant" ? <Markdown content={message.content} /> : message.content) : "正在生成..."}
+                    </div>
                   </div>
                 </article>
+                </div>
               ))}
+              {isStreaming && activeRunId && trace.some((event) => event.run_id === activeRunId && (event.type === "assistant.progress" || event.type.startsWith("tool.") || event.type.startsWith("approval."))) && (
+                <RunProcess
+                  trace={trace.filter((event) => event.run_id === activeRunId)}
+                  open={openProcesses[activeRunId] ?? true}
+                  onToggle={() => setProcessVisibility(activeRunId, !(openProcesses[activeRunId] ?? true))}
+                  running
+                />
+              )}
             </div>
           )}
         </section>
 
         <form className="composer" onSubmit={(event) => { event.preventDefault(); void submitMessage(); }}>
+          {pendingApproval && (
+            <div className="approval-panel" role="alert">
+              <div className="approval-heading"><strong>{pendingApproval.summary}</strong><span>{pendingApproval.tool}</span></div>
+              {pendingApproval.preview ? <pre>{pendingApproval.preview}</pre> : <code>{JSON.stringify(pendingApproval.parameters)}</code>}
+              <div className="approval-actions">
+                <button type="button" disabled={approvalSubmitting} onClick={() => void decideApproval("reject")}>拒绝</button>
+                <button type="button" className="approve-button" disabled={approvalSubmitting} onClick={() => void decideApproval("approve")}>批准一次</button>
+              </div>
+            </div>
+          )}
           <textarea aria-label="任务输入" placeholder={modelStatus.status === "ready" && !modelStatus.data.configured ? "请先配置模型环境变量" : mode === "chat" ? "输入一条消息" : "输入一个仓库分析任务"} rows={2} value={input} maxLength={32_000} disabled={health.status !== "ready" || modelStatus.status !== "ready" || !modelStatus.data.configured || isStreaming} onChange={(event) => setInput(event.target.value)} />
           <div className="composer-actions">
-            <div className="composer-settings"><label htmlFor="permission-mode">权限</label><select id="permission-mode" value={permissionMode} onChange={(event) => void changePermission(event.target.value as PermissionMode)} disabled={isStreaming}><option value="inspect">只读</option><option value="approve">人类批准（当前仍只读）</option><option value="unrestricted">完全权限（当前仍只读）</option></select></div><span className="composer-state">{isStreaming ? mode === "chat" ? "模型正在生成" : "Agent 正在检查" : modelStatus.status === "ready" && modelStatus.data.configured ? mode === "chat" ? "单轮对话 · 本地保存" : "只读检查 · 本地保存" : `模型${modelCopy}`}</span>
+            <div className="composer-settings"><label htmlFor="permission-mode">权限</label><select id="permission-mode" value={permissionMode} onChange={(event) => void changePermission(event.target.value as PermissionMode)} disabled={isStreaming}><option value="inspect">只读检查</option><option value="approve">逐次批准</option><option value="unrestricted">受控直接执行</option></select></div><span className="composer-state">{isStreaming ? mode === "chat" ? "模型正在生成" : "Agent 正在执行" : modelStatus.status === "ready" && modelStatus.data.configured ? mode === "chat" ? "单轮对话 · 本地保存" : "受控编码 · 本地保存" : `模型${modelCopy}`}</span>
             {isStreaming ? (
               <button className="send-button stop-button" type="button" aria-label={mode === "chat" ? "停止生成" : "停止运行"} title={mode === "chat" ? "停止生成" : "停止运行"} onClick={() => activeRequest.current?.abort()}><Square size={14} fill="currentColor" /></button>
             ) : (
@@ -510,7 +612,7 @@ function App({
             {trace.length === 0 ? <div className="panel-empty"><Activity size={18} /><strong>没有运行轨迹</strong><span>0 条事件</span></div> : <ol className="trace-list">{trace.map((event) => <li key={`${"run_id" in event ? event.run_id : "turn"}-${event.sequence}-${event.type}`}><span>{event.sequence}</span><strong title={traceLabel(event)}>{traceLabel(event)}</strong></li>)}</ol>}
           </div>
         )}
-        <div className="inspector-summary"><div><span>模型</span><strong title={modelName ?? undefined}>{modelCopy}</strong></div><div><span>权限</span><strong>{mode === "inspect" ? "只读" : "未启用"}</strong></div></div>
+        <div className="inspector-summary"><div><span>模型</span><strong title={modelName ?? undefined}>{modelCopy}</strong></div><div><span>权限</span><strong>{permissionMode === "inspect" ? "只读检查" : permissionMode === "approve" ? "逐次批准" : "受控直接执行"}</strong></div></div>
       </aside>
 
       <footer className="status-bar" aria-label="运行状态">
@@ -525,6 +627,64 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
+function Markdown({ content }: { content: string }) {
+  return (
+    <div className="markdown-body">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeHighlight]}
+        skipHtml
+        urlTransform={(url) => /^(https?:|mailto:)/i.test(url) ? url : ""}
+        components={{
+          img: () => null,
+          a: ({ node: _node, ...props }) => (
+            <a {...props} target="_blank" rel="noreferrer noopener" />
+          ),
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function RunProcess({
+  trace,
+  open,
+  onToggle,
+  running,
+}: {
+  trace: Array<TraceEvent | SavedRunTrace | PersistedTraceEvent>;
+  open: boolean;
+  onToggle: () => void;
+  running: boolean;
+}) {
+  const actions = trace.filter((event) =>
+    ["assistant.progress", "tool.requested", "tool.started", "tool.completed", "approval.required", "approval.resolved"].includes(event.type),
+  );
+  if (!actions.length) return null;
+  return (
+    <section className={`run-process ${open ? "is-open" : "is-closed"}`}>
+      <button type="button" className="run-process-header" onClick={onToggle} aria-expanded={open}>
+        <Activity size={15} />
+        <span>{running ? "执行过程" : "执行过程已结束"}</span>
+        <span className="run-process-count">{actions.length} 个动作</span>
+        <span className="run-process-chevron" aria-hidden="true">{open ? "−" : "+"}</span>
+      </button>
+      {open && (
+        <ol className="run-process-list">
+          {actions.map((event) => (
+            <li key={`${event.run_id ?? "run"}-${event.sequence}`}>
+              <span>{event.sequence}</span>
+              <strong>{traceLabel(event)}</strong>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "模型请求失败";
 }
@@ -536,6 +696,10 @@ function traceLabel(event: TraceEvent | SavedRunTrace | PersistedTraceEvent): st
   if ("tool" in event && event.tool) return `${event.type}: ${event.tool}`;
   if ("summary" in event && event.summary) return `${event.type}: ${event.summary}`;
   return event.type;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 export default App;

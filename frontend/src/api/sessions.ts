@@ -8,6 +8,7 @@ export interface SessionSummary {
   created_at: string;
   updated_at: string;
   last_run_state: string | null;
+  language?: "zh" | "en" | "same" | null;
 }
 
 export interface SessionDetail {
@@ -19,6 +20,7 @@ export interface SessionDetail {
     content: string;
     status: string;
     created_at: string;
+    run_id?: string | null;
   }>;
   runs: Array<{
     id: string;

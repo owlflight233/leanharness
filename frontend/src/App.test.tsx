@@ -6,7 +6,7 @@ import App, { type SessionClient } from "./App";
 import type { ChatStreamer } from "./api/chat";
 import type { HealthLoader, HealthResponse } from "./api/health";
 import type { ModelStatusLoader } from "./api/model";
-import type { RunStreamer } from "./api/run";
+import type { ApprovalResolver, RunStreamer } from "./api/run";
 import type { PermissionMode, SessionDetail, SessionSummary } from "./api/sessions";
 
 const healthy: HealthResponse = {
@@ -237,13 +237,16 @@ describe("application shell", () => {
         runStreamer={inspection}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "检查" }));
+    await user.click(screen.getByRole("button", { name: "Agent" }));
     await user.type(await screen.findByLabelText("任务输入"), "分析仓库");
     await user.click(screen.getByRole("button", { name: "发送任务" }));
 
     expect(await screen.findByText("仓库包含 README。")).toBeInTheDocument();
-    expect(screen.getByText("读取 README")).toBeInTheDocument();
-    expect(screen.getByText(/tool.completed: workspace_read/)).toBeInTheDocument();
+    const process = screen.getByRole("button", { name: /执行过程已结束/ });
+    expect(process).toHaveAttribute("aria-expanded", "false");
+    await user.click(process);
+    expect(screen.getAllByText(/读取 README/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/tool.completed: workspace_read/).length).toBeGreaterThan(0);
   });
 
   it("restores the most recent persisted session and its run summary", async () => {
@@ -347,5 +350,152 @@ describe("application shell", () => {
 
     await waitFor(() => expect(chat).toHaveBeenCalled());
     expect(chat.mock.calls[0]?.[3]).toBe(baseSession.id);
+  });
+
+  it("renders safe Markdown without raw HTML or dangerous links", async () => {
+    const user = userEvent.setup();
+    const markdownChat: ChatStreamer = async (_message, onEvent) => {
+      onEvent({ type: "turn.started", sequence: 0, run_id: "markdown-run" });
+      onEvent({
+        type: "content.delta",
+        sequence: 1,
+        run_id: "markdown-run",
+        content: "# 标题\n\n| 列 | 值 |\n|---|---|\n| A | 1 |\n\n```ts\nconst value = 1\n```\n\n[危险链接](javascript:alert(1))\n\n<strong>原始 HTML</strong>",
+      });
+      onEvent({ type: "turn.completed", sequence: 2, run_id: "markdown-run" });
+    };
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        chatStreamer={markdownChat}
+      />,
+    );
+
+    await user.type(await screen.findByLabelText("任务输入"), "渲染 Markdown");
+    await user.click(screen.getByRole("button", { name: "发送任务" }));
+
+    expect(await screen.findByRole("heading", { name: "标题" })).toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByText("const")).toHaveClass("hljs-keyword");
+    expect(screen.getByText("危险链接")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "危险链接" })).not.toBeInTheDocument();
+    expect(screen.getByText("原始 HTML")).toBeInTheDocument();
+    expect(screen.getByText("原始 HTML").tagName).toBe("P");
+  });
+
+  it("keeps persisted run actions independently collapsed", async () => {
+    const detail = sessionDetail();
+    detail.messages[0]!.run_id = "run-1";
+    detail.messages[1]!.run_id = "run-1";
+    detail.messages.push(
+      {
+        id: "message-3",
+        sequence: 2,
+        role: "user",
+        content: "第二个任务",
+        status: "complete",
+        created_at: baseSession.updated_at,
+        run_id: "run-2",
+      },
+      {
+        id: "message-4",
+        sequence: 3,
+        role: "assistant",
+        content: "第二个结论",
+        status: "complete",
+        created_at: baseSession.updated_at,
+        run_id: "run-2",
+      },
+    );
+    detail.runs[0]!.trace = [
+      { type: "assistant.progress", sequence: 1, summary: "第一个动作" },
+    ];
+    detail.runs.push({
+      ...detail.runs[0]!,
+      id: "run-2",
+      task: "第二个任务",
+      answer: "第二个结论",
+      trace: [{ type: "assistant.progress", sequence: 1, summary: "第二个动作" }],
+    });
+    const client = mockSessionClient();
+    client.get = vi.fn(async () => detail);
+
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        sessionClient={client}
+      />,
+    );
+
+    const processes = await screen.findAllByRole("button", { name: /执行过程已结束/ });
+    expect(processes).toHaveLength(2);
+    expect(processes[0]).toHaveAttribute("aria-expanded", "false");
+    expect(processes[1]).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(processes[0]!);
+    expect(processes[0]).toHaveAttribute("aria-expanded", "true");
+    expect(processes[1]).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText(/第一个动作/)).toBeInTheDocument();
+    expect(screen.queryByText(/第二个动作/)).not.toBeInTheDocument();
+  });
+
+  it("resolves an interactive approval and resumes the run", async () => {
+    const user = userEvent.setup();
+    let resume: (() => void) | undefined;
+    const approvalResolved = new Promise<void>((resolve) => { resume = resolve; });
+    const approvalResolver = vi.fn<ApprovalResolver>(async () => { resume?.(); });
+    const codingRun: RunStreamer = async (_task, onEvent) => {
+      onEvent({ type: "run.started", sequence: 0, run_id: "approval-run" });
+      onEvent({
+        type: "approval.required",
+        sequence: 1,
+        run_id: "approval-run",
+        tool: "workspace_patch",
+        summary: "批准修改 value.txt",
+        metadata: {
+          approval_id: "approval-1",
+          parameters: { files: ["value.txt"] },
+          preview: "--- a/value.txt\n+++ b/value.txt",
+        },
+      });
+      await approvalResolved;
+      onEvent({
+        type: "approval.resolved",
+        sequence: 2,
+        run_id: "approval-run",
+        tool: "workspace_patch",
+        metadata: { approval_id: "approval-1", decision: "approve" },
+      });
+      onEvent({
+        type: "run.completed",
+        sequence: 3,
+        run_id: "approval-run",
+        answer: "修改已完成。",
+      });
+    };
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        runStreamer={codingRun}
+        approvalResolver={approvalResolver}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Agent" }));
+    await user.type(await screen.findByLabelText("任务输入"), "修改 value.txt");
+    await user.click(screen.getByRole("button", { name: "发送任务" }));
+    await user.click(await screen.findByRole("button", { name: "批准一次" }));
+
+    await waitFor(() =>
+      expect(approvalResolver).toHaveBeenCalledWith(
+        "approval-run",
+        "approval-1",
+        "approve",
+      ),
+    );
+    expect(await screen.findByText("修改已完成。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批准一次" })).not.toBeInTheDocument();
   });
 });

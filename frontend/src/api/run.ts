@@ -16,6 +16,12 @@ export type RunEvent =
       tool: string;
       metadata?: Record<string, unknown>;
     })
+  | (RunEventBase & {
+      type: "approval.required" | "approval.resolved";
+      tool: string;
+      summary?: string;
+      metadata?: Record<string, unknown>;
+    })
   | (RunEventBase & { type: "usage.reported"; usage: Usage })
   | (RunEventBase & { type: "run.completed"; answer: string; summary?: string })
   | (RunEventBase & { type: "run.incomplete"; answer?: string; summary?: string })
@@ -29,6 +35,28 @@ export type RunStreamer = (
   maxSteps?: number,
   sessionId?: string,
 ) => Promise<void>;
+
+export type ApprovalResolver = (
+  runId: string,
+  approvalId: string,
+  decision: "approve" | "reject",
+) => Promise<void>;
+
+export async function resolveRunApproval(
+  runId: string,
+  approvalId: string,
+  decision: "approve" | "reject",
+): Promise<void> {
+  const response = await fetch(
+    `/api/v1/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ decision }),
+    },
+  );
+  if (!response.ok) throw new Error(await readApiError(response));
+}
 
 export async function streamRun(
   task: string,
@@ -98,7 +126,7 @@ function isRunEvent(value: unknown): value is RunEvent {
     return false;
   }
   if (value.type === "assistant.progress") return typeof value.summary === "string";
-  if (["tool.requested", "tool.started", "tool.completed"].includes(value.type)) {
+  if (["tool.requested", "tool.started", "tool.completed", "approval.required", "approval.resolved"].includes(value.type)) {
     return typeof value.tool === "string";
   }
   if (value.type === "usage.reported") return isRecord(value.usage);

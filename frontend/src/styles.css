@@ -399,6 +399,66 @@ textarea:focus-visible {
   white-space: pre-wrap;
 }
 
+.message-content {
+  overflow-wrap: anywhere;
+  color: #303937;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+.markdown-body p { white-space: normal; }
+.markdown-body pre {
+  overflow-x: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #f1f4f3;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.markdown-body code { font-family: "Cascadia Code", Consolas, monospace; font-size: 0.92em; }
+.markdown-body :not(pre) > code { padding: 2px 4px; border-radius: 3px; background: #edf1f0; }
+.markdown-body table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+.markdown-body th, .markdown-body td { padding: 5px 8px; border: 1px solid var(--border); text-align: left; }
+.markdown-body a { color: var(--accent-dark); text-decoration: underline; }
+.markdown-body .hljs-keyword,
+.markdown-body .hljs-selector-tag,
+.markdown-body .hljs-literal { color: #8b3f63; }
+.markdown-body .hljs-string,
+.markdown-body .hljs-attr { color: #246b57; }
+.markdown-body .hljs-number,
+.markdown-body .hljs-built_in { color: #875b20; }
+.markdown-body .hljs-comment { color: #71807c; font-style: italic; }
+
+.run-process {
+  margin: 12px 0 4px 40px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+}
+.run-process-header {
+  display: flex;
+  width: 100%;
+  min-height: 36px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+  font-size: 12px;
+}
+.run-process-count { margin-left: auto; color: var(--muted); font-size: 11px; }
+.run-process-chevron { width: 14px; color: var(--muted); text-align: center; }
+.run-process-list { margin: 0; padding: 4px 10px 8px 32px; list-style: none; }
+.run-process-list li { display: grid; grid-template-columns: 24px minmax(0, 1fr); min-height: 28px; align-items: center; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
+.run-process-list strong { overflow: hidden; color: #4c5654; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.run-process-finish { color: var(--accent-dark); }
+
 .message.is-error .message-body p {
   color: var(--danger);
 }
@@ -466,6 +526,19 @@ textarea:focus-visible {
   color: var(--text);
   background: transparent;
 }
+
+.approval-panel {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-strong);
+  background: #fff8e8;
+}
+.approval-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12px; }
+.approval-heading span { color: var(--muted); font-family: "Cascadia Code", Consolas, monospace; font-size: 10px; }
+.approval-panel pre { max-height: 180px; overflow: auto; padding: 8px; border: 1px solid #e2d5ae; border-radius: 4px; background: #fffdf7; font-size: 10px; white-space: pre-wrap; }
+.approval-panel > code { display: block; margin: 8px 0; overflow-wrap: anywhere; font-size: 10px; }
+.approval-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.approval-actions button { padding: 5px 9px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); font-size: 11px; }
+.approval-actions .approve-button { border-color: var(--accent); color: #fff; background: var(--accent); }
 
 .composer textarea::placeholder {
   color: #8a9391;
