@@ -18,6 +18,7 @@ export interface Plan {
   source_markdown: string;
   run_id?: string | null;
   steps: PlanStep[];
+  generation_trace?: Array<Record<string, unknown>>;
 }
 
 export async function createPlan(task: string, sessionId?: string): Promise<Plan> {
@@ -28,6 +29,38 @@ export async function createPlan(task: string, sessionId?: string): Promise<Plan
   });
   if (!response.ok) throw new Error(await readError(response));
   return (await response.json()) as Plan;
+}
+
+export async function streamPlanCreation(
+  task: string,
+  onEvent: (event: Record<string, unknown>) => void,
+  signal: AbortSignal,
+  sessionId?: string,
+): Promise<void> {
+  const response = await fetch("/api/v1/plans/stream", {
+    method: "POST",
+    headers: { Accept: "application/x-ndjson", "Content-Type": "application/json" },
+    body: JSON.stringify({ task, ...(sessionId ? { session_id: sessionId } : {}) }),
+    signal,
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  if (!response.body) throw new Error("计划生成没有返回事件流");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) if (line.trim()) onEvent(JSON.parse(line) as Record<string, unknown>);
+      if (done) break;
+    }
+    if (buffer.trim()) onEvent(JSON.parse(buffer) as Record<string, unknown>);
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 export async function fetchPlan(id: string): Promise<Plan> {
@@ -87,6 +120,15 @@ export async function* streamPlanAction(
   } finally {
     reader.releaseLock();
   }
+}
+
+export async function rejectPlan(id: string): Promise<Plan> {
+  const response = await fetch(`/api/v1/plans/${encodeURIComponent(id)}/reject`, {
+    method: "POST",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  return (await response.json()) as Plan;
 }
 
 async function readError(response: Response): Promise<string> {

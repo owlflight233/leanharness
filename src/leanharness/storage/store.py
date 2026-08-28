@@ -225,14 +225,16 @@ class LocalStore:
         status: str = "complete",
         *,
         run_id: str | None = None,
+        kind: str = "chat",
+        plan_id: str | None = None,
     ) -> MessageRecord:
         self.get_session(session_id)
         safe_content = self.redactor.text(content)
         message_id = str(uuid.uuid4())
         created_at = utc_now()
         row = self.connection.execute(
-            """INSERT INTO messages(id, session_id, sequence, role, content, status, created_at, run_id)
-               SELECT ?, ?, COALESCE(MAX(sequence), -1) + 1, ?, ?, ?, ?, ?
+            """INSERT INTO messages(id, session_id, sequence, role, content, status, created_at, run_id, kind, plan_id)
+               SELECT ?, ?, COALESCE(MAX(sequence), -1) + 1, ?, ?, ?, ?, ?, ?, ?
                FROM messages WHERE session_id=? RETURNING sequence""",
             (
                 message_id,
@@ -242,12 +244,14 @@ class LocalStore:
                 status,
                 created_at,
                 run_id,
+                kind,
+                plan_id,
                 session_id,
             ),
         ).fetchone()
         sequence = int(row["sequence"])
         message = MessageRecord(
-            message_id, session_id, sequence, role, safe_content, status, created_at, run_id
+            message_id, session_id, sequence, role, safe_content, status, created_at, run_id, kind, plan_id
         )
         with self.connection:
             self.connection.execute(
@@ -273,6 +277,8 @@ class LocalStore:
                         "status",
                         "created_at",
                         "run_id",
+                        "kind",
+                        "plan_id",
                     )
                 )
             )

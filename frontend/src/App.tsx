@@ -2,7 +2,6 @@ import {
   Activity,
   Blocks,
   Bot,
-  CircleDot,
   FolderGit2,
   Menu,
   PanelRight,
@@ -43,17 +42,19 @@ import {
   type SessionSummary,
 } from "./api/sessions";
 import { Markdown } from "./components/Markdown";
+import { PlanCard } from "./components/PlanCard";
 import { RunProcess } from "./components/RunProcess";
 import { createWorkspace, selectWorkspace, type WorkspaceClient } from "./api/workspace";
 import {
-  createPlan,
   fetchPlan,
+  rejectPlan,
+  streamPlanCreation,
   streamPlanAction,
   updatePlan,
   type Plan,
 } from "./api/plans";
 
-type InspectorTab = "plan" | "trace";
+type InspectorTab = "trace";
 type RunMode = "agent" | "plan";
 type TraceEvent = TurnEvent | RunEvent;
 type LoadState<T> =
@@ -64,10 +65,11 @@ type MessageStatus = "streaming" | "complete" | "incomplete" | "error" | "cancel
 
 interface ConversationMessage {
   id: number;
-  role: "user" | "assistant" | "progress";
+  role: "user" | "assistant" | "progress" | "plan";
   content: string;
   status: MessageStatus;
   runId?: string;
+  plan?: Plan;
 }
 
 interface AppProps {
@@ -143,7 +145,7 @@ function App({
   const useLegacyChatTransport = providedRunStreamer === undefined && legacyChatStreamer !== undefined;
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
-  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("plan");
+  const [, setInspectorTab] = useState<InspectorTab>("trace");
   const [health, setHealth] = useState<LoadState<HealthResponse>>({ status: "loading" });
   const [modelStatus, setModelStatus] = useState<LoadState<ModelStatus>>({ status: "loading" });
   const [mode, setMode] = useState<RunMode>("agent");
@@ -237,15 +239,54 @@ function App({
     const userId = nextMessageId.current++;
     if (mode === "plan") {
       setInput("");
+      setMessages((current) => [
+        ...current,
+        { id: userId, role: "user", content: message, status: "complete" },
+      ]);
+      setInspectorTab("trace");
+      const activeSessionId = sessionId;
+      let resolvedSessionId = activeSessionId;
+      const controller = new AbortController();
+      activeRequest.current = controller;
+      setActiveRunId(null);
+      setIsStreaming(true);
       setPlanLoading(true);
       try {
-        const created = await createPlan(input.trim(), sessionId ?? undefined);
-        setPlan(created);
-        setInspectorTab("plan");
+        await streamPlanCreation(
+          message.trim(),
+          (event) => {
+            setTrace((current) => [...current, event as TraceEvent]);
+            if (typeof event.run_id === "string") {
+              const runId = event.run_id;
+              setActiveRunId(runId);
+              updateMessage(userId, (current) => ({ ...current, runId }));
+            }
+            if (typeof event.session_id === "string" && event.session_id !== resolvedSessionId) {
+              resolvedSessionId = event.session_id;
+              setSessionId(event.session_id);
+              window.localStorage.setItem("leanharness.session", event.session_id);
+            }
+            if (event.type === "plan.created" && isRecord(event.plan)) {
+              const created = event.plan as unknown as Plan;
+              setPlan(created);
+              appendMessage("plan", created.source_markdown, "complete", String(event.run_id), created);
+              setProcessVisibility(String(event.run_id), false);
+            }
+            if (event.type === "assistant.progress" || event.type === "tool.requested" || event.type === "tool.started" || event.type === "approval.required") {
+              if (typeof event.run_id === "string") setProcessVisibility(event.run_id, true);
+            }
+          },
+          controller.signal,
+          activeSessionId ?? undefined,
+        );
       } catch (error: unknown) {
         setSessionError(errorMessage(error));
       } finally {
+        if (activeRequest.current === controller) activeRequest.current = null;
+        setActiveRunId(null);
+        setIsStreaming(false);
         setPlanLoading(false);
+        await refreshSessionList(resolvedSessionId);
       }
       return;
     }
@@ -382,9 +423,10 @@ function App({
     content: string,
     status: MessageStatus,
     runId?: string,
+    planRecord?: Plan,
   ) {
     const id = nextMessageId.current++;
-    setMessages((current) => [...current, { id, role, content, status, runId }]);
+    setMessages((current) => [...current, { id, role, content, status, runId, plan: planRecord }]);
   }
 
   function selectMode(nextMode: RunMode) {
@@ -402,11 +444,18 @@ function App({
       setMessages(
         detail.messages.map((message, index) => ({
           id: -(index + 1),
-          role: message.role,
+          role: message.kind === "plan" ? "plan" : message.role,
           content: message.content,
           status: (message.status as MessageStatus) || "complete",
           runId: message.run_id ?? undefined,
+          plan: message.plan_id
+            ? detail.plans?.find((item) => item.id === message.plan_id)
+            : undefined,
         })),
+      );
+      setPlan(
+        detail.plans?.find((item) => ["AWAITING_CONFIRMATION", "RUNNING", "PAUSED"].includes(item.state))
+          ?? null,
       );
       setTrace(
         detail.runs.flatMap((run) =>
@@ -549,20 +598,54 @@ function App({
     }
   }
 
-  async function runPlanAction(action: "confirm" | "resume") {
-    if (!plan || isStreaming) return;
+  async function runPlanAction(
+    action: "confirm" | "resume",
+    targetPlan: Plan | undefined = plan ?? undefined,
+  ) {
+    if (!targetPlan || isStreaming) return;
     const controller = new AbortController();
     activeRequest.current = controller;
     setIsStreaming(true);
     setInspectorTab("trace");
     try {
-      for await (const event of streamPlanAction(plan.id, action, controller.signal)) {
+      for await (const event of streamPlanAction(targetPlan.id, action, controller.signal)) {
         setTrace((current) => [...current, event as TraceEvent]);
-        if (event.type === "run.completed" || event.type === "run.incomplete" || event.type === "run.failed") {
-          setPlan((current) => current ? { ...current, state: event.type === "run.completed" ? "COMPLETED" : event.type === "run.incomplete" ? "PAUSED" : "FAILED" } : current);
+        if (typeof event.run_id === "string") {
+          setActiveRunId(event.run_id);
+          if (
+            event.type !== "run.completed" &&
+            event.type !== "run.incomplete" &&
+            event.type !== "run.failed" &&
+            event.type !== "run.cancelled"
+          ) {
+            setProcessVisibility(event.run_id, true);
+          }
+        }
+        if (event.type === "run.completed" || event.type === "run.incomplete" || event.type === "run.failed" || event.type === "run.cancelled") {
+          setPlan((current) => current?.id === targetPlan.id
+            ? { ...current, state: event.type === "run.completed" ? "COMPLETED" : event.type === "run.incomplete" ? "PAUSED" : event.type === "run.cancelled" ? "CANCELLED" : "FAILED" }
+            : current);
+          if (typeof event.run_id === "string") setProcessVisibility(event.run_id, false);
+          if (event.type === "run.completed" || event.type === "run.incomplete") {
+            const answer = typeof event.answer === "string"
+              ? event.answer
+              : typeof event.summary === "string" ? event.summary : "运行结束";
+            appendMessage(
+              "assistant",
+              answer,
+              event.type === "run.completed" ? "complete" : "incomplete",
+              typeof event.run_id === "string" ? event.run_id : undefined,
+            );
+          }
         }
       }
-      setPlan(await fetchPlan(plan.id));
+      const refreshed = await fetchPlan(targetPlan.id);
+      setPlan((current) => current?.id === refreshed.id ? refreshed : current);
+      setMessages((current) => current.map((message) => (
+        message.plan?.id === refreshed.id
+          ? { ...message, plan: refreshed, content: refreshed.source_markdown }
+          : message
+      )));
     } catch (error: unknown) {
       if (!isAbortError(error)) setSessionError(errorMessage(error));
     } finally {
@@ -571,11 +654,37 @@ function App({
     }
   }
 
-  async function editPlanStep(stepId: string, field: "title" | "instruction", value: string) {
-    if (!plan || plan.state !== "AWAITING_CONFIRMATION") return;
-    const steps = plan.steps.map((step) => step.id === stepId ? { ...step, [field]: value } : step);
+  async function editPlanStep(
+    stepId: string,
+    field: "title" | "instruction",
+    value: string,
+    targetPlan: Plan | undefined = plan ?? undefined,
+  ) {
+    if (!targetPlan || targetPlan.state !== "AWAITING_CONFIRMATION") return;
+    const steps = targetPlan.steps.map((step) => step.id === stepId ? { ...step, [field]: value } : step);
     try {
-      setPlan(await updatePlan(plan, plan.title, steps));
+      const updated = await updatePlan(targetPlan, targetPlan.title, steps);
+      setPlan(updated);
+      setMessages((current) => current.map((message) => (
+        message.plan?.id === updated.id
+          ? { ...message, plan: updated, content: updated.source_markdown }
+          : message
+      )));
+    } catch (error: unknown) {
+      setSessionError(errorMessage(error));
+    }
+  }
+
+  async function rejectCurrentPlan(targetPlan: Plan | undefined = plan ?? undefined) {
+    if (!targetPlan || isStreaming) return;
+    try {
+      const updated = await rejectPlan(targetPlan.id);
+      setPlan(updated);
+      setMessages((current) => current.map((message) => (
+        message.plan?.id === updated.id
+          ? { ...message, plan: updated, content: updated.source_markdown }
+          : message
+      )));
     } catch (error: unknown) {
       setSessionError(errorMessage(error));
     }
@@ -642,7 +751,7 @@ function App({
             <div className="message-list">
               {messages.map((message) => (
                 <div key={message.id}>
-                {!isStreaming && message.role === "assistant" && message.runId && trace.some((event) => event.run_id === message.runId) && (
+                {!isStreaming && (message.role === "assistant" || message.role === "plan") && message.runId && trace.some((event) => event.run_id === message.runId) && (
                   <RunProcess
                     trace={trace.filter((event) => event.run_id === message.runId)}
                     open={openProcesses[message.runId] ?? false}
@@ -653,9 +762,17 @@ function App({
                 <article className={`message message-${message.role} is-${message.status}`}>
                   <div className="message-icon" aria-hidden="true">{message.role === "user" ? <UserRound size={16} /> : message.role === "progress" ? <Activity size={16} /> : <Bot size={16} />}</div>
                   <div className="message-body">
-                    <strong>{message.role === "user" ? "你" : message.role === "progress" ? "行动" : modelName || "模型"}</strong>
+                    <strong>{message.role === "user" ? "你" : message.role === "progress" ? "行动" : message.role === "plan" ? "计划" : modelName || "模型"}</strong>
                     <div className="message-content">
-                      {message.content ? (message.role === "assistant" ? <Markdown content={message.content} /> : message.content) : "正在生成..."}
+                      {message.role === "plan" && message.plan ? (
+                        <PlanCard
+                          plan={message.plan}
+                          onConfirm={() => void runPlanAction("confirm", message.plan)}
+                          onResume={() => void runPlanAction("resume", message.plan)}
+                          onReject={() => void rejectCurrentPlan(message.plan)}
+                          onEdit={(stepId, field, value) => void editPlanStep(stepId, field, value, message.plan)}
+                        />
+                      ) : message.content ? (message.role === "assistant" ? <Markdown content={message.content} /> : message.content) : "正在生成..."}
                     </div>
                   </div>
                 </article>
@@ -724,25 +841,13 @@ function App({
       <aside className={`inspector ${rightOpen ? "is-open" : ""}`} aria-label="运行检查器">
         <div className="inspector-heading">
           <div className="inspector-tabs" role="tablist" aria-label="检查器视图">
-            <button type="button" role="tab" aria-selected={inspectorTab === "plan"} className={inspectorTab === "plan" ? "active" : ""} onClick={() => setInspectorTab("plan")}>计划</button>
-            <button type="button" role="tab" aria-selected={inspectorTab === "trace"} className={inspectorTab === "trace" ? "active" : ""} onClick={() => setInspectorTab("trace")}>轨迹</button>
+            <button type="button" role="tab" aria-selected="true" className="active">轨迹</button>
           </div>
           <button className="icon-button mobile-only" type="button" title="关闭检查器" aria-label="关闭检查器" onClick={() => setRightOpen(false)}><X size={18} /></button>
         </div>
-        {inspectorTab === "plan" ? (
-          <div className="inspector-body" role="tabpanel">
-            {!plan ? <div className="panel-empty"><CircleDot size={18} /><strong>没有活动计划</strong><span>切换到计划模式生成执行计划</span></div> : <div className="plan-panel">
-              <div className="plan-panel-heading"><input aria-label="计划标题" value={plan.title} disabled={plan.state !== "AWAITING_CONFIRMATION"} onChange={(event) => setPlan((current) => current ? { ...current, title: event.target.value } : current)} /><span>{plan.state}</span></div>
-              <Markdown content={plan.source_markdown} />
-              <ol className="plan-steps">{plan.steps.map((step) => <li key={step.id} className={step.state.toLowerCase()}><input aria-label={`步骤 ${step.sequence} 标题`} value={step.title} disabled={plan.state !== "AWAITING_CONFIRMATION"} onChange={(event) => void editPlanStep(step.id, "title", event.target.value)} /><textarea aria-label={`步骤 ${step.sequence} 说明`} value={step.instruction} disabled={plan.state !== "AWAITING_CONFIRMATION"} onChange={(event) => void editPlanStep(step.id, "instruction", event.target.value)} /><small>{step.state}</small></li>)}</ol>
-              <div className="plan-actions">{plan.state === "AWAITING_CONFIRMATION" && <button type="button" onClick={() => void runPlanAction("confirm")} disabled={isStreaming}>确认执行</button>}{plan.state === "PAUSED" && <button type="button" onClick={() => void runPlanAction("resume")} disabled={isStreaming}>恢复计划</button>}</div>
-            </div>}
-          </div>
-        ) : (
-          <div className="inspector-body" role="tabpanel">
-            {trace.length === 0 ? <div className="panel-empty"><Activity size={18} /><strong>没有运行轨迹</strong><span>0 条事件</span></div> : <ol className="trace-list">{trace.map((event) => <li key={`${"run_id" in event ? event.run_id : "turn"}-${event.sequence}-${event.type}`}><span>{event.sequence}</span><strong title={traceLabel(event)}>{traceLabel(event)}</strong></li>)}</ol>}
-          </div>
-        )}
+        <div className="inspector-body" role="tabpanel">
+          {trace.filter((event) => event.type !== "assistant.progress").length === 0 ? <div className="panel-empty"><Activity size={18} /><strong>没有运行轨迹</strong><span>0 条事件</span></div> : <ol className="trace-list">{trace.filter((event) => event.type !== "assistant.progress").map((event) => <li key={`${"run_id" in event ? event.run_id : "turn"}-${event.sequence}-${event.type}`}><span>{event.sequence}</span><strong title={traceLabel(event)}>{traceLabel(event)}</strong></li>)}</ol>}
+        </div>
         <div className="inspector-summary"><div><span>模型</span><strong title={modelName ?? undefined}>{modelCopy}</strong></div><div><span>权限</span><strong>{permissionMode === "inspect" ? "只读检查" : permissionMode === "approve" ? "逐次批准" : "受控直接执行"}</strong></div></div>
       </aside>
 

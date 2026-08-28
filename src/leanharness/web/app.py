@@ -438,16 +438,26 @@ def create_app(
         store: LocalStore = app.state.store
         _, session = ensure_session(store, app.state.workspace, payload.session_id)
         session = apply_first_task_title(store, session, task)
+        run = store.create_run(session.id, "plan_draft", task, 8, permission_mode="inspect")
+        store.add_message(session.id, "user", task, run_id=run.id)
         generator = create_plan_generator(
             app.state.workspace,
             language=session.language or "same",
+            run_id=run.id,
+            session_id=session.id,
             client_factory=app.state.model_client_factory,
         )
         generated: GeneratedPlan | None = None
+        generation_events: list[RuntimeEvent] = []
         async for item in generator.generate(task):
             if isinstance(item, GeneratedPlan):
                 generated = item
+            else:
+                generation_events.append(item)
+                payload = item.to_dict()
+                store.append_event(session.id, run.id, item.sequence, item.type, payload)
         if generated is None:
+            store.update_run(run.id, state="FAILED", error_code="PLAN_INVALID_FORMAT")
             raise RunInputError("The model did not return a valid plan")
         plan = store.create_plan(
             session.id,
@@ -456,7 +466,118 @@ def create_app(
             source_markdown=generated.markdown,
             steps=generated.steps,
         )
-        return plan_to_dict(plan)
+        store.add_message(
+            session.id,
+            "assistant",
+            generated.markdown,
+            run_id=run.id,
+            kind="plan",
+            plan_id=plan.id,
+        )
+        store.update_run(run.id, state="COMPLETED", answer=generated.markdown)
+        result = plan_to_dict(plan)
+        result["generation_trace"] = [event.to_dict() for event in generation_events]
+        return result
+
+    @app.post("/api/v1/plans/stream")
+    async def stream_plan_creation(payload: PlanCreateRequest) -> StreamingResponse:
+        task = payload.task.strip()
+        if not task or len(task) > 32_000:
+            raise RunInputError("Plan task must be between 1 and 32000 characters")
+        store: LocalStore = app.state.store
+        _, session = ensure_session(store, app.state.workspace, payload.session_id)
+        session = apply_first_task_title(store, session, task)
+        active_runs.assert_available(session.id)
+        run = store.create_run(session.id, "plan_draft", task, 8, permission_mode="inspect")
+        store.add_message(session.id, "user", task, run_id=run.id)
+        generator = create_plan_generator(
+            app.state.workspace,
+            language=session.language or "same",
+            run_id=run.id,
+            session_id=session.id,
+            client_factory=app.state.model_client_factory,
+        )
+        active_runs.acquire(session.id, run.id)
+
+        async def plan_events() -> AsyncIterator[bytes]:
+            generated: GeneratedPlan | None = None
+            last_sequence = -1
+            terminal_seen = False
+            try:
+                async for item in generator.generate(task):
+                    if isinstance(item, GeneratedPlan):
+                        generated = item
+                        continue
+                    last_sequence = item.sequence
+                    terminal_seen = item.type in {
+                        "run.completed",
+                        "run.incomplete",
+                        "run.failed",
+                        "run.cancelled",
+                    }
+                    event_payload = item.to_dict()
+                    store.append_event(
+                        session.id, run.id, item.sequence, item.type, event_payload
+                    )
+                    yield _encode_payload(
+                        event_payload, session_id=session.id, run_id=run.id
+                    )
+                if generated is None:
+                    store.update_run(
+                        run.id, state="FAILED", error_code="PLAN_INVALID_FORMAT"
+                    )
+                    yield _encode_payload(
+                        {
+                            "type": "plan.failed",
+                            "sequence": last_sequence + 1,
+                            "run_id": run.id,
+                            "error": {
+                                "code": "PLAN_INVALID_FORMAT",
+                                "message": "The model did not return a valid plan",
+                            },
+                        },
+                        session_id=session.id,
+                        run_id=run.id,
+                    )
+                    return
+                plan = store.create_plan(
+                    session.id,
+                    title=generated.title,
+                    task=task,
+                    source_markdown=generated.markdown,
+                    steps=generated.steps,
+                )
+                store.add_message(
+                    session.id,
+                    "assistant",
+                    generated.markdown,
+                    run_id=run.id,
+                    kind="plan",
+                    plan_id=plan.id,
+                )
+                store.update_run(run.id, state="COMPLETED", answer=generated.markdown)
+                yield _encode_payload(
+                    {
+                        "type": "plan.created",
+                        "sequence": last_sequence + 1,
+                        "run_id": run.id,
+                        "plan": plan_to_dict(plan),
+                    },
+                    session_id=session.id,
+                    run_id=run.id,
+                )
+            except (asyncio.CancelledError, GeneratorExit):
+                if not terminal_seen:
+                    store.update_run(run.id, state="CANCELLED")
+                raise
+            finally:
+                active_runs.release(session.id, run.id)
+
+        return StreamingResponse(
+            plan_events(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
 
     @app.get("/api/v1/plans/{plan_id}")
     async def get_plan(plan_id: str) -> dict[str, object]:

@@ -39,6 +39,8 @@ class MessageRecord:
     status: str
     created_at: str
     run_id: str | None = None
+    kind: str = "chat"
+    plan_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

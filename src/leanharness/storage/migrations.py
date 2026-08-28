@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def apply_migrations(connection: sqlite3.Connection) -> None:
@@ -77,5 +77,14 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 CREATE INDEX plans_session_updated ON plans(session_id, updated_at DESC);
                 CREATE INDEX plan_steps_order ON plan_steps(plan_id, sequence);
                 INSERT INTO schema_migrations(version, applied_at) VALUES(3, CURRENT_TIMESTAMP);
+                """
+            )
+        if current < 4:
+            connection.executescript(
+                """
+                ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat';
+                ALTER TABLE messages ADD COLUMN plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL;
+                CREATE INDEX messages_plan ON messages(plan_id, sequence);
+                INSERT INTO schema_migrations(version, applied_at) VALUES(4, CURRENT_TIMESTAMP);
                 """
             )

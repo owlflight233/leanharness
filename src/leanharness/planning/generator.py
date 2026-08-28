@@ -63,13 +63,23 @@ class PlanningModelClient:
 
 
 class PlanGenerator:
-    def __init__(self, workspace: Path, model_client: PlanningModel, *, language: str) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        model_client: PlanningModel,
+        *,
+        language: str,
+        run_id: str | None = None,
+        session_id: str = "ephemeral",
+    ) -> None:
         self.agent = CodingAgent(
             workspace,
             PlanningModelClient(model_client),
             max_steps=PLAN_GENERATION_MAX_STEPS,
             language=language,
             permission_mode=PermissionMode.INSPECT,
+            run_id=run_id,
+            session_id=session_id,
             task_requirements=TaskRequirements(
                 mutation_required=False,
                 verification_required=False,

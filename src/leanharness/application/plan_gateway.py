@@ -14,9 +14,17 @@ def create_plan_generator(
     workspace: Path,
     *,
     language: str,
+    run_id: str | None = None,
+    session_id: str = "ephemeral",
     client_factory: ModelClientFactory = OpenAICompatibleClient,
 ) -> PlanGenerator:
-    return PlanGenerator(workspace, client_factory(load_model_config()), language=language)
+    return PlanGenerator(
+        workspace,
+        client_factory(load_model_config()),
+        language=language,
+        run_id=run_id,
+        session_id=session_id,
+    )
 
 
 def plan_to_dict(plan: Plan) -> dict[str, object]:

@@ -21,7 +21,10 @@ export interface SessionDetail {
     status: string;
     created_at: string;
     run_id?: string | null;
+    kind?: "chat" | "plan" | "progress";
+    plan_id?: string | null;
   }>;
+  plans?: import("./plans").Plan[];
   runs: Array<{
     id: string;
     session_id: string;

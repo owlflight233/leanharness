@@ -802,6 +802,126 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+.plan-card {
+  margin-top: 10px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.plan-card-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.plan-card-eyebrow {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.plan-card h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.plan-card-state,
+.plan-card-hint,
+.plan-card-running,
+.plan-card-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.plan-card-state.state-awaiting_confirmation { color: var(--warning); }
+.plan-card-state.state-completed,
+.plan-card-done { color: var(--accent); }
+
+.plan-card-markdown {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.plan-card-steps {
+  margin: 10px 0;
+  padding-left: 24px;
+}
+
+.plan-card-steps li {
+  margin-bottom: 9px;
+}
+
+.plan-card-steps li.completed::marker { color: var(--accent); }
+
+.plan-card-steps input,
+.plan-card-steps textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 4px;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  font: inherit;
+}
+
+.plan-card-steps textarea {
+  min-height: 44px;
+  resize: vertical;
+}
+
+.plan-card-steps p {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.plan-card-steps small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.plan-card-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.plan-card-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.plan-card-actions button.primary {
+  color: white;
+  background: var(--accent);
+}
+
+.plan-card-actions button.quiet {
+  color: var(--text);
+  background: var(--border);
+}
+
 .trace-list {
   margin: 0;
   padding: 8px 12px;

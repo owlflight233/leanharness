@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI
 
 from leanharness.config import build_config
-from leanharness.models import ModelEvent, ModelResponse, ModelUsage
+from leanharness.models import ModelEvent, ModelResponse, ModelUsage, ToolCall
 from leanharness.web.app import create_app
 
 
@@ -60,6 +60,26 @@ class FakeModelClient:
             usage=ModelUsage(prompt_tokens=2, completion_tokens=2, total_tokens=4),
         )
         yield ModelEvent(type="turn.completed", sequence=3, finish_reason="stop")
+
+
+class PlanModelClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, request):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                content="检查项目结构",
+                tool_calls=(
+                    ToolCall(
+                        id="inspect-1",
+                        name="workspace_list",
+                        arguments={"path": "."},
+                    ),
+                ),
+            )
+        return ModelResponse(content="# Demo plan\n1. **Inspect** - Read the project")
 
 
 def test_health_contract_is_exact(tmp_path: Path) -> None:
@@ -268,3 +288,25 @@ def test_chat_rejects_invalid_input_before_streaming(
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "INVALID_CHAT_INPUT"
+
+
+def test_plan_stream_emits_research_events_and_persists_plan_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LEANHARNESS_MODEL_BASE_URL", "https://models.example.test/v1")
+    monkeypatch.setenv("LEANHARNESS_MODEL_NAME", "example-model")
+    app = create_app(
+        build_config(workspace=tmp_path, data_dir=tmp_path / "data"),
+        model_client_factory=lambda _config: PlanModelClient(),
+    )
+
+    response = post(app, "/api/v1/plans/stream", json_body={"task": "Inspect the project"})
+    events = [json.loads(line) for line in response.text.splitlines()]
+
+    assert response.status_code == 200
+    assert any(event["type"] == "tool.completed" for event in events)
+    created = next(event for event in events if event["type"] == "plan.created")
+    assert created["plan"]["title"] == "Demo plan"
+    session_id = created["session_id"]
+    detail = get(app, f"/api/v1/sessions/{session_id}").json()
+    assert any(message.get("kind") == "plan" for message in detail["messages"])

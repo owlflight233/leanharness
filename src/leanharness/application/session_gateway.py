@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from leanharness.application.language import detect_session_language
+from leanharness.application.plan_gateway import plan_to_dict
 from leanharness.models import ModelEvent, ModelMessage
 from leanharness.runtime import ContinuationContext
 from leanharness.runtime.events import RuntimeEvent
@@ -108,10 +109,13 @@ def session_detail(store: LocalStore, session_id: str) -> dict[str, object]:
                 "status": message.status,
                 "created_at": message.created_at,
                 "run_id": message.run_id,
+                "kind": message.kind,
+                "plan_id": message.plan_id,
             }
             for message in store.list_messages(session_id)
         ],
         "runs": runs,
+        "plans": [plan_to_dict(plan) for plan in store.list_plans(session_id)],
     }
 
 
@@ -179,6 +183,7 @@ def history_for_session(
         for message in store.list_messages(session.id)
         if (exclude_run_id is None or message.run_id != exclude_run_id)
         and message.role in {"user", "assistant"}
+        and message.kind == "chat"
         and message.content.strip()
     ]
     selected: list[MessageRecord] = []

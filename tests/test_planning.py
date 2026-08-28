@@ -98,4 +98,37 @@ def test_plan_migration_is_version_three(tmp_path: Path) -> None:
     versions = store.connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
-    assert [row["version"] for row in versions] == [1, 2, 3]
+    assert [row["version"] for row in versions] == [1, 2, 3, 4]
+
+
+def test_plan_message_is_persisted_but_not_injected_into_chat_history(tmp_path: Path) -> None:
+    from leanharness.application.session_gateway import history_for_session
+
+    store = LocalStore(tmp_path / "data")
+    session = store.create_session(store.ensure_project(tmp_path))
+    title, steps = parse_plan_markdown("# Demo\n1. inspect - inspect the project")
+    plan = store.create_plan(
+        session.id,
+        title=title,
+        task="Inspect the project",
+        source_markdown="# Demo\n1. inspect - inspect the project",
+        steps=steps,
+    )
+    store.add_message(session.id, "user", "Inspect the project")
+    store.add_message(
+        session.id,
+        "assistant",
+        plan.source_markdown,
+        kind="plan",
+        plan_id=plan.id,
+    )
+    store.add_message(session.id, "assistant", "The project is ready.")
+
+    messages = store.list_messages(session.id)
+
+    assert messages[1].kind == "plan"
+    assert messages[1].plan_id == plan.id
+    assert [message.content for message in history_for_session(store, session)] == [
+        "Inspect the project",
+        "The project is ready.",
+    ]
