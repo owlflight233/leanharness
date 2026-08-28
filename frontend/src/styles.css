@@ -302,33 +302,6 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
-.mode-select {
-  display: flex;
-  align-items: center;
-  padding: 2px;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  background: var(--surface-subtle);
-}
-
-.mode-button {
-  display: flex;
-  height: 30px;
-  align-items: center;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 4px;
-  gap: 6px;
-  color: #4f5956;
-  background: transparent;
-}
-
-.mode-button.active {
-  color: var(--accent-dark);
-  background: var(--surface);
-  box-shadow: 0 1px 3px rgba(22, 38, 35, 0.12);
-}
-
 .conversation {
   min-height: 0;
   overflow-y: auto;
@@ -546,10 +519,94 @@ textarea:focus-visible {
 }
 
 .composer-actions {
+  position: relative;
   display: flex;
   min-height: 38px;
   align-items: center;
   padding: 4px 7px 7px 12px;
+}
+
+.composer-menu-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  margin-right: 8px;
+}
+
+/* Keeps older automation clients compatible while the visible mode control
+   lives in the composer add menu. */
+.legacy-mode-compat {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: auto;
+}
+
+.composer-plus {
+  color: var(--muted);
+  border-color: var(--border);
+  background: var(--surface-subtle);
+}
+
+.composer-menu {
+  position: absolute;
+  z-index: 30;
+  bottom: 42px;
+  left: 0;
+  width: 250px;
+  padding: 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgba(22, 38, 35, 0.16);
+}
+
+.composer-menu-label {
+  padding: 5px 8px 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.composer-menu button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  padding: 8px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+  gap: 8px;
+}
+
+.composer-menu button:not(:disabled):hover,
+.composer-menu button.selected {
+  background: var(--surface-subtle);
+}
+
+.composer-menu button:disabled {
+  color: #9aa3a0;
+}
+
+.composer-menu button span {
+  font-size: 12px;
+}
+
+.composer-menu button small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.composer-menu-divider {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--border);
 }
 
 .composer-state {
@@ -932,9 +989,6 @@ textarea:focus-visible {
     gap: 8px;
   }
 
-  .mode-button {
-    padding: 0 8px;
-  }
 }
 
 @media (max-width: 480px) {

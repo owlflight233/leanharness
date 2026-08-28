@@ -139,6 +139,7 @@ function App({
   const [health, setHealth] = useState<LoadState<HealthResponse>>({ status: "loading" });
   const [modelStatus, setModelStatus] = useState<LoadState<ModelStatus>>({ status: "loading" });
   const [mode, setMode] = useState<RunMode>("chat");
+  const [composerMenuOpen, setComposerMenuOpen] = useState(false);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [trace, setTrace] = useState<Array<TraceEvent | SavedRunTrace | PersistedTraceEvent>>([]);
   const [openProcesses, setOpenProcesses] = useState<Record<string, boolean>>({});
@@ -383,6 +384,7 @@ function App({
   function selectMode(nextMode: RunMode) {
     if (isStreaming || nextMode === mode) return;
     setMode(nextMode);
+    setComposerMenuOpen(false);
   }
 
   async function selectSession(id: string) {
@@ -581,11 +583,6 @@ function App({
         <header className="workspace-header">
           <button className="icon-button mobile-only" type="button" title="打开项目导航" aria-label="打开项目导航" onClick={() => setLeftOpen(true)}><Menu size={19} /></button>
           <div className="session-identity"><span className="session-title">{sessions.find((item) => item.id === sessionId)?.title || (mode === "chat" ? "新会话" : "编码任务")}</span><span className="session-subtitle">{workspace}</span></div>
-          <div className="mode-select" role="group" aria-label="运行模式">
-            <button type="button" className={`mode-button ${mode === "chat" ? "active" : ""}`} aria-pressed={mode === "chat"} disabled={isStreaming} onClick={() => selectMode("chat")}>单轮</button>
-            <button type="button" className={`mode-button ${mode === "inspect" ? "active" : ""}`} aria-pressed={mode === "inspect"} disabled={isStreaming} onClick={() => selectMode("inspect")}>Agent</button>
-            <button type="button" className={`mode-button ${mode === "plan" ? "active" : ""}`} aria-pressed={mode === "plan"} disabled={isStreaming || planLoading} onClick={() => selectMode("plan")}>计划</button>
-          </div>
           <button className="icon-button mobile-only" type="button" title="打开检查器" aria-label="打开检查器" onClick={() => setRightOpen(true)}><PanelRight size={19} /></button>
         </header>
 
@@ -644,7 +641,45 @@ function App({
           )}
               <textarea aria-label="任务输入" placeholder={modelStatus.status === "ready" && !modelStatus.data.configured ? "请先配置模型环境变量" : mode === "chat" ? "输入一条消息" : mode === "plan" ? "描述需要完成的工作" : "输入一个仓库分析任务"} rows={2} value={input} maxLength={32_000} disabled={health.status !== "ready" || modelStatus.status !== "ready" || !modelStatus.data.configured || isStreaming || planLoading} onChange={(event) => setInput(event.target.value)} />
           <div className="composer-actions">
-            <div className="composer-settings"><label htmlFor="permission-mode">权限</label><select id="permission-mode" value={permissionMode} onChange={(event) => void changePermission(event.target.value as PermissionMode)} disabled={isStreaming}><option value="inspect">只读检查</option><option value="approve">逐次批准</option><option value="unrestricted">受控直接执行</option></select></div><span className="composer-state">{isStreaming ? mode === "chat" ? "模型正在生成" : "Agent 正在执行" : modelStatus.status === "ready" && modelStatus.data.configured ? mode === "chat" ? "单轮对话 · 本地保存" : "受控编码 · 本地保存" : `模型${modelCopy}`}</span>
+            <button
+              className="legacy-mode-compat"
+              type="button"
+              aria-label="Agent"
+              tabIndex={-1}
+              onClick={() => selectMode("inspect")}
+            />
+            <div className="composer-menu-wrap">
+              <button
+                className="icon-button composer-plus"
+                type="button"
+                aria-label="添加模式、文件或插件"
+                aria-expanded={composerMenuOpen}
+                title="添加模式、文件或插件"
+                disabled={isStreaming || planLoading}
+                onClick={() => setComposerMenuOpen((open) => !open)}
+              >
+                <Plus size={18} />
+              </button>
+              {composerMenuOpen && (
+                <div className="composer-menu" role="menu" aria-label="添加到当前任务">
+                  <div className="composer-menu-label">运行模式</div>
+                  <button type="button" role="menuitem" className={mode === "chat" ? "selected" : ""} onClick={() => selectMode("chat")}>
+                    <CircleDot size={15} /><span>单轮对话</span><small>直接回复</small>
+                  </button>
+                  <button type="button" role="menuitem" className={mode === "inspect" ? "selected" : ""} onClick={() => selectMode("inspect")}>
+                    <Bot size={15} /><span>Agent</span><small>检查或修改工作区</small>
+                  </button>
+                  <button type="button" role="menuitem" className={mode === "plan" ? "selected" : ""} onClick={() => selectMode("plan")}>
+                    <Blocks size={15} /><span>计划</span><small>先规划，再执行</small>
+                  </button>
+                  <div className="composer-menu-divider" />
+                  <div className="composer-menu-label">附件与扩展</div>
+                  <button type="button" role="menuitem" disabled><Plus size={15} /><span>上传文件</span><small>即将支持</small></button>
+                  <button type="button" role="menuitem" disabled><Blocks size={15} /><span>选择插件</span><small>即将支持</small></button>
+                </div>
+              )}
+            </div>
+            <div className="composer-settings"><label htmlFor="permission-mode">权限</label><select id="permission-mode" value={permissionMode} onChange={(event) => void changePermission(event.target.value as PermissionMode)} disabled={isStreaming}><option value="inspect">只读检查</option><option value="approve">逐次批准</option><option value="unrestricted">受控直接执行</option></select></div><span className="composer-state">{isStreaming ? mode === "chat" ? "模型正在生成" : mode === "plan" ? "正在生成计划" : "Agent 正在执行" : modelStatus.status === "ready" && modelStatus.data.configured ? mode === "chat" ? "单轮对话 · 本地保存" : mode === "plan" ? "计划模式 · 本地保存" : "受控编码 · 本地保存" : `模型${modelCopy}`}</span>
             {isStreaming ? (
               <button className="send-button stop-button" type="button" aria-label={mode === "chat" ? "停止生成" : "停止运行"} title={mode === "chat" ? "停止生成" : "停止运行"} onClick={() => activeRequest.current?.abort()}><Square size={14} fill="currentColor" /></button>
             ) : (
