@@ -14,9 +14,9 @@ To understand the implementation in request-flow order, see
 The current milestone provides an installable Python package, environment
 diagnostics, a provider-independent model gateway, single-turn streaming chat,
 a bounded coding loop, persistent local sessions, guarded unified-diff edits,
-verification command profiles, and read-only Git inspection through both the
-CLI and responsive local web interface. Arbitrary shell execution, Git writes,
-Plan Mode, and plugins remain intentionally out of scope.
+verification command profiles, read-only Git inspection, and a persistent Plan
+Mode through both the CLI and responsive local web interface. Arbitrary shell
+execution, Git writes, and plugins remain intentionally out of scope.
 
 ## Prerequisites
 
@@ -78,6 +78,7 @@ uv run leanharness model check
 uv run leanharness chat "Reply with one short sentence."
 uv run leanharness run "Inspect this repository and explain its structure." --permission inspect
 uv run leanharness run "Fix the failing test." --permission approve
+uv run leanharness plan "Refactor the authentication module"
 uv run leanharness serve
 ```
 
@@ -90,6 +91,7 @@ export LEANHARNESS_MODEL_API_KEY="your-api-key"
 uv run leanharness model check
 uv run leanharness chat "Reply with one short sentence."
 uv run leanharness run "Fix the failing test." --permission approve
+uv run leanharness plan "Refactor the authentication module"
 uv run leanharness serve
 ```
 
@@ -112,6 +114,18 @@ location is `%LOCALAPPDATA%\\LeanHarness` on Windows,
 `~/Library/Application Support/LeanHarness` on macOS, and
 `${XDG_DATA_HOME:-~/.local/share}/leanharness` on Linux. Set
 `LEANHARNESS_DATA_DIR` or pass `--data-dir` for a portable/test location.
+
+Plan Mode first generates a limited Markdown draft using only read-only tools.
+Review or edit the steps in the web client, then confirm execution. Confirmed
+plans run sequentially with the session permission and can be paused and
+explicitly resumed after a service restart:
+
+```sh
+uv run leanharness plan "Refactor the authentication module"
+uv run leanharness plan show PLAN_ID
+uv run leanharness plan confirm PLAN_ID
+uv run leanharness plan resume PLAN_ID
+```
 
 Session commands are available from the CLI:
 
@@ -143,7 +157,7 @@ pnpm build
 - One application service shared by CLI, web, and headless interfaces.
 - Local workspace tools guarded by explicit permission checks.
 - Inspectable execution traces without storing credentials.
-- Plan and budget-aware modes built after the core runtime is correct.
+- Persistent Plan Mode built on the same evidence and permission runtime.
 
 See [SPEC.md](SPEC.md), [ARCHITECTURE.md](ARCHITECTURE.md), and
 [CLEAN_ROOM.md](CLEAN_ROOM.md) before contributing.
