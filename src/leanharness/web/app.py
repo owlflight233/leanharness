@@ -35,7 +35,7 @@ from leanharness.application.session_gateway import (
     session_detail,
     session_to_dict,
 )
-from leanharness.config import AppConfig
+from leanharness.config import AppConfig, resolve_workspace
 from leanharness.errors import (
     ApprovalAlreadyResolvedError,
     ApprovalExpiredError,
@@ -51,6 +51,7 @@ from leanharness.errors import (
     RunInputError,
     SessionNotFoundError,
     StorageError,
+    WorkspaceError,
 )
 from leanharness.models import (
     ModelEvent,
@@ -108,6 +109,10 @@ class ApprovalDecisionRequest(BaseModel):
     decision: Literal["approve", "reject"]
 
 
+class WorkspaceSelectRequest(BaseModel):
+    path: str
+
+
 def default_frontend_dir() -> Path:
     """Locate the repository frontend build when running from a source checkout."""
 
@@ -161,6 +166,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.config = config
+    app.state.workspace = config.workspace
     app.state.frontend_dir = (frontend_dir or default_frontend_dir()).resolve()
     app.state.model_client_factory = model_client_factory
     app.state.store = store
@@ -210,7 +216,27 @@ def create_app(
 
     @app.get("/api/v1/health")
     async def health() -> dict[str, object]:
-        return get_health(config).to_dict()
+        current = AppConfig(
+            workspace=app.state.workspace,
+            host=config.host,
+            port=config.port,
+            log_level=config.log_level,
+            data_dir=config.data_dir,
+        )
+        return get_health(current).to_dict()
+
+    @app.post("/api/v1/workspace")
+    async def select_workspace(payload: WorkspaceSelectRequest) -> dict[str, object]:
+        if not payload.path.strip():
+            raise WorkspaceError("Workspace path must not be blank")
+        try:
+            selected = resolve_workspace(payload.path)
+        except WorkspaceError:
+            raise
+        if getattr(active_runs, "has_active", lambda: False)():
+            raise RunConflictError("Stop the active run before changing workspace")
+        app.state.workspace = selected
+        return {"workspace": str(selected)}
 
     @app.get("/api/v1/model/status")
     async def model_status() -> dict[str, object]:
@@ -224,13 +250,13 @@ def create_app(
     @app.get("/api/v1/sessions")
     async def sessions() -> dict[str, object]:
         store: LocalStore = app.state.store
-        project = store.ensure_project(config.workspace)
+        project = store.ensure_project(app.state.workspace)
         return {"sessions": [session_to_dict(session) for session in store.list_sessions(project)]}
 
     @app.post("/api/v1/sessions")
     async def create_session(payload: SessionCreateRequest) -> dict[str, object]:
         store: LocalStore = app.state.store
-        project = store.ensure_project(config.workspace, permission_mode=payload.permission_mode)
+        project = store.ensure_project(app.state.workspace, permission_mode=payload.permission_mode)
         session = store.create_session(
             project,
             title=payload.title or "新会话",
@@ -240,12 +266,12 @@ def create_app(
 
     @app.get("/api/v1/sessions/{session_id}")
     async def get_session(session_id: str) -> dict[str, object]:
-        ensure_session(app.state.store, config.workspace, session_id)
+        ensure_session(app.state.store, app.state.workspace, session_id)
         return session_detail(app.state.store, session_id)
 
     @app.patch("/api/v1/sessions/{session_id}")
     async def update_session(session_id: str, payload: SessionUpdateRequest) -> dict[str, object]:
-        ensure_session(app.state.store, config.workspace, session_id)
+        ensure_session(app.state.store, app.state.workspace, session_id)
         session = app.state.store.update_session(
             session_id,
             title=payload.title,
@@ -255,7 +281,7 @@ def create_app(
 
     @app.delete("/api/v1/sessions/{session_id}")
     async def delete_session(session_id: str) -> dict[str, object]:
-        ensure_session(app.state.store, config.workspace, session_id)
+        ensure_session(app.state.store, app.state.workspace, session_id)
         app.state.store.delete_session(session_id)
         return {"deleted": True, "session_id": session_id}
 
@@ -269,7 +295,7 @@ def create_app(
         message = validate_chat_message(payload.message)
         model_config = load_model_config()
         store: LocalStore = app.state.store
-        _, session = ensure_session(store, config.workspace, payload.session_id)
+        _, session = ensure_session(store, app.state.workspace, payload.session_id)
         session = apply_first_task_title(store, session, message)
         history = history_for_session(store, session)
         active_runs.assert_available(session.id)
@@ -328,7 +354,7 @@ def create_app(
     @app.post("/api/v1/runs")
     async def run(payload: RunRequest) -> StreamingResponse:
         store: LocalStore = app.state.store
-        _, session = ensure_session(store, config.workspace, payload.session_id)
+        _, session = ensure_session(store, app.state.workspace, payload.session_id)
         session = apply_first_task_title(store, session, payload.task)
         active_runs.assert_available(session.id)
         continuation = continuation_for_session(store, session)
@@ -343,7 +369,7 @@ def create_app(
         active_runs.acquire(session.id, run_record.id)
         runtime = create_coding_run(
             payload.task,
-            config.workspace,
+            app.state.workspace,
             max_steps=payload.max_steps,
             client_factory=app.state.model_client_factory,
             run_id=run_record.id,
@@ -398,10 +424,10 @@ def create_app(
         if not task or len(task) > 32_000:
             raise RunInputError("Plan task must be between 1 and 32000 characters")
         store: LocalStore = app.state.store
-        _, session = ensure_session(store, config.workspace, payload.session_id)
+        _, session = ensure_session(store, app.state.workspace, payload.session_id)
         session = apply_first_task_title(store, session, task)
         generator = create_plan_generator(
-            config.workspace,
+            app.state.workspace,
             language=session.language or "same",
             client_factory=app.state.model_client_factory,
         )
@@ -424,7 +450,7 @@ def create_app(
     async def get_plan(plan_id: str) -> dict[str, object]:
         plan = app.state.store.get_plan(plan_id)
         session = app.state.store.get_session(plan.session_id)
-        if session.project_id != app.state.store.ensure_project(config.workspace).id:
+        if session.project_id != app.state.store.ensure_project(app.state.workspace).id:
             raise SessionNotFoundError("Plan does not belong to the current workspace")
         return plan_to_dict(plan)
 
@@ -487,7 +513,7 @@ def create_app(
         existing_events = store.list_events(run.id)
         controller = PlanController(
             plan,
-            config.workspace,
+            app.state.workspace,
             model,
             permission_mode=session.permission_mode,
             language=session.language or "same",

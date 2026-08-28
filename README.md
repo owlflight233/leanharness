@@ -72,7 +72,9 @@ PowerShell:
 
 ```powershell
 $env:LEANHARNESS_MODEL_BASE_URL = "https://api.deepseek.com"
-$env:LEANHARNESS_MODEL_NAME = "deepseek-chat"
+$env:LEANHARNESS_MODEL_NAME = "deepseek-v4-flash-vision-exp"
+$env:LEANHARNESS_MODEL_THINKING = "enabled"
+$env:LEANHARNESS_MODEL_REASONING_EFFORT = "high"
 $env:LEANHARNESS_MODEL_API_KEY = "your-api-key"
 uv run leanharness model check
 uv run leanharness chat "Reply with one short sentence."
@@ -86,7 +88,9 @@ macOS or Linux:
 
 ```sh
 export LEANHARNESS_MODEL_BASE_URL="https://api.deepseek.com"
-export LEANHARNESS_MODEL_NAME="deepseek-chat"
+export LEANHARNESS_MODEL_NAME="deepseek-v4-flash-vision-exp"
+export LEANHARNESS_MODEL_THINKING="enabled"
+export LEANHARNESS_MODEL_REASONING_EFFORT="high"
 export LEANHARNESS_MODEL_API_KEY="your-api-key"
 uv run leanharness model check
 uv run leanharness chat "Reply with one short sentence."

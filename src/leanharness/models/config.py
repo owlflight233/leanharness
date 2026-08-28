@@ -13,6 +13,8 @@ MODEL_PROTOCOL = "openai-compatible"
 MODEL_BASE_URL_ENV = "LEANHARNESS_MODEL_BASE_URL"
 MODEL_NAME_ENV = "LEANHARNESS_MODEL_NAME"
 MODEL_API_KEY_ENV = "LEANHARNESS_MODEL_API_KEY"
+MODEL_THINKING_ENV = "LEANHARNESS_MODEL_THINKING"
+MODEL_REASONING_EFFORT_ENV = "LEANHARNESS_MODEL_REASONING_EFFORT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +24,8 @@ class ModelConfig:
     base_url: str
     model: str
     api_key: str | None = field(repr=False, default=None)
+    thinking: bool = False
+    reasoning_effort: str | None = None
     protocol: str = MODEL_PROTOCOL
 
     @property
@@ -45,6 +49,13 @@ def load_model_config(environ: Mapping[str, str] | None = None) -> ModelConfig:
     base_url = values.get(MODEL_BASE_URL_ENV, "").strip()
     model = values.get(MODEL_NAME_ENV, "").strip()
     api_key = values.get(MODEL_API_KEY_ENV, "").strip() or None
+    thinking_value = values.get(MODEL_THINKING_ENV, "enabled").strip().lower()
+    if thinking_value not in {"enabled", "disabled", "true", "false", "1", "0"}:
+        raise ModelNotConfiguredError(
+            f"{MODEL_THINKING_ENV} must be enabled or disabled"
+        )
+    thinking = thinking_value in {"enabled", "true", "1"}
+    reasoning_effort = values.get(MODEL_REASONING_EFFORT_ENV, "high").strip() or None
 
     missing = [
         name
@@ -60,6 +71,8 @@ def load_model_config(environ: Mapping[str, str] | None = None) -> ModelConfig:
         base_url=_normalize_base_url(base_url),
         model=model,
         api_key=api_key,
+        thinking=thinking,
+        reasoning_effort=reasoning_effort,
     )
 
 

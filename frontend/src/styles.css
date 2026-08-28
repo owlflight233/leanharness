@@ -167,6 +167,17 @@ textarea:focus-visible {
   font-size: 12px;
 }
 
+.workspace-picker {
+  width: 100%;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-picker:disabled {
+  cursor: default;
+}
+
 .empty-row svg {
   flex: 0 0 auto;
 }

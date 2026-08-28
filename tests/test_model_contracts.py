@@ -28,6 +28,20 @@ def test_model_config_loads_complete_environment_without_exposing_key() -> None:
     assert secret not in repr(config)
 
 
+def test_model_config_can_enable_deepseek_thinking() -> None:
+    config = load_model_config(
+        {
+            "LEANHARNESS_MODEL_BASE_URL": "https://api.deepseek.com",
+            "LEANHARNESS_MODEL_NAME": "deepseek-v4-flash-vision-exp",
+            "LEANHARNESS_MODEL_THINKING": "enabled",
+            "LEANHARNESS_MODEL_REASONING_EFFORT": "high",
+        }
+    )
+
+    assert config.thinking is True
+    assert config.reasoning_effort == "high"
+
+
 @pytest.mark.parametrize(
     "url",
     [

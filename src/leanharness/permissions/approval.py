@@ -142,6 +142,11 @@ class ActiveRunRegistry:
         if session_id in self._sessions:
             raise RunConflictError("This session already has an active run")
 
+    def has_active(self) -> bool:
+        """Return whether any session currently owns a live run."""
+
+        return bool(self._sessions)
+
     def release(self, session_id: str, run_id: str) -> None:
         if self._sessions.get(session_id) == run_id:
             self._sessions.pop(session_id, None)

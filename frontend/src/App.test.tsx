@@ -7,6 +7,7 @@ import type { ChatStreamer } from "./api/chat";
 import type { HealthLoader, HealthResponse } from "./api/health";
 import type { ModelStatusLoader } from "./api/model";
 import type { ApprovalResolver, RunStreamer } from "./api/run";
+import type { WorkspaceClient } from "./api/workspace";
 import type { PermissionMode, SessionDetail, SessionSummary } from "./api/sessions";
 
 const healthy: HealthResponse = {
@@ -116,6 +117,16 @@ describe("application shell", () => {
     expect(await screen.findByText("工作区已连接")).toBeInTheDocument();
     expect(screen.getByText("服务在线")).toBeInTheDocument();
     expect(screen.getByText("工作区：C:\\projects\\demo")).toBeInTheDocument();
+  });
+
+  it("switches to a selected workspace and clears the old session view", async () => {
+    const user = userEvent.setup();
+    const workspaceClient: WorkspaceClient = { select: vi.fn(async () => ({ workspace: "C:\\projects\\next" })) };
+    vi.spyOn(window, "prompt").mockReturnValue("C:\\projects\\next");
+    render(<App healthLoader={successfulHealth} modelStatusLoader={configuredModel} workspaceClient={workspaceClient} />);
+
+    await user.click(await screen.findByRole("button", { name: /C:\\projects\\demo/ }));
+    expect(workspaceClient.select).toHaveBeenCalledWith("C:\\projects\\next");
   });
 
   it("renders a failed connection", async () => {

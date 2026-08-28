@@ -186,6 +186,10 @@ class OpenAICompatibleClient:
         }
         if request.max_tokens is not None:
             payload["max_tokens"] = request.max_tokens
+        if self._config.thinking:
+            payload["thinking"] = {"type": "enabled"}
+        if self._config.reasoning_effort:
+            payload["reasoning_effort"] = self._config.reasoning_effort
         if stream:
             payload["stream_options"] = {"include_usage": True}
         if request.tools:

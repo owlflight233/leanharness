@@ -90,6 +90,19 @@ def test_health_contract_is_exact(tmp_path: Path) -> None:
     }
 
 
+def test_workspace_can_be_selected_for_subsequent_requests(tmp_path: Path) -> None:
+    next_workspace = tmp_path / "next"
+    next_workspace.mkdir()
+    app = create_app(build_config(workspace=tmp_path, data_dir=tmp_path / "data"))
+
+    selected = post(app, "/api/v1/workspace", json_body={"path": str(next_workspace)})
+
+    assert selected.status_code == 200
+    assert selected.json() == {"workspace": str(next_workspace.resolve())}
+    assert get(app, "/api/v1/health").json()["workspace"] == str(next_workspace.resolve())
+    assert get(app, "/api/v1/sessions").json()["sessions"] == []
+
+
 def test_frontend_build_is_served_with_spa_fallback(tmp_path: Path) -> None:
     frontend = tmp_path / "frontend"
     assets = frontend / "assets"

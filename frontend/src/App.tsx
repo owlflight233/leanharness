@@ -44,6 +44,7 @@ import {
 } from "./api/sessions";
 import { Markdown } from "./components/Markdown";
 import { RunProcess } from "./components/RunProcess";
+import { selectWorkspace, type WorkspaceClient } from "./api/workspace";
 import {
   createPlan,
   fetchPlan,
@@ -76,6 +77,7 @@ interface AppProps {
   runStreamer?: RunStreamer;
   approvalResolver?: ApprovalResolver;
   sessionClient?: SessionClient;
+  workspaceClient?: WorkspaceClient;
 }
 
 export interface SessionClient {
@@ -132,6 +134,7 @@ function App({
   runStreamer: providedRunStreamer,
   approvalResolver = resolveRunApproval,
   sessionClient = defaultSessionClient,
+  workspaceClient = { select: selectWorkspace },
 }: AppProps) {
   const chatStreamer = legacyChatStreamer ?? streamChat;
   const runStreamer = providedRunStreamer ?? streamRun;
@@ -431,6 +434,25 @@ function App({
     }
   }
 
+  async function changeWorkspace() {
+    if (isStreaming || health.status !== "ready") return;
+    const nextPath = window.prompt("输入工作区目录", health.data.workspace);
+    if (!nextPath || nextPath.trim() === health.data.workspace) return;
+    try {
+      await workspaceClient.select(nextPath.trim());
+      setHealth({ status: "loading" });
+      const refreshed = await healthLoader();
+      setHealth({ status: "ready", data: refreshed });
+      setMessages([]);
+      setTrace([]);
+      setPlan(null);
+      setSessionId(null);
+      window.localStorage.removeItem("leanharness.session");
+    } catch (error: unknown) {
+      setSessionError(errorMessage(error));
+    }
+  }
+
   async function handleNewSession() {
     if (isStreaming) return;
     try {
@@ -562,7 +584,7 @@ function App({
         <nav className="rail-content" aria-label="项目与会话">
           <section className="rail-section">
             <div className="section-label"><span>项目</span><button className="icon-button compact" type="button" disabled aria-label="添加项目"><Plus size={14} /></button></div>
-            <div className="empty-row" title={workspace}><FolderGit2 size={16} /><span>{workspace}</span></div>
+            <button className="empty-row workspace-picker" type="button" title="切换工作区" onClick={() => void changeWorkspace()} disabled={isStreaming || health.status !== "ready"}><FolderGit2 size={16} /><span>{workspace}</span><Pencil size={12} /></button>
           </section>
           <section className="rail-section sessions-section">
             <div className="section-label"><span>当前运行</span></div>

@@ -88,6 +88,26 @@ def test_complete_sends_safe_openai_compatible_request() -> None:
     }
 
 
+def test_complete_sends_optional_thinking_fields_when_configured() -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    configured = ModelConfig(
+        base_url="https://models.example.test/v1",
+        model="deepseek-v4-flash-vision-exp",
+        thinking=True,
+        reasoning_effort="high",
+    )
+    client = OpenAICompatibleClient(configured, transport=httpx.MockTransport(handler))
+    run(client.complete(ModelRequest(messages=(ModelMessage(role="user", content="x"),))))
+
+    assert captured["thinking"] == {"type": "enabled"}
+    assert captured["reasoning_effort"] == "high"
+
+
 def test_stream_parses_cross_chunk_unicode_finish_reason_and_usage() -> None:
     content_event = (
         'data: {"choices":[{"delta":{"content":"hello 世界"},"finish_reason":null}]}\n\n'
