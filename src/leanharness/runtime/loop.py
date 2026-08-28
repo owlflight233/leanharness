@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -28,6 +29,8 @@ MAX_TASK_CHARS = 32_000
 MAX_TOOL_CALLS_PER_STEP = 4
 MAX_STEP_TOOL_RESULT_BYTES = 96 * 1024
 MAX_PROGRESS_CHARS = 200
+_HAN_CHAR = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+_LATIN_CHAR = re.compile(r"[A-Za-z]")
 
 
 class RunControlError(Exception):
@@ -287,7 +290,17 @@ class CodingAgent:
                             )
                         else:
                             result = None
-                            if self.tools.approval_required(call):
+                            if (
+                                call.name in {"workspace_patch", "workspace_mkdir"}
+                                and not requirements.mutation_required
+                            ):
+                                result = _runtime_tool_error(
+                                    call,
+                                    "MUTATION_NOT_REQUESTED",
+                                    "The task does not request a workspace mutation; "
+                                    "no files were changed",
+                                )
+                            elif self.tools.approval_required(call):
                                 if self.approvals is None:
                                     result = _runtime_tool_error(
                                         call,
@@ -577,9 +590,22 @@ def _progress_summary(content: str, call: ToolCall, language: str = "same") -> s
         and len(normalized) <= MAX_PROGRESS_CHARS
         and len(content.splitlines()) <= 2
         and not any(marker in normalized.casefold() for marker in forbidden)
+        and _progress_language_matches(normalized, language)
     ):
         return normalized
     return _fallback_summary(call, language)
+
+
+def _progress_language_matches(text: str, language: str) -> bool:
+    if language == "same":
+        return True
+    han = len(_HAN_CHAR.findall(text))
+    latin = len(_LATIN_CHAR.findall(text))
+    if language == "zh":
+        return han > 0 and han * 2 >= latin
+    if language == "en":
+        return latin > 0 and latin >= han * 2
+    return True
 
 
 def _fallback_summary(call: ToolCall, language: str = "same") -> str:

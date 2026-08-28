@@ -17,6 +17,19 @@ _VERIFICATION_INTENT = re.compile(
     r"|(?:运行|执行)(?:测试|检查|构建|类型检查)",
     re.IGNORECASE,
 )
+_NEGATED_MUTATION = re.compile(
+    r"(?:(?:不要|不必|禁止|勿|无需|不需要|不允许|先别)\s*(?:去)?|"
+    r"(?:do\s+not|don't|without|no)\s+)"
+    r"(?:修改|改动|更改|创建|新建|新增|添加|实现|修复|删除|移除|重命名|写入|写|"
+    r"modify|change|create|delete|edit|fix|implement|remove|rename|update|write)",
+    re.IGNORECASE,
+)
+_NEGATED_VERIFICATION = re.compile(
+    r"(?:(?:不要|不必|禁止|勿|无需|不需要|不允许|先别)\s*(?:去)?|"
+    r"(?:do\s+not|don't|without|no)\s+)"
+    r"(?:运行|执行|测试|检查|构建|run|execute|test|check|build)",
+    re.IGNORECASE,
+)
 _OBSERVATION_TOOLS = frozenset(
     {"workspace_list", "workspace_read", "workspace_search", "git_inspect"}
 )
@@ -29,9 +42,11 @@ class TaskRequirements:
 
     @classmethod
     def infer(cls, task: str) -> TaskRequirements:
+        normalized = _NEGATED_MUTATION.sub("", task)
+        verification_text = _NEGATED_VERIFICATION.sub("", task)
         return cls(
-            mutation_required=bool(_MUTATION_INTENT.search(task)),
-            verification_required=bool(_VERIFICATION_INTENT.search(task)),
+            mutation_required=bool(_MUTATION_INTENT.search(normalized)),
+            verification_required=bool(_VERIFICATION_INTENT.search(verification_text)),
         )
 
 

@@ -86,6 +86,11 @@ def session_detail(store: LocalStore, session_id: str) -> dict[str, object]:
                 for key in (
                     "sequence",
                     "type",
+                    "run_id",
+                    "plan_id",
+                    "title",
+                    "state",
+                    "step_count",
                     "step",
                     "tool",
                     "summary",

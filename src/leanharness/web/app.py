@@ -475,6 +475,14 @@ def create_app(
             plan_id=plan.id,
         )
         store.update_run(run.id, state="COMPLETED", answer=generated.markdown)
+        created_sequence = (generation_events[-1].sequence + 1) if generation_events else 0
+        store.append_event(
+            session.id,
+            run.id,
+            created_sequence,
+            "plan.created",
+            _plan_created_audit_payload(plan, created_sequence, run.id),
+        )
         result = plan_to_dict(plan)
         result["generation_trace"] = [event.to_dict() for event in generation_events]
         return result
@@ -556,10 +564,18 @@ def create_app(
                     plan_id=plan.id,
                 )
                 store.update_run(run.id, state="COMPLETED", answer=generated.markdown)
+                created_sequence = last_sequence + 1
+                store.append_event(
+                    session.id,
+                    run.id,
+                    created_sequence,
+                    "plan.created",
+                    _plan_created_audit_payload(plan, created_sequence, run.id),
+                )
                 yield _encode_payload(
                     {
                         "type": "plan.created",
-                        "sequence": last_sequence + 1,
+                        "sequence": created_sequence,
                         "run_id": run.id,
                         "plan": plan_to_dict(plan),
                     },
@@ -794,3 +810,21 @@ def _encode_payload(
     if run_id is not None:
         payload = {**payload, "run_id": run_id}
     return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _plan_created_audit_payload(plan: object, sequence: int, run_id: str) -> dict[str, object]:
+    """Persist lifecycle metadata without storing full plan text or instructions."""
+    plan_id = getattr(plan, "id", "")
+    title = getattr(plan, "title", "")
+    state_value = getattr(plan, "state", "")
+    state = getattr(state_value, "value", state_value)
+    steps = getattr(plan, "steps", ())
+    return {
+        "type": "plan.created",
+        "sequence": sequence,
+        "run_id": run_id,
+        "plan_id": str(plan_id),
+        "title": str(title),
+        "state": str(state),
+        "step_count": len(steps),
+    }

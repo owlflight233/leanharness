@@ -310,3 +310,7 @@ def test_plan_stream_emits_research_events_and_persists_plan_message(
     session_id = created["session_id"]
     detail = get(app, f"/api/v1/sessions/{session_id}").json()
     assert any(message.get("kind") == "plan" for message in detail["messages"])
+    audit_events = [event for run in detail["runs"] for event in run.get("trace", [])]
+    created_audit = next(event for event in audit_events if event["type"] == "plan.created")
+    assert created_audit["step_count"] == 1
+    assert "source_markdown" not in json.dumps(created_audit, ensure_ascii=False)

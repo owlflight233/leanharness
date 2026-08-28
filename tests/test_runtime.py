@@ -17,6 +17,7 @@ from leanharness.runtime import (
     RunState,
     validate_run_task,
 )
+from leanharness.runtime.completion import TaskRequirements
 from leanharness.runtime.state import InvalidTransition, transition
 
 
@@ -356,6 +357,65 @@ def test_same_language_fallback_is_neutral_metadata(tmp_path: Path) -> None:
     events = collect(ReadOnlyAgent(tmp_path, model, language="same"))
     progress = next(event for event in events if event.type == "assistant.progress")
     assert progress.summary == "[workspace_read] path=README.md"
+
+
+def test_progress_summary_falls_back_when_model_uses_wrong_language(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# Example", encoding="utf-8")
+    model = ScriptedModel(
+        [
+            tool_response(
+                "call-1",
+                "workspace_read",
+                {"path": "README.md"},
+                "I'll gather more evidence before drafting the answer.",
+            ),
+            ModelResponse(content="读取完成。"),
+        ]
+    )
+
+    events = collect(CodingAgent(tmp_path, model, language="zh"))
+
+    progress = next(event for event in events if event.type == "assistant.progress")
+    assert progress.summary == "读取 README.md 以核对实现细节。"
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "先评估能力, 不要修改任何文件, 先别写代码",
+        "Review the repository without modifying files",
+    ],
+)
+def test_negative_edit_request_does_not_require_or_authorize_mutation(task: str) -> None:
+    requirements = TaskRequirements.infer(task)
+
+    assert requirements.mutation_required is False
+
+
+def test_runtime_blocks_mutation_when_task_explicitly_forbids_edits(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response(
+                "patch-1",
+                "workspace_patch",
+                {"patch": "*** Begin Patch\n*** End Patch"},
+            ),
+            ModelResponse(content="No files were changed."),
+        ]
+    )
+
+    events = collect(
+        CodingAgent(
+            tmp_path,
+            model,
+            permission_mode=PermissionMode.UNRESTRICTED,
+        ),
+        "Inspect the repository and do not modify any files",
+    )
+
+    completed = next(event for event in events if event.type == "tool.completed")
+    assert completed.metadata["error_code"] == "MUTATION_NOT_REQUESTED"
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize("task", ["", "   ", "x" * 32_001])

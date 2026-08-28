@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from leanharness.application.language import language_instruction
 from leanharness.models import ModelRequest, ModelResponse
 from leanharness.permissions import PermissionMode
 from leanharness.planning.contracts import PlanStep
@@ -31,8 +32,9 @@ class PlanningModel(Protocol):
 class PlanningModelClient:
     """Add the limited Markdown contract to the final answer request."""
 
-    def __init__(self, delegate: PlanningModel) -> None:
+    def __init__(self, delegate: PlanningModel, language: str) -> None:
         self._delegate = delegate
+        self._language = language
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         messages = request.messages
@@ -47,7 +49,8 @@ class PlanningModelClient:
                     "Markdown shape: an optional single '# Title' line followed by a "
                     "consecutive ordered list. Each step must be 'N. **Short title** - "
                     "concrete instruction'. Do not use code fences, tables, nested lists, "
-                    "bullets, preamble, or epilogue. Use tools first when evidence is needed."
+                    "bullets, preamble, or epilogue. Use tools first when evidence is needed. "
+                    + language_instruction(self._language)
                 ),
             ),
         )
@@ -74,7 +77,7 @@ class PlanGenerator:
     ) -> None:
         self.agent = CodingAgent(
             workspace,
-            PlanningModelClient(model_client),
+            PlanningModelClient(model_client, language),
             max_steps=PLAN_GENERATION_MAX_STEPS,
             language=language,
             permission_mode=PermissionMode.INSPECT,
