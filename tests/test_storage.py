@@ -172,7 +172,7 @@ def test_v1_database_migrates_without_losing_history(tmp_path: Path) -> None:
         versions = store.connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row["version"] for row in versions] == [1, 2]
+        assert [row["version"] for row in versions] == [1, 2, 3]
 
 
 def test_continuation_capsule_uses_only_previous_public_run_summary(tmp_path: Path) -> None:

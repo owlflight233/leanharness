@@ -3,6 +3,8 @@
 from leanharness.storage.records import (
     ApprovalRecord,
     MessageRecord,
+    PlanRecord,
+    PlanStepRecord,
     ProjectRecord,
     RunRecord,
     SessionRecord,
@@ -17,6 +19,8 @@ __all__ = [
     "ApprovalRecord",
     "LocalStore",
     "MessageRecord",
+    "PlanRecord",
+    "PlanStepRecord",
     "ProjectRecord",
     "RunRecord",
     "SessionRecord",

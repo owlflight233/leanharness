@@ -103,6 +103,24 @@ class RunConflictError(LeanHarnessError):
     code = "RUN_ALREADY_ACTIVE"
 
 
+class PlanFormatError(LeanHarnessError):
+    """Raised when model output cannot be parsed as the limited plan format."""
+
+    code = "PLAN_INVALID_FORMAT"
+
+
+class PlanNotFoundError(LeanHarnessError):
+    code = "PLAN_NOT_FOUND"
+
+
+class PlanConflictError(LeanHarnessError):
+    code = "PLAN_VERSION_CONFLICT"
+
+
+class PlanStateError(LeanHarnessError):
+    code = "PLAN_STATE_INVALID"
+
+
 class ApprovalNotFoundError(LeanHarnessError):
     code = "APPROVAL_NOT_FOUND"
 

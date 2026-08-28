@@ -16,7 +16,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from leanharness.errors import InvalidPermissionError, SessionNotFoundError, StorageError
+from leanharness.errors import (
+    InvalidPermissionError,
+    PlanConflictError,
+    PlanNotFoundError,
+    PlanStateError,
+    SessionNotFoundError,
+    StorageError,
+)
+from leanharness.planning.contracts import Plan, PlanState, PlanStep, PlanStepState
 from leanharness.storage.migrations import apply_migrations
 from leanharness.storage.records import (
     ApprovalRecord,
@@ -416,6 +424,236 @@ class LocalStore:
             "SELECT payload_json FROM run_events WHERE run_id=? ORDER BY sequence", (run_id,)
         ).fetchall()
         return [json.loads(row["payload_json"]) for row in rows]
+
+    def create_plan(
+        self,
+        session_id: str,
+        *,
+        title: str,
+        task: str,
+        source_markdown: str,
+        steps: tuple[PlanStep, ...],
+        state: PlanState = PlanState.AWAITING_CONFIRMATION,
+    ) -> Plan:
+        self.get_session(session_id)
+        now = utc_now()
+        plan = Plan(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            title=self.redactor.text(title),
+            task=self.redactor.text(task),
+            state=state,
+            version=1,
+            source_markdown=self.redactor.text(source_markdown),
+            run_id=None,
+            created_at=now,
+            updated_at=now,
+            steps=steps,
+        )
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO plans(id, session_id, title, task, state, version, source_markdown, run_id, created_at, updated_at, confirmed_at, finished_at, error_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    plan.id,
+                    plan.session_id,
+                    plan.title,
+                    plan.task,
+                    plan.state.value,
+                    plan.version,
+                    plan.source_markdown,
+                    None,
+                    now,
+                    now,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            self._insert_plan_steps(plan.id, steps)
+        return plan
+
+    def list_plans(self, session_id: str) -> list[Plan]:
+        self.get_session(session_id)
+        rows = self.connection.execute(
+            "SELECT * FROM plans WHERE session_id=? ORDER BY updated_at DESC", (session_id,)
+        ).fetchall()
+        return [self._plan_row(row) for row in rows]
+
+    def get_plan(self, plan_id: str) -> Plan:
+        row = self.connection.execute("SELECT * FROM plans WHERE id=?", (plan_id,)).fetchone()
+        if row is None:
+            raise PlanNotFoundError("Plan was not found")
+        return self._plan_row(row)
+
+    def update_plan(
+        self,
+        plan_id: str,
+        *,
+        version: int,
+        title: str,
+        source_markdown: str,
+        steps: tuple[PlanStep, ...],
+    ) -> Plan:
+        current = self.get_plan(plan_id)
+        if current.version != version:
+            raise PlanConflictError("Plan version is stale")
+        if current.state is not PlanState.AWAITING_CONFIRMATION:
+            raise PlanStateError("Only an unconfirmed plan can be edited")
+        now = utc_now()
+        with self.connection:
+            cursor = self.connection.execute(
+                "UPDATE plans SET title=?, source_markdown=?, version=version+1, updated_at=? WHERE id=? AND version=? AND state=?",
+                (
+                    self.redactor.text(title),
+                    self.redactor.text(source_markdown),
+                    now,
+                    plan_id,
+                    version,
+                    PlanState.AWAITING_CONFIRMATION.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise PlanConflictError("Plan version is stale")
+            self.connection.execute("DELETE FROM plan_steps WHERE plan_id=?", (plan_id,))
+            self._insert_plan_steps(plan_id, steps)
+        return self.get_plan(plan_id)
+
+    def attach_plan_run(self, plan_id: str, run_id: str) -> Plan:
+        self.get_plan(plan_id)
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                "UPDATE plans SET run_id=?, state=?, confirmed_at=COALESCE(confirmed_at, ?), updated_at=? WHERE id=?",
+                (run_id, PlanState.RUNNING.value, now, now, plan_id),
+            )
+        return self.get_plan(plan_id)
+
+    def update_plan_state(
+        self,
+        plan_id: str,
+        state: PlanState,
+        *,
+        error_code: str | None = None,
+    ) -> Plan:
+        self.get_plan(plan_id)
+        now = utc_now()
+        finished = now if state in {
+            PlanState.COMPLETED,
+            PlanState.FAILED,
+            PlanState.CANCELLED,
+        } else None
+        with self.connection:
+            self.connection.execute(
+                "UPDATE plans SET state=?, error_code=COALESCE(?, error_code), finished_at=COALESCE(?, finished_at), updated_at=? WHERE id=?",
+                (state.value, error_code, finished, now, plan_id),
+            )
+        return self.get_plan(plan_id)
+
+    def update_plan_step(
+        self,
+        step_id: str,
+        state: PlanStepState,
+        *,
+        evidence: dict[str, object] | None = None,
+        error_code: str | None = None,
+    ) -> PlanStep:
+        row = self.connection.execute(
+            "SELECT * FROM plan_steps WHERE id=?", (step_id,)
+        ).fetchone()
+        if row is None:
+            raise PlanNotFoundError("Plan step was not found")
+        now = utc_now()
+        started = now if state is PlanStepState.RUNNING else row["started_at"]
+        finished = now if state in {
+            PlanStepState.COMPLETED,
+            PlanStepState.FAILED,
+            PlanStepState.SKIPPED,
+        } else row["finished_at"]
+        with self.connection:
+            self.connection.execute(
+                "UPDATE plan_steps SET state=?, evidence_json=?, error_code=?, started_at=?, finished_at=? WHERE id=?",
+                (
+                    state.value,
+                    json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
+                    if evidence is not None
+                    else row["evidence_json"],
+                    error_code,
+                    started,
+                    finished,
+                    step_id,
+                ),
+            )
+            self.connection.execute(
+                "UPDATE plans SET updated_at=? WHERE id=?", (now, row["plan_id"])
+            )
+        plan = self.get_plan(row["plan_id"])
+        return next(step for step in plan.steps if step.id == step_id)
+
+    def delete_plan(self, plan_id: str) -> None:
+        self.get_plan(plan_id)
+        with self.connection:
+            self.connection.execute("DELETE FROM plans WHERE id=?", (plan_id,))
+
+    def _insert_plan_steps(self, plan_id: str, steps: tuple[PlanStep, ...]) -> None:
+        self.connection.executemany(
+            "INSERT INTO plan_steps(id, plan_id, sequence, title, instruction, enabled, state, evidence_json, error_code, started_at, finished_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    step.id,
+                    plan_id,
+                    step.sequence,
+                    self.redactor.text(step.title),
+                    self.redactor.text(step.instruction),
+                    int(step.enabled),
+                    step.state.value,
+                    json.dumps(step.evidence, ensure_ascii=False, separators=(",", ":"))
+                    if step.evidence is not None
+                    else None,
+                    step.error_code,
+                    step.started_at,
+                    step.finished_at,
+                )
+                for step in steps
+            ],
+        )
+
+    def _plan_row(self, row: sqlite3.Row) -> Plan:
+        steps_rows = self.connection.execute(
+            "SELECT * FROM plan_steps WHERE plan_id=? ORDER BY sequence", (row["id"],)
+        ).fetchall()
+        steps = tuple(
+            PlanStep(
+                id=step["id"],
+                sequence=step["sequence"],
+                title=step["title"],
+                instruction=step["instruction"],
+                enabled=bool(step["enabled"]),
+                state=PlanStepState(step["state"]),
+                evidence=json.loads(step["evidence_json"])
+                if step["evidence_json"]
+                else None,
+                error_code=step["error_code"],
+                started_at=step["started_at"],
+                finished_at=step["finished_at"],
+            )
+            for step in steps_rows
+        )
+        return Plan(
+            id=row["id"],
+            session_id=row["session_id"],
+            title=row["title"],
+            task=row["task"],
+            state=PlanState(row["state"]),
+            version=row["version"],
+            source_markdown=row["source_markdown"],
+            run_id=row["run_id"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            confirmed_at=row["confirmed_at"],
+            finished_at=row["finished_at"],
+            error_code=row["error_code"],
+            steps=steps,
+        )
 
     def create_approval(
         self,

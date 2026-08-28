@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from leanharness.planning.contracts import Plan, PlanStep
+
 
 @dataclass(frozen=True, slots=True)
 class SessionRecord:
@@ -64,3 +66,7 @@ class ApprovalRecord:
     state: str
     requested_at: str
     decided_at: str | None
+
+
+PlanRecord = Plan
+PlanStepRecord = PlanStep

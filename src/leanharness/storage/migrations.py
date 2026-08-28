@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def apply_migrations(connection: sqlite3.Connection) -> None:
@@ -40,5 +40,42 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 CREATE INDEX messages_run ON messages(run_id, sequence);
                 CREATE INDEX approvals_run ON approvals(run_id, requested_at);
                 INSERT INTO schema_migrations(version, applied_at) VALUES(2, CURRENT_TIMESTAMP);
+                """
+            )
+        if current < 3:
+            connection.executescript(
+                """
+                CREATE TABLE plans(
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    task TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    source_markdown TEXT NOT NULL,
+                    run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    confirmed_at TEXT,
+                    finished_at TEXT,
+                    error_code TEXT
+                );
+                CREATE TABLE plan_steps(
+                    id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    instruction TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    state TEXT NOT NULL,
+                    evidence_json TEXT,
+                    error_code TEXT,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    UNIQUE(plan_id, sequence)
+                );
+                CREATE INDEX plans_session_updated ON plans(session_id, updated_at DESC);
+                CREATE INDEX plan_steps_order ON plan_steps(plan_id, sequence);
+                INSERT INTO schema_migrations(version, applied_at) VALUES(3, CURRENT_TIMESTAMP);
                 """
             )
