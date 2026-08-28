@@ -34,6 +34,21 @@ def test_store_migrates_and_recovers_sessions(tmp_path: Path) -> None:
         assert reopened.list_events(run.id)[0]["summary"] == "started"
 
 
+def test_history_for_session_returns_public_chat_messages_only(tmp_path: Path) -> None:
+    from leanharness.application.session_gateway import history_for_session
+
+    store = LocalStore(tmp_path / "data")
+    session = store.create_session(store.ensure_project(tmp_path))
+    store.add_message(session.id, "user", "第一项任务")
+    store.add_message(session.id, "assistant", "已检查项目")
+    store.add_message(session.id, "progress", "内部行动")
+    history = history_for_session(store, session)
+    assert [(message.role, message.content) for message in history] == [
+        ("user", "第一项任务"),
+        ("assistant", "已检查项目"),
+    ]
+
+
 def test_delete_session_cascades_and_removes_trace(tmp_path: Path) -> None:
     store = LocalStore(tmp_path / "data")
     project = store.ensure_project(tmp_path)

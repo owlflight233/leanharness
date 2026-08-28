@@ -6,10 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from leanharness.application.language import detect_session_language
-from leanharness.models import ModelEvent
+from leanharness.models import ModelEvent, ModelMessage
 from leanharness.runtime import ContinuationContext
 from leanharness.runtime.events import RuntimeEvent
-from leanharness.storage import LocalStore, ProjectRecord, RunRecord, SessionRecord
+from leanharness.storage import LocalStore, MessageRecord, ProjectRecord, RunRecord, SessionRecord
+
+MAX_HISTORY_MESSAGES = 24
+MAX_HISTORY_CHARS = 32_000
 
 
 def ensure_session(
@@ -156,6 +159,55 @@ def continuation_for_session(
         incomplete_reason=reason,
         permission_mode=session.permission_mode,
     )
+
+
+def history_for_session(
+    store: LocalStore,
+    session: SessionRecord,
+    *,
+    exclude_run_id: str | None = None,
+) -> tuple[ModelMessage, ...]:
+    """Return bounded public conversation history for a new model request.
+
+    Persisted tool events and progress notes are intentionally excluded. The
+    current run is also excluded because its user message is appended by the
+    runtime itself.
+    """
+
+    candidates = [
+        message
+        for message in store.list_messages(session.id)
+        if (exclude_run_id is None or message.run_id != exclude_run_id)
+        and message.role in {"user", "assistant"}
+        and message.content.strip()
+    ]
+    selected: list[MessageRecord] = []
+    size = 0
+    for message in reversed(candidates):
+        content = message.content.strip()
+        cost = len(content) + 64
+        if selected and (
+            len(selected) >= MAX_HISTORY_MESSAGES or size + cost > MAX_HISTORY_CHARS
+        ):
+            break
+        if not selected and cost > MAX_HISTORY_CHARS:
+            content = content[:MAX_HISTORY_CHARS]
+            cost = len(content) + 64
+        selected.append(
+            MessageRecord(
+                message.id,
+                message.session_id,
+                message.sequence,
+                message.role,
+                content,
+                message.status,
+                message.created_at,
+                message.run_id,
+            )
+        )
+        size += cost
+    selected.reverse()
+    return tuple(ModelMessage(role=item.role, content=item.content) for item in selected)
 
 
 def persist_runtime_event(

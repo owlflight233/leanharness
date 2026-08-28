@@ -70,8 +70,9 @@ async def stream_chat(
     config: ModelConfig | None = None,
     client_factory: ModelClientFactory = OpenAICompatibleClient,
     language: str = "same",
+    history: tuple[ModelMessage, ...] = (),
 ) -> AsyncIterator[ModelEvent]:
-    """Run one stateless user message and normalize post-start failures as events."""
+    """Run a chat turn with bounded public session history."""
 
     validated = validate_chat_message(message)
     resolved_config = config or load_model_config()
@@ -82,6 +83,7 @@ async def stream_chat(
             ModelRequest(
                 messages=(
                     ModelMessage(role="system", content=language_instruction(language)),
+                    *history,
                     ModelMessage(role="user", content=validated),
                 ),
                 stream=True,

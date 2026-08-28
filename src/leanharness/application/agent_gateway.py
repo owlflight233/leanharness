@@ -6,7 +6,7 @@ from pathlib import Path
 
 from leanharness.application.model_gateway import ModelClientFactory
 from leanharness.errors import RunInputError
-from leanharness.models import OpenAICompatibleClient, load_model_config
+from leanharness.models import ModelMessage, OpenAICompatibleClient, load_model_config
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.runtime import (
     CodingAgent,
@@ -29,6 +29,7 @@ def create_coding_run(
     session_id: str = "ephemeral",
     approvals: ApprovalCoordinator | None = None,
     continuation: ContinuationContext | None = None,
+    history: tuple[ModelMessage, ...] = (),
 ) -> CodingAgent:
     """Validate public input and create a bounded coding runtime."""
 
@@ -53,6 +54,7 @@ def create_coding_run(
         session_id=session_id,
         approvals=approvals,
         continuation=continuation,
+        history=history,
     )
 
 

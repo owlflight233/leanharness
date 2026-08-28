@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -16,6 +17,7 @@ from leanharness.application.session_gateway import (
     apply_first_task_title,
     continuation_for_session,
     ensure_session,
+    history_for_session,
     persist_model_event,
     persist_runtime_event,
 )
@@ -282,6 +284,7 @@ async def _chat(
     store = LocalStore(Path(data_dir).expanduser() if data_dir else None)
     _, session = ensure_session(store, workspace, session_id)
     session = apply_first_task_title(store, session, message)
+    history = history_for_session(store, session)
     run = store.create_run(session.id, "chat", message, 1)
     store.add_message(session.id, "user", message, run_id=run.id)
     print(f"[session] {session.id}", file=sys.stderr)
@@ -289,7 +292,13 @@ async def _chat(
     wrote_content = False
     failed = False
     content: list[str] = []
-    async for event in stream_chat(message, config=config, language=session.language or "same"):
+    chat_kwargs: dict[str, object] = {
+        "config": config,
+        "language": session.language or "same",
+    }
+    if "history" in inspect.signature(stream_chat).parameters:
+        chat_kwargs["history"] = history
+    async for event in stream_chat(message, **chat_kwargs):  # type: ignore[arg-type]
         persist_model_event(store, session, run, event)
         if event.type == "content.delta" and event.content:
             print(event.content, end="", flush=True)
@@ -331,6 +340,7 @@ async def _inspect(
     session = apply_first_task_title(store, session, task)
     selected_permission = permission or session.permission_mode
     continuation = continuation_for_session(store, session)
+    history = history_for_session(store, session)
     run = store.create_run(
         session.id,
         "coding",
@@ -366,6 +376,7 @@ async def _inspect(
         session_id=session.id,
         approvals=approvals,
         continuation=continuation,
+        history=history,
     )
     exit_code = 0
     async for event in runtime.run(task):

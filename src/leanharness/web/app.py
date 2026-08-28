@@ -28,6 +28,7 @@ from leanharness.application.session_gateway import (
     apply_first_task_title,
     continuation_for_session,
     ensure_session,
+    history_for_session,
     persist_model_event,
     persist_runtime_event,
     persist_stream_cancellation,
@@ -270,6 +271,7 @@ def create_app(
         store: LocalStore = app.state.store
         _, session = ensure_session(store, config.workspace, payload.session_id)
         session = apply_first_task_title(store, session, message)
+        history = history_for_session(store, session)
         active_runs.assert_available(session.id)
         run = store.create_run(session.id, "chat", message, 1)
         active_runs.acquire(session.id, run.id)
@@ -285,6 +287,7 @@ def create_app(
                     config=model_config,
                     client_factory=app.state.model_client_factory,
                     language=session.language or "same",
+                    history=history,
                 ):
                     last_sequence = event.sequence
                     persist_model_event(store, session, run, event)
@@ -329,6 +332,7 @@ def create_app(
         session = apply_first_task_title(store, session, payload.task)
         active_runs.assert_available(session.id)
         continuation = continuation_for_session(store, session)
+        history = history_for_session(store, session)
         run_record = store.create_run(
             session.id,
             "coding",
@@ -348,6 +352,7 @@ def create_app(
             session_id=session.id,
             approvals=approvals,
             continuation=continuation,
+            history=history,
         )
         store.add_message(session.id, "user", payload.task, run_id=run_record.id)
 

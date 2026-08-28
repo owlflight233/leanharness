@@ -57,6 +57,7 @@ class CodingAgent:
         session_id: str = "ephemeral",
         approvals: ApprovalCoordinator | None = None,
         continuation: ContinuationContext | None = None,
+        history: tuple[ModelMessage, ...] = (),
         task_requirements: TaskRequirements | None = None,
         initial_sequence: int = 0,
     ) -> None:
@@ -75,6 +76,7 @@ class CodingAgent:
         self.session_id = session_id
         self.approvals = approvals
         self.continuation = continuation
+        self.history = history
         self.task_requirements = task_requirements
         self._sequence = initial_sequence
         self.evidence = CompletionLedger()
@@ -134,6 +136,9 @@ class CodingAgent:
             self.context.append(
                 ModelMessage(role="system", content=self.continuation.to_model_message())
             )
+        if initialize_context:
+            for message in self.history:
+                self.context.append(message)
         self.context.append(ModelMessage(role="user", content=validated_task))
         yield self._event("run.started", summary=_run_started_summary(self.language))
 
