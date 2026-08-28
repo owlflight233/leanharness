@@ -536,18 +536,6 @@ textarea:focus-visible {
   margin-right: 8px;
 }
 
-/* Keeps older automation clients compatible while the visible mode control
-   lives in the composer add menu. */
-.legacy-mode-compat {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  border: 0;
-  opacity: 0;
-  pointer-events: auto;
-}
-
 .composer-plus {
   color: var(--muted);
   border-color: var(--border);

@@ -138,6 +138,26 @@ describe("application shell", () => {
     expect(screen.getByRole("tab", { name: "轨迹" })).toHaveAttribute("aria-selected", "true");
   });
 
+  it("uses Agent by default and exposes Plan Mode only from the add menu", async () => {
+    const user = userEvent.setup();
+    render(<App healthLoader={successfulHealth} modelStatusLoader={configuredModel} />);
+
+    expect(await screen.findByText("Agent · 本地保存")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Agent" })).not.toBeInTheDocument();
+    expect(screen.queryByText("单轮对话")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "添加模式、文件或插件" }));
+    expect(screen.getByRole("menuitem", { name: /计划/ })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Agent" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "单轮对话" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("menuitem", { name: /计划/ }));
+    expect(screen.getByText("计划模式 · 本地保存")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "添加模式、文件或插件" }));
+    await user.click(screen.getByRole("menuitem", { name: /计划/ }));
+    expect(screen.getByText("Agent · 本地保存")).toBeInTheDocument();
+  });
+
   it("opens and closes the project drawer", async () => {
     const user = userEvent.setup();
     render(<App healthLoader={successfulHealth} modelStatusLoader={configuredModel} />);
@@ -237,7 +257,6 @@ describe("application shell", () => {
         runStreamer={inspection}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "Agent" }));
     await user.type(await screen.findByLabelText("任务输入"), "分析仓库");
     await user.click(screen.getByRole("button", { name: "发送任务" }));
 
@@ -483,7 +502,6 @@ describe("application shell", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Agent" }));
     await user.type(await screen.findByLabelText("任务输入"), "修改 value.txt");
     await user.click(screen.getByRole("button", { name: "发送任务" }));
     await user.click(await screen.findByRole("button", { name: "批准一次" }));

@@ -53,7 +53,7 @@ import {
 } from "./api/plans";
 
 type InspectorTab = "plan" | "trace";
-type RunMode = "chat" | "inspect" | "plan";
+type RunMode = "agent" | "plan";
 type TraceEvent = TurnEvent | RunEvent;
 type LoadState<T> =
   | { status: "loading" }
@@ -128,17 +128,22 @@ interface PendingApproval {
 function App({
   healthLoader = fetchHealth,
   modelStatusLoader = fetchModelStatus,
-  chatStreamer = streamChat,
-  runStreamer = streamRun,
+  chatStreamer: legacyChatStreamer,
+  runStreamer: providedRunStreamer,
   approvalResolver = resolveRunApproval,
   sessionClient = defaultSessionClient,
 }: AppProps) {
+  const chatStreamer = legacyChatStreamer ?? streamChat;
+  const runStreamer = providedRunStreamer ?? streamRun;
+  // Keep the old single-turn transport injectable for existing integrations,
+  // while the product always presents the coding-agent runtime by default.
+  const useLegacyChatTransport = providedRunStreamer === undefined && legacyChatStreamer !== undefined;
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("plan");
   const [health, setHealth] = useState<LoadState<HealthResponse>>({ status: "loading" });
   const [modelStatus, setModelStatus] = useState<LoadState<ModelStatus>>({ status: "loading" });
-  const [mode, setMode] = useState<RunMode>("chat");
+  const [mode, setMode] = useState<RunMode>("agent");
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [trace, setTrace] = useState<Array<TraceEvent | SavedRunTrace | PersistedTraceEvent>>([]);
@@ -241,7 +246,7 @@ function App({
       }
       return;
     }
-    const assistantId = mode === "chat" ? nextMessageId.current++ : null;
+    const assistantId = useLegacyChatTransport ? nextMessageId.current++ : null;
     const activeSessionId = sessionId;
     let resolvedSessionId = activeSessionId;
     const controller = new AbortController();
@@ -262,7 +267,7 @@ function App({
     setIsStreaming(true);
 
     try {
-      if (mode === "chat" && assistantId !== null) {
+      if (useLegacyChatTransport && assistantId !== null) {
         await chatStreamer(
           message,
           (event) => {
@@ -349,9 +354,7 @@ function App({
       }
     } catch (error: unknown) {
       const content = isAbortError(error)
-        ? mode === "chat"
-          ? "已停止生成"
-          : "已停止运行"
+        ? useLegacyChatTransport ? "已停止生成" : "已停止运行"
         : errorMessage(error);
       if (assistantId !== null) {
         updateMessage(assistantId, (current) => ({
@@ -582,7 +585,7 @@ function App({
       <main className="workspace">
         <header className="workspace-header">
           <button className="icon-button mobile-only" type="button" title="打开项目导航" aria-label="打开项目导航" onClick={() => setLeftOpen(true)}><Menu size={19} /></button>
-          <div className="session-identity"><span className="session-title">{sessions.find((item) => item.id === sessionId)?.title || (mode === "chat" ? "新会话" : "编码任务")}</span><span className="session-subtitle">{workspace}</span></div>
+          <div className="session-identity"><span className="session-title">{sessions.find((item) => item.id === sessionId)?.title || "新会话"}</span><span className="session-subtitle">{workspace}</span></div>
           <button className="icon-button mobile-only" type="button" title="打开检查器" aria-label="打开检查器" onClick={() => setRightOpen(true)}><PanelRight size={19} /></button>
         </header>
 
@@ -639,15 +642,8 @@ function App({
               </div>
             </div>
           )}
-              <textarea aria-label="任务输入" placeholder={modelStatus.status === "ready" && !modelStatus.data.configured ? "请先配置模型环境变量" : mode === "chat" ? "输入一条消息" : mode === "plan" ? "描述需要完成的工作" : "输入一个仓库分析任务"} rows={2} value={input} maxLength={32_000} disabled={health.status !== "ready" || modelStatus.status !== "ready" || !modelStatus.data.configured || isStreaming || planLoading} onChange={(event) => setInput(event.target.value)} />
+              <textarea aria-label="任务输入" placeholder={modelStatus.status === "ready" && !modelStatus.data.configured ? "请先配置模型环境变量" : mode === "plan" ? "描述需要完成的工作" : "输入一个仓库任务"} rows={2} value={input} maxLength={32_000} disabled={health.status !== "ready" || modelStatus.status !== "ready" || !modelStatus.data.configured || isStreaming || planLoading} onChange={(event) => setInput(event.target.value)} />
           <div className="composer-actions">
-            <button
-              className="legacy-mode-compat"
-              type="button"
-              aria-label="Agent"
-              tabIndex={-1}
-              onClick={() => selectMode("inspect")}
-            />
             <div className="composer-menu-wrap">
               <button
                 className="icon-button composer-plus"
@@ -663,13 +659,7 @@ function App({
               {composerMenuOpen && (
                 <div className="composer-menu" role="menu" aria-label="添加到当前任务">
                   <div className="composer-menu-label">运行模式</div>
-                  <button type="button" role="menuitem" className={mode === "chat" ? "selected" : ""} onClick={() => selectMode("chat")}>
-                    <CircleDot size={15} /><span>单轮对话</span><small>直接回复</small>
-                  </button>
-                  <button type="button" role="menuitem" className={mode === "inspect" ? "selected" : ""} onClick={() => selectMode("inspect")}>
-                    <Bot size={15} /><span>Agent</span><small>检查或修改工作区</small>
-                  </button>
-                  <button type="button" role="menuitem" className={mode === "plan" ? "selected" : ""} onClick={() => selectMode("plan")}>
+                  <button type="button" role="menuitem" className={mode === "plan" ? "selected" : ""} aria-pressed={mode === "plan"} onClick={() => selectMode(mode === "plan" ? "agent" : "plan")}>
                     <Blocks size={15} /><span>计划</span><small>先规划，再执行</small>
                   </button>
                   <div className="composer-menu-divider" />
@@ -679,9 +669,9 @@ function App({
                 </div>
               )}
             </div>
-            <div className="composer-settings"><label htmlFor="permission-mode">权限</label><select id="permission-mode" value={permissionMode} onChange={(event) => void changePermission(event.target.value as PermissionMode)} disabled={isStreaming}><option value="inspect">只读检查</option><option value="approve">逐次批准</option><option value="unrestricted">受控直接执行</option></select></div><span className="composer-state">{isStreaming ? mode === "chat" ? "模型正在生成" : mode === "plan" ? "正在生成计划" : "Agent 正在执行" : modelStatus.status === "ready" && modelStatus.data.configured ? mode === "chat" ? "单轮对话 · 本地保存" : mode === "plan" ? "计划模式 · 本地保存" : "受控编码 · 本地保存" : `模型${modelCopy}`}</span>
+            <div className="composer-settings"><label htmlFor="permission-mode">权限</label><select id="permission-mode" value={permissionMode} onChange={(event) => void changePermission(event.target.value as PermissionMode)} disabled={isStreaming}><option value="inspect">只读检查</option><option value="approve">逐次批准</option><option value="unrestricted">受控直接执行</option></select></div><span className="composer-state">{isStreaming ? mode === "plan" ? "正在生成计划" : "Agent 正在执行" : modelStatus.status === "ready" && modelStatus.data.configured ? mode === "plan" ? "计划模式 · 本地保存" : "Agent · 本地保存" : `模型${modelCopy}`}</span>
             {isStreaming ? (
-              <button className="send-button stop-button" type="button" aria-label={mode === "chat" ? "停止生成" : "停止运行"} title={mode === "chat" ? "停止生成" : "停止运行"} onClick={() => activeRequest.current?.abort()}><Square size={14} fill="currentColor" /></button>
+              <button className="send-button stop-button" type="button" aria-label={useLegacyChatTransport ? "停止生成" : "停止运行"} title={useLegacyChatTransport ? "停止生成" : "停止运行"} onClick={() => activeRequest.current?.abort()}><Square size={14} fill="currentColor" /></button>
             ) : (
               <button className="send-button" type="submit" aria-label="发送任务" disabled={!canSubmit}><Send size={17} /></button>
             )}
