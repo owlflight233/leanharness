@@ -89,6 +89,12 @@ def test_controller_executes_all_steps_in_one_agent_context(tmp_path: Path) -> N
         "Completed steps: ['Inspect files']" in message.content
         for message in model.requests[2].messages
     )
+    assert not any(message.role == "tool" for message in model.requests[2].messages)
+    assert events[-1].answer is not None
+    assert "## Inspect files" in events[-1].answer
+    assert "## Inspect tests" in events[-1].answer
+    first_tool = next(event for event in events if event.type == "tool.requested")
+    assert first_tool.metadata["plan_step"] == 1
 
 
 def test_controller_pauses_when_step_is_incomplete(tmp_path: Path) -> None:
@@ -114,3 +120,30 @@ def test_controller_pauses_when_step_is_incomplete(tmp_path: Path) -> None:
     assert events[-2].type == "plan.paused"
     assert events[-1].type == "run.incomplete"
     assert not any(event.type == "plan.completed" for event in events)
+
+
+def test_controller_budget_is_shared_across_plan_steps(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response("call-1"),
+            ModelResponse(content="First step inspected."),
+            tool_response("call-2"),
+        ]
+    )
+    controller = PlanController(
+        make_plan(),
+        tmp_path,
+        model,
+        permission_mode=PermissionMode.INSPECT,
+        language="en",
+        max_steps=3,
+    )
+
+    async def collect():
+        return [event async for event in controller.run()]
+
+    events = asyncio.run(collect())
+    assert events[-1].type == "run.incomplete"
+    assert events[-1].metadata["incomplete_reason"] == "STEP_BUDGET_EXHAUSTED"
+    assert len(model.requests) == 3
+    assert any(event.type == "plan.step.started" and event.step == 2 for event in events)

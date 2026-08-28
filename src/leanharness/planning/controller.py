@@ -18,6 +18,10 @@ from leanharness.tools import ToolRegistry
 PlanEventType = str
 StepUpdater = Callable[[str, PlanStepState, dict[str, object] | None, str | None], None]
 
+MAX_STEP_ANSWER_CHARS = 6_000
+MAX_PLAN_ANSWER_CHARS = 32_000
+MAX_PLAN_CONTEXT_CHARS = 12_000
+
 
 @dataclass(frozen=True, slots=True)
 class PlanEvent:
@@ -72,6 +76,8 @@ class PlanController:
         self.plan = plan
         self._sequence = initial_sequence
         self._on_step = on_step
+        self._remaining_budget = max_steps
+        self._step_answers: list[tuple[str, str]] = []
         self.agent = CodingAgent(
             workspace,
             model_client,
@@ -84,6 +90,7 @@ class PlanController:
             tool_registry_factory=tool_registry_factory,
             initial_sequence=initial_sequence,
             cancel_event=cancel_event,
+            reserve_summary_round=False,
         )
 
     async def run(self) -> AsyncIterator[RuntimeEvent | PlanEvent]:
@@ -105,6 +112,21 @@ class PlanController:
             step.title for step in self.plan.steps if step.state is PlanStepState.COMPLETED
         ]
         for index, step in enumerate(enabled):
+            if self._remaining_budget < 1:
+                answer = self._combined_answer()
+                yield self._event(
+                    "plan.paused",
+                    summary="Plan model budget exhausted before the next step",
+                    answer=answer or None,
+                    metadata={"reason": "PLAN_BUDGET_EXHAUSTED"},
+                )
+                yield self._runtime_event(
+                    "run.incomplete",
+                    answer=answer or None,
+                    summary="Plan model budget exhausted",
+                    metadata={"incomplete_reason": "PLAN_BUDGET_EXHAUSTED"},
+                )
+                return
             self._update_step(step, PlanStepState.RUNNING)
             yield self._event(
                 "plan.step.started",
@@ -114,6 +136,7 @@ class PlanController:
             )
             task = _step_task(self.plan, step, completed_titles)
             requirements = TaskRequirements.infer(step.instruction)
+            self.agent.max_steps = self._remaining_budget
             self.agent.set_event_sequence(self._sequence)
             if index == 0:
                 self.agent.task_requirements = requirements
@@ -125,6 +148,7 @@ class PlanController:
                     requirements=requirements,
                 )
             )
+            calls_before = self.agent.metrics.model_calls
             terminal: RuntimeEvent | None = None
             async for event in stream:
                 if event.type in {
@@ -138,8 +162,11 @@ class PlanController:
                         terminal = event
                     continue
                 # Runtime sequences are private to the shared agent. Plan events use
-                # one contiguous public sequence for the persisted audit stream.
-                yield replace(event, sequence=self._next_sequence())
+                # one contiguous public sequence and carry the outer plan-step scope.
+                yield self._annotate_runtime_event(event, step)
+            self._remaining_budget = max(
+                0, self._remaining_budget - (self.agent.metrics.model_calls - calls_before)
+            )
             if terminal is None:
                 self._update_step(step, PlanStepState.FAILED, error_code="PLAN_STEP_INTERRUPTED")
                 yield self._event(
@@ -156,15 +183,26 @@ class PlanController:
                 return
             if terminal.type == "run.completed":
                 evidence = _terminal_evidence(terminal)
+                answer = _bounded_text(terminal.answer or "", MAX_STEP_ANSWER_CHARS)
                 self._update_step(step, PlanStepState.COMPLETED, evidence=evidence)
-                last_answer = terminal.answer or last_answer
+                if answer:
+                    self._step_answers.append((step.title, answer))
+                    last_answer = answer
                 completed_titles.append(step.title)
                 yield self._event(
                     "plan.step.completed",
                     step=step.sequence,
                     summary=step.title,
-                    metadata={"step_id": step.id, "evidence": evidence},
+                    metadata={
+                        "step_id": step.id,
+                        "evidence": evidence,
+                        **({"answer": answer} if answer else {}),
+                    },
                 )
+                if index + 1 < len(enabled):
+                    self.agent.checkpoint_context(
+                        _step_context(self.plan, self._step_answers)
+                    )
                 continue
             if terminal.type == "run.incomplete":
                 self._update_step(
@@ -180,7 +218,7 @@ class PlanController:
                     answer=terminal.answer,
                     metadata={"step_id": step.id},
                 )
-                yield replace(terminal, sequence=self._next_sequence())
+                yield self._annotate_runtime_event(terminal, step)
                 return
             failed_state = (
                 PlanStepState.FAILED
@@ -196,14 +234,27 @@ class PlanController:
                 error_code=terminal.error_code,
                 error_message=terminal.error_message,
             )
-            yield replace(terminal, sequence=self._next_sequence())
+            yield self._annotate_runtime_event(terminal, step)
             return
         yield self._event("plan.completed", summary="All plan steps completed")
         yield self._runtime_event(
             "run.completed",
-            answer=last_answer or "All enabled plan steps are complete.",
+            answer=self._combined_answer() or last_answer or "All enabled plan steps are complete.",
             summary="Plan completed",
         )
+
+    def _annotate_runtime_event(self, event: RuntimeEvent, step: PlanStep) -> RuntimeEvent:
+        metadata = dict(event.metadata or {})
+        metadata.update({"plan_step": step.sequence, "plan_step_id": step.id})
+        return replace(event, sequence=self._next_sequence(), metadata=metadata)
+
+    def _combined_answer(self) -> str:
+        if not self._step_answers:
+            return ""
+        rendered = "\n\n".join(
+            f"## {title}\n{answer}" for title, answer in self._step_answers
+        )
+        return _bounded_text(rendered, MAX_PLAN_ANSWER_CHARS)
 
     def _update_step(
         self,
@@ -246,6 +297,24 @@ def _step_task(plan: Plan, step: PlanStep, completed: list[str]) -> str:
         "Work only on this step. Obtain the evidence required for this step and then report "
         "its result, changed files, verification, and any remaining blocker."
     )
+
+
+def _step_context(plan: Plan, answers: list[tuple[str, str]]) -> str:
+    details = "\n\n".join(
+        f"### {title}\n{answer}" for title, answer in answers[-8:]
+    )
+    return _bounded_text(
+        "Bounded evidence from completed plan steps. Use it as a summary, and re-read "
+        "the workspace when exact details are needed.\n"
+        f"Plan goal: {plan.task}\n{details}",
+        MAX_PLAN_CONTEXT_CHARS,
+    )
+
+
+def _bounded_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)] + "..."
 
 
 def _terminal_evidence(event: RuntimeEvent) -> dict[str, object]:

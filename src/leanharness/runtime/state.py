@@ -25,7 +25,7 @@ TERMINAL_STATES = frozenset(
 ALLOWED_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     RunState.CREATED: frozenset({RunState.PREPARING, RunState.CANCELLED}),
     RunState.PREPARING: frozenset(
-        {RunState.REQUESTING_MODEL, RunState.FAILED, RunState.CANCELLED}
+        {RunState.REQUESTING_MODEL, RunState.EXHAUSTED, RunState.FAILED, RunState.CANCELLED}
     ),
     RunState.REQUESTING_MODEL: frozenset(
         {RunState.INTERPRETING, RunState.FAILED, RunState.CANCELLED}

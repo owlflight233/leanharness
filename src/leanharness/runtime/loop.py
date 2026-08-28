@@ -60,6 +60,7 @@ class CodingAgent:
         history: tuple[ModelMessage, ...] = (),
         task_requirements: TaskRequirements | None = None,
         initial_sequence: int = 0,
+        reserve_summary_round: bool = True,
     ) -> None:
         if not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
             raise ValueError(f"max_steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}")
@@ -78,6 +79,7 @@ class CodingAgent:
         self.continuation = continuation
         self.history = history
         self.task_requirements = task_requirements
+        self.reserve_summary_round = reserve_summary_round
         self._sequence = initial_sequence
         self.evidence = CompletionLedger()
         self.metrics = RunMetrics()
@@ -115,6 +117,15 @@ class CodingAgent:
         if sequence < self._sequence:
             raise ValueError("Runtime event sequence cannot move backwards")
         self._sequence = sequence
+
+    def checkpoint_context(self, summary: str) -> None:
+        """Keep system constraints and a bounded summary between plan steps."""
+        system_messages = tuple(
+            message for message in self.context.messages if message.role == "system"
+        )
+        self.context.replace(
+            (*system_messages, ModelMessage(role="user", content=summary))
+        )
 
     async def _run_task(
         self,
@@ -156,7 +167,7 @@ class CodingAgent:
                 step=step,
                 summary=_step_started_summary(step, self.language),
             )
-            summary_round = step == self.max_steps
+            summary_round = self.reserve_summary_round and step == self.max_steps
             try:
                 self.context.compact()
                 self.state = transition(self.state, RunState.REQUESTING_MODEL)
@@ -460,6 +471,19 @@ class CodingAgent:
                 summary=_evidence_required_summary(decision.reason, self.language),
             )
             yield self._event("step.completed", step=step)
+
+        # PlanController disables the per-step summary round so one budget is
+        # shared across the whole plan. Exhaustion still needs a terminal event.
+        self.state = transition(self.state, RunState.EXHAUSTED)
+        yield self._event(
+            "run.incomplete",
+            step=self.max_steps,
+            summary=_incomplete_summary(self.language),
+            metadata=self._terminal_metadata(
+                requirements,
+                incomplete_reason="STEP_BUDGET_EXHAUSTED",
+            ),
+        )
 
     def _record_repetition(self, call: ToolCall) -> int:
         key = (call.name, _stable_arguments(call))

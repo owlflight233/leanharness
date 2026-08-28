@@ -21,6 +21,8 @@ interface SemanticTool {
   id: string;
   sequence: number;
   label: string;
+  groupKey: string;
+  planStep?: number;
 }
 
 export function RunProcess({
@@ -81,12 +83,12 @@ export function RunProcess({
 }
 
 export function aggregateActions(trace: RunTraceItem[]): SemanticAction[] {
-  const progress = new Map<number, RunTraceItem>();
+  const progress = new Map<string, RunTraceItem>();
   const tools = new Map<string, RunTraceItem[]>();
   let fallbackIndex = 0;
   for (const event of trace) {
     if (event.type === "assistant.progress") {
-      progress.set(event.step ?? event.sequence, event);
+      progress.set(groupKeyFor(event), event);
       continue;
     }
     if (!event.type.startsWith("tool.") && !event.type.startsWith("approval.")) continue;
@@ -109,37 +111,56 @@ export function aggregateActions(trace: RunTraceItem[]): SemanticAction[] {
       sequence: first.sequence,
       step: first.step,
       label: `${first.tool ?? "工具"} · ${status}`,
+      groupKey: groupKeyFor(first),
+      planStep: planStepFor(first),
     });
   }
   const actions: SemanticAction[] = [];
-  const groupedByStep = new Map<number, Array<SemanticTool & { step?: number }>>();
+  const groupedByStep = new Map<string, Array<SemanticTool & { step?: number }>>();
   for (const tool of toolActions) {
     if (tool.step === undefined) {
       actions.push({ id: tool.id, sequence: tool.sequence, label: tool.label, tools: [tool] });
     } else {
-      groupedByStep.set(tool.step, [...(groupedByStep.get(tool.step) ?? []), tool]);
+      groupedByStep.set(tool.groupKey, [...(groupedByStep.get(tool.groupKey) ?? []), tool]);
     }
   }
-  for (const [step, stepTools] of groupedByStep) {
+  for (const [groupKey, stepTools] of groupedByStep) {
     const first = stepTools[0]!;
+    const progressEvent = progress.get(groupKey);
+    const planStep = first.planStep;
+    const baseLabel = progressEvent?.summary || `第 ${first.step} 步`;
     actions.push({
-      id: `step-${step}`,
-      sequence: Math.min(first.sequence, progress.get(step)?.sequence ?? first.sequence),
-      label: progress.get(step)?.summary || `第 ${step} 步`,
+      id: `step-${groupKey}`,
+      sequence: Math.min(first.sequence, progressEvent?.sequence ?? first.sequence),
+      label: planStep === undefined ? baseLabel : `计划第 ${planStep} 步 · ${baseLabel}`,
       tools: stepTools.sort((left, right) => left.sequence - right.sequence),
     });
   }
-  for (const [step, event] of progress) {
-    if (!groupedByStep.has(step)) {
+  for (const [groupKey, event] of progress) {
+    if (!groupedByStep.has(groupKey)) {
       actions.push({
         id: `progress-${event.sequence}`,
         sequence: event.sequence,
-        label: event.summary || "Agent 行动",
+        label: planStepFor(event) === undefined
+          ? event.summary || "Agent 行动"
+          : `计划第 ${planStepFor(event)} 步 · ${event.summary || "Agent 行动"}`,
         tools: [],
       });
     }
   }
   return actions.sort((left, right) => left.sequence - right.sequence);
+}
+
+function groupKeyFor(event: RunTraceItem): string {
+  const planStep = planStepFor(event);
+  return planStep === undefined
+    ? `run:${event.step ?? event.sequence}`
+    : `plan:${planStep}:${event.step ?? event.sequence}`;
+}
+
+function planStepFor(event: RunTraceItem): number | undefined {
+  const value = event.metadata?.plan_step;
+  return typeof value === "number" ? value : undefined;
 }
 
 function terminalMetrics(trace: RunTraceItem[]) {

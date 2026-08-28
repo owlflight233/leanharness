@@ -60,3 +60,22 @@ def test_context_does_not_silently_drop_uncompressible_messages() -> None:
 
     with pytest.raises(ContextBudgetError):
         store.compact()
+
+
+def test_context_can_checkpoint_completed_plan_step() -> None:
+    store = ContextStore()
+    store.append(ModelMessage(role="system", content="rules"))
+    store.append(ModelMessage(role="user", content="old task"))
+    store.append(ModelMessage(role="tool", tool_call_id="call-1", content="old evidence"))
+
+    store.replace(
+        [
+            message
+            for message in store.messages
+            if message.role == "system"
+        ]
+        + [ModelMessage(role="user", content="bounded step summary")]
+    )
+
+    assert [message.role for message in store.messages] == ["system", "user"]
+    assert store.messages[-1].content == "bounded step summary"

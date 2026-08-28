@@ -73,4 +73,21 @@ describe("RunProcess", () => {
     expect(actions[0]?.label).toBe("检查工作区");
     expect(actions[0]?.tools).toHaveLength(2);
   });
+
+  it("keeps runtime steps separate when a plan restarts the inner step counter", () => {
+    const actions = aggregateActions([
+      { type: "assistant.progress", sequence: 1, step: 1, summary: "读取计划文件", metadata: { plan_step: 1 } },
+      { type: "tool.requested", sequence: 2, step: 1, tool: "workspace_read", metadata: { plan_step: 1, tool_call_id: "a" } },
+      { type: "tool.completed", sequence: 3, step: 1, tool: "workspace_read", metadata: { plan_step: 1, tool_call_id: "a", ok: true } },
+      { type: "assistant.progress", sequence: 4, step: 1, summary: "读取测试文件", metadata: { plan_step: 2 } },
+      { type: "tool.requested", sequence: 5, step: 1, tool: "workspace_read", metadata: { plan_step: 2, tool_call_id: "b" } },
+      { type: "tool.completed", sequence: 6, step: 1, tool: "workspace_read", metadata: { plan_step: 2, tool_call_id: "b", ok: true } },
+    ]);
+
+    expect(actions).toHaveLength(2);
+    expect(actions.map((action) => action.label)).toEqual([
+      "计划第 1 步 · 读取计划文件",
+      "计划第 2 步 · 读取测试文件",
+    ]);
+  });
 });

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from leanharness.models import ModelMessage
@@ -34,6 +35,10 @@ class ContextStore:
 
     def append(self, message: ModelMessage) -> None:
         self._messages.append(message)
+
+    def replace(self, messages: Iterable[ModelMessage]) -> None:
+        """Replace a completed context at a safe protocol boundary."""
+        self._messages = list(messages)
 
     def compact(self, *, preserve_recent_messages: int = 10) -> ContextCompression:
         before = self._size()
