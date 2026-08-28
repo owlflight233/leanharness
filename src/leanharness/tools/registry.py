@@ -104,6 +104,15 @@ class ToolRegistry:
             return tool.execute(call.id, call.arguments)
         except ToolExecutionError as exc:
             return _error_result(call, exc)
+        except Exception:
+            return _error_result(
+                call,
+                ToolExecutionError(
+                    "TOOL_EXECUTION_FAILED",
+                    "Tool execution failed safely",
+                    recoverable=False,
+                ),
+            )
 
 
 def _error_result(call: ToolCall, exc: ToolExecutionError) -> ToolResult:

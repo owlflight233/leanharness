@@ -8,7 +8,15 @@ import pytest
 
 from leanharness.errors import ModelUnavailableError
 from leanharness.models import ModelRequest, ModelResponse, ModelUsage, ToolCall
-from leanharness.runtime import ReadOnlyAgent, RunControlError, RunState, validate_run_task
+from leanharness.permissions import ApprovalCoordinator, PermissionMode
+from leanharness.runtime import (
+    CodingAgent,
+    ContinuationContext,
+    ReadOnlyAgent,
+    RunControlError,
+    RunState,
+    validate_run_task,
+)
 from leanharness.runtime.state import InvalidTransition, transition
 
 
@@ -99,6 +107,100 @@ def test_runtime_rejects_early_completion_until_workspace_is_observed(tmp_path: 
     assert "verifiable evidence" in model.requests[1].messages[-1].content
 
 
+def test_mutation_task_without_successful_patch_is_not_completed(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# Example\n", encoding="utf-8")
+    model = ScriptedModel(
+        [
+            tool_response("read-1", "workspace_read", {"path": "README.md"}),
+            tool_response(
+                "patch-1",
+                "workspace_patch",
+                {"patch": "*** Begin Patch\n*** End Patch"},
+            ),
+            ModelResponse(content="I could not apply the requested edit."),
+            ModelResponse(content="The edit remains incomplete."),
+        ]
+    )
+
+    events = collect(
+        CodingAgent(
+            tmp_path,
+            model,
+            max_steps=4,
+            permission_mode=PermissionMode.UNRESTRICTED,
+        ),
+        "Update README.md",
+    )
+
+    assert events[-1].type == "run.incomplete"
+    assert not any(event.type == "run.completed" for event in events)
+    failed_patch = next(
+        event
+        for event in events
+        if event.type == "tool.completed" and event.tool == "workspace_patch"
+    )
+    assert failed_patch.metadata["error_code"] == "PATCH_INVALID"
+
+
+def test_approval_preview_preserves_safe_patch_error(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response(
+                "patch-1",
+                "workspace_patch",
+                {"patch": "*** Begin Patch\n*** End Patch"},
+            ),
+            ModelResponse(content="The malformed patch was not applied."),
+            ModelResponse(content="The requested edit remains incomplete."),
+        ]
+    )
+
+    events = collect(
+        CodingAgent(
+            tmp_path,
+            model,
+            max_steps=3,
+            permission_mode=PermissionMode.APPROVE,
+            approvals=ApprovalCoordinator(timeout_seconds=1),
+        ),
+        "Create result.txt",
+    )
+
+    completed = next(event for event in events if event.type == "tool.completed")
+    assert completed.metadata["error_code"] == "PATCH_INVALID"
+    assert not any(event.type == "approval.required" for event in events)
+    tool_message = model.requests[1].messages[-1]
+    assert json.loads(tool_message.content)["error"]["code"] == "PATCH_INVALID"
+
+
+def test_runtime_injects_bounded_continuation_capsule(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response("call-1", "workspace_list", {"path": "."}),
+            ModelResponse(content="Permission is now unrestricted."),
+        ]
+    )
+    continuation = ContinuationContext(
+        previous_task="Create a small example file",
+        previous_state="EXHAUSTED",
+        changed_files=("example.py",),
+        incomplete_reason="PATCH_INVALID",
+        permission_mode="unrestricted",
+    )
+
+    events = collect(
+        CodingAgent(tmp_path, model, continuation=continuation),
+        "I changed the permission. What about now?",
+    )
+
+    assert events[-1].type == "run.completed"
+    capsule = model.requests[0].messages[1].content
+    assert "Create a small example file" in capsule
+    assert "EXHAUSTED" in capsule
+    assert "example.py" in capsule
+    assert len(capsule.encode("utf-8")) <= 4096
+
+
 def test_runtime_reserves_last_step_for_incomplete_summary(tmp_path: Path) -> None:
     model = ScriptedModel(
         [
@@ -115,6 +217,43 @@ def test_runtime_reserves_last_step_for_incomplete_summary(tmp_path: Path) -> No
     assert events[-1].answer == "Observed the workspace, but analysis is incomplete."
     assert model.requests[-1].tools == ()
     assert model.requests[-1].tool_choice == "none"
+
+
+def test_explicit_verification_task_requires_successful_command(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response("call-1", "workspace_list", {"path": "."}),
+            ModelResponse(content="The workspace was inspected without running tests."),
+            ModelResponse(content="Tests were not run; verification is incomplete."),
+        ]
+    )
+
+    events = collect(ReadOnlyAgent(tmp_path, model, max_steps=3), "Run the tests")
+
+    assert events[-1].type == "run.incomplete"
+    assert events[-1].metadata["incomplete_reason"] == "VERIFICATION_NOT_RUN"
+
+
+def test_terminal_event_reports_efficiency_metrics(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response("call-1", "workspace_list", {"path": "."}),
+            ModelResponse(
+                content="Inspection complete.",
+                usage=ModelUsage(prompt_tokens=10, completion_tokens=4, total_tokens=14),
+            ),
+        ]
+    )
+
+    events = collect(ReadOnlyAgent(tmp_path, model, max_steps=3))
+
+    assert events[-1].metadata["metrics"] == {
+        "model_calls": 2,
+        "tool_calls": 1,
+        "prompt_tokens": 10,
+        "completion_tokens": 4,
+        "total_tokens": 14,
+    }
 
 
 def test_third_identical_call_is_recoverable_and_fourth_stalls(tmp_path: Path) -> None:

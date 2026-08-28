@@ -77,6 +77,42 @@ def test_approve_mode_waits_and_applies_one_tool_call(tmp_path: Path) -> None:
     ]
 
 
+def test_approve_mode_creates_new_file_from_valid_unified_diff(tmp_path: Path) -> None:
+    response = ModelResponse(
+        content="I will create the requested file.",
+        tool_calls=(
+            ToolCall(
+                id="patch-create",
+                name="workspace_patch",
+                arguments={
+                    "patch": "--- /dev/null\n+++ b/created.txt\n@@ -0,0 +1 @@\n+created\n"
+                },
+            ),
+        ),
+    )
+
+    async def scenario():
+        coordinator = ApprovalCoordinator(timeout_seconds=1)
+        model = ScriptedModel([response, ModelResponse(content="Created created.txt.")])
+        agent = CodingAgent(
+            tmp_path,
+            model,
+            max_steps=3,
+            permission_mode=PermissionMode.APPROVE,
+            approvals=coordinator,
+        )
+        events = []
+        async for event in agent.run("Create created.txt"):
+            events.append(event)
+            if event.type == "approval.required":
+                coordinator.resolve(agent.run_id, str(event.metadata["approval_id"]), "approve")
+        return events
+
+    events = asyncio.run(scenario())
+    assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "created\n"
+    assert events[-1].type == "run.completed"
+
+
 def test_rejected_tool_returns_recoverable_result_to_model(tmp_path: Path) -> None:
     source = tmp_path / "value.txt"
     source.write_text("before\n", encoding="utf-8")
