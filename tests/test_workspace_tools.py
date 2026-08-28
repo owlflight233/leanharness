@@ -31,6 +31,16 @@ def test_list_is_bounded_recursive_and_skips_heavy_directories(tmp_path: Path) -
     assert result.public_metadata == {"path": ".", "entries": 4, "truncated": False}
 
 
+@pytest.mark.parametrize("path", ["", " ", "."])
+def test_list_normalizes_model_friendly_root_paths(tmp_path: Path, path: str) -> None:
+    (tmp_path / "README.md").write_text("ready\n", encoding="utf-8")
+
+    result = ToolRegistry(tmp_path).execute(call("workspace_list", path=path))
+
+    assert result.ok is True
+    assert result.public_metadata["path"] == "."
+
+
 def test_read_returns_numbered_unicode_range_without_modifying_file(tmp_path: Path) -> None:
     source = tmp_path / "source.py"
     original = "first\n世界\nthird\nfourth\n"

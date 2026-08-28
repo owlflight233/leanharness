@@ -294,7 +294,11 @@ class GitInspectTool:
     definition = ToolDefinition(
         name="git_inspect",
         description=(
-            "Inspect local Git status, diff, log, or show output without repository writes."
+            "Inspect local Git status, diff, log, or show output without repository writes. "
+            "operation is required. Use path only to scope status, diff, or log to one "
+            "workspace-relative file; show uses revision plus an optional path. "
+            "Use operation='status' to inspect current changes, operation='diff' for changes, "
+            "operation='log' for recent commits, and operation='show' for one revision."
         ),
         parameters={
             "type": "object",
@@ -331,8 +335,10 @@ class GitInspectTool:
         relative_path = None
         if "path" in arguments:
             _, relative_path = self._boundary.resolve(arguments["path"], expected="any")
-            if operation not in {"diff", "show"}:
+            if operation not in {"status", "diff", "log", "show"}:
                 raise ToolExecutionError("TOOL_INVALID_ARGUMENTS", "path is unsupported here")
+            if operation in {"status", "log"}:
+                command.append("--")
             command.append(relative_path)
         try:
             completed = subprocess.run(

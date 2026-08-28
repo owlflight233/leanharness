@@ -85,12 +85,18 @@ class WorkspaceListTool:
     definition = ToolDefinition(
         name="workspace_list",
         description=(
-            "List files and directories inside the workspace without reading file contents."
+            "List files and directories inside the workspace without reading file contents. "
+            "Use path='.' or omit path for the workspace root; an empty path is also treated "
+            "as the workspace root. Keep max_depth between 1 and 4."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Relative directory path."},
+                "path": {
+                    "type": "string",
+                    "description": "Relative directory path; omit or use '.' for the root.",
+                    "default": ".",
+                },
                 "max_depth": {"type": "integer", "minimum": 1, "maximum": MAX_LIST_DEPTH},
             },
             "additionalProperties": False,
@@ -102,8 +108,11 @@ class WorkspaceListTool:
 
     def execute(self, tool_call_id: str, arguments: dict[str, Any]) -> ToolResult:
         _reject_unknown(arguments, {"path", "max_depth"})
+        path_value = arguments.get("path", ".")
+        if isinstance(path_value, str) and not path_value.strip():
+            path_value = "."
         root, relative_root = self._boundary.resolve(
-            arguments.get("path", "."), expected="directory"
+            path_value, expected="directory"
         )
         max_depth = _bounded_int(
             arguments.get("max_depth", 1), "max_depth", 1, MAX_LIST_DEPTH

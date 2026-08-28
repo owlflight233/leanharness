@@ -174,3 +174,22 @@ def test_git_inspect_reports_status_and_rejects_writes(tmp_path: Path) -> None:
     assert "tracked.txt" in status.data["output"]
     assert denied.ok is False and denied.error is not None
     assert denied.error.code == "GIT_OPERATION_DENIED"
+
+
+def test_git_log_can_be_scoped_to_a_workspace_file(tmp_path: Path) -> None:
+    os.system(f'git -C "{tmp_path}" init -q')
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("content\n", encoding="utf-8")
+    os.system(f'git -C "{tmp_path}" add tracked.txt')
+    os.system(
+        f'git -C "{tmp_path}" -c user.name=Test -c user.email=test@example.com '
+        'commit -q -m initial'
+    )
+
+    result = ToolRegistry(tmp_path).execute(
+        call("git_inspect", operation="log", path="tracked.txt")
+    )
+
+    assert result.ok is True
+    assert result.data is not None
+    assert "initial" in result.data["output"]
