@@ -9,7 +9,8 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from time import monotonic
+from typing import Any, Protocol
 
 from leanharness.models import ToolDefinition
 from leanharness.tools.contracts import ToolExecutionError, ToolResult
@@ -23,6 +24,10 @@ MAX_COMMAND_OUTPUT_BYTES = 64 * 1024
 DEFAULT_COMMAND_TIMEOUT = 120
 MAX_COMMAND_TIMEOUT = 600
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+class CancellationSignal(Protocol):
+    def is_set(self) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,7 +193,13 @@ class WorkspaceCommandTool:
         command, timeout = self._validate(arguments)
         return {"profile": arguments["profile"], "command": command, "timeout_seconds": timeout}
 
-    def execute(self, tool_call_id: str, arguments: dict[str, Any]) -> ToolResult:
+    def execute(
+        self,
+        tool_call_id: str,
+        arguments: dict[str, Any],
+        *,
+        cancel_signal: CancellationSignal | None = None,
+    ) -> ToolResult:
         command, timeout = self._validate(arguments)
         environment = _minimal_environment()
         creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -203,17 +214,26 @@ class WorkspaceCommandTool:
                 shell=False,
                 creationflags=creation_flags,
             )
-            try:
-                stdout, stderr = process.communicate(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                _terminate_process_tree(process)
-                stdout, stderr = process.communicate()
+            stdout, stderr, stop_reason = _communicate_bounded(
+                process,
+                timeout=timeout,
+                cancel_signal=cancel_signal,
+            )
+            if stop_reason is not None:
+                code, message = (
+                    ("COMMAND_CANCELLED", "Command was cancelled")
+                    if stop_reason == "cancelled"
+                    else ("COMMAND_TIMEOUT", "Command exceeded its timeout")
+                )
                 return ToolResult(
                     tool_call_id,
                     self.definition.name,
                     False,
-                    error=_tool_error("COMMAND_TIMEOUT", "Command exceeded its timeout"),
-                    public_metadata={"profile": arguments["profile"], "timeout": True},
+                    error=_tool_error(code, message),
+                    public_metadata={
+                        "profile": arguments["profile"],
+                        stop_reason: True,
+                    },
                 )
         except (OSError, ValueError) as exc:
             raise ToolExecutionError("COMMAND_UNAVAILABLE", "Command could not be started") from exc
@@ -505,13 +525,53 @@ def _dangerous_argument(value: str) -> bool:
         not value
         or "\x00" in value
         or any(marker in value for marker in ("&&", "||", ";", "`", "$(", "\n", "\r"))
-        or lowered in {"install", "add", "exec", "dlx", "publish"}
-        or lowered.startswith(("--config=", "--plugin=", "--require="))
+        or lowered in {
+            "install",
+            "add",
+            "exec",
+            "dlx",
+            "publish",
+            "-c",
+            "--command",
+            "--eval",
+            "--exec",
+            "--script",
+            "--with",
+            "--from",
+            "--require",
+        }
+        or lowered.startswith(
+            ("--config=", "--plugin=", "--require=", "--with=", "--from=")
+        )
     )
 
 
 def _bounded_output(value: bytes) -> str:
     return value[:MAX_COMMAND_OUTPUT_BYTES].decode("utf-8", errors="replace")
+
+
+def _communicate_bounded(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: int,
+    cancel_signal: CancellationSignal | None,
+) -> tuple[bytes, bytes, str | None]:
+    deadline = monotonic() + timeout
+    while True:
+        if cancel_signal is not None and cancel_signal.is_set():
+            _terminate_process_tree(process)
+            stdout, stderr = process.communicate()
+            return stdout, stderr, "cancelled"
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            _terminate_process_tree(process)
+            stdout, stderr = process.communicate()
+            return stdout, stderr, "timeout"
+        try:
+            stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+            return stdout, stderr, None
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:

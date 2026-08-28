@@ -202,6 +202,23 @@ def test_runtime_maps_model_failure_and_cancellation(tmp_path: Path) -> None:
     assert cancelled[-1].type == "run.cancelled"
 
 
+def test_same_language_fallback_is_neutral_metadata(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response(
+                "call-1",
+                "workspace_read",
+                {"path": "README.md"},
+                "```private reasoning```",
+            ),
+            ModelResponse(content="Ответ готов.", finish_reason="stop"),
+        ]
+    )
+    events = collect(ReadOnlyAgent(tmp_path, model, language="same"))
+    progress = next(event for event in events if event.type == "assistant.progress")
+    assert progress.summary == "[workspace_read] path=README.md"
+
+
 @pytest.mark.parametrize("task", ["", "   ", "x" * 32_001])
 def test_run_task_is_bounded(task: str) -> None:
     with pytest.raises(RunControlError):

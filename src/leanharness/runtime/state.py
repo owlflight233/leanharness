@@ -10,6 +10,7 @@ class RunState(StrEnum):
     PREPARING = "PREPARING"
     REQUESTING_MODEL = "REQUESTING_MODEL"
     INTERPRETING = "INTERPRETING"
+    WAITING_APPROVAL = "WAITING_APPROVAL"
     EXECUTING_TOOL = "EXECUTING_TOOL"
     COMPLETED = "COMPLETED"
     EXHAUSTED = "EXHAUSTED"
@@ -32,6 +33,7 @@ ALLOWED_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
     RunState.INTERPRETING: frozenset(
         {
             RunState.PREPARING,
+            RunState.WAITING_APPROVAL,
             RunState.EXECUTING_TOOL,
             RunState.COMPLETED,
             RunState.EXHAUSTED,
@@ -40,6 +42,15 @@ ALLOWED_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
         }
     ),
     RunState.EXECUTING_TOOL: frozenset(
+        {
+            RunState.EXECUTING_TOOL,
+            RunState.WAITING_APPROVAL,
+            RunState.PREPARING,
+            RunState.FAILED,
+            RunState.CANCELLED,
+        }
+    ),
+    RunState.WAITING_APPROVAL: frozenset(
         {RunState.EXECUTING_TOOL, RunState.PREPARING, RunState.FAILED, RunState.CANCELLED}
     ),
 }

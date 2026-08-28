@@ -28,6 +28,7 @@ from leanharness.config import (
 from leanharness.errors import LeanHarnessError, ModelError, ModelNotConfiguredError
 from leanharness.logging import configure_logging
 from leanharness.models import ModelConfig, load_model_config
+from leanharness.permissions import ApprovalCoordinator
 from leanharness.runtime.loop import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, MIN_MAX_STEPS
 from leanharness.storage import LocalStore
 
@@ -83,9 +84,9 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("--session", dest="session_id", help="Existing session ID.")
     chat_parser.add_argument("--data-dir", help="Local application data directory.")
     run_parser = subparsers.add_parser(
-        "run", help="Inspect a workspace with the read-only agent loop."
+        "run", help="Analyze or modify a workspace with the controlled coding agent."
     )
-    run_parser.add_argument("task", help="Inspection task (1 to 32000 characters).")
+    run_parser.add_argument("task", help="Coding task (1 to 32000 characters).")
     run_parser.add_argument(
         "--workspace",
         help="Workspace directory; defaults to the current directory.",
@@ -101,6 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--session", dest="session_id", help="Existing session ID.")
     run_parser.add_argument("--data-dir", help="Local application data directory.")
+    run_parser.add_argument(
+        "--permission",
+        choices=("inspect", "approve", "unrestricted"),
+        help="Permission for this run; defaults to the session preference.",
+    )
 
     session_parser = subparsers.add_parser("session", help="Manage local persistent sessions.")
     session_subparsers = session_parser.add_subparsers(dest="session_command", required=True)
@@ -164,7 +170,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "run":
             workspace = resolve_workspace(args.workspace)
             return asyncio.run(
-                _inspect(args.task, workspace, args.max_steps, args.session_id, args.data_dir)
+                _inspect(
+                    args.task,
+                    workspace,
+                    args.max_steps,
+                    args.session_id,
+                    args.data_dir,
+                    args.permission,
+                )
             )
         if args.command == "session":
             return _session_command(args)
@@ -264,21 +277,53 @@ async def _chat(
 
 
 async def _inspect(
-    task: str, workspace: Path, max_steps: int, session_id: str | None, data_dir: str | None
+    task: str,
+    workspace: Path,
+    max_steps: int,
+    session_id: str | None,
+    data_dir: str | None,
+    permission: str | None = None,
 ) -> int:
     store = LocalStore(Path(data_dir).expanduser() if data_dir else None)
-    _, session = ensure_session(store, workspace, session_id)
+    _, session = ensure_session(
+        store, workspace, session_id, permission_mode=permission or "inspect"
+    )
     session = apply_first_task_title(store, session, task)
-    run = store.create_run(session.id, "inspect", task, max_steps)
+    selected_permission = permission or session.permission_mode
+    run = store.create_run(
+        session.id,
+        "inspect",
+        task,
+        max_steps,
+        permission_mode=selected_permission,
+    )
     store.add_message(session.id, "user", task, run_id=run.id)
     print(f"[session] {session.id}", file=sys.stderr)
     print(f"[run] {run.id}", file=sys.stderr)
+    approvals = ApprovalCoordinator(
+        on_request=lambda request: store.create_approval(
+            request.id,
+            request.run_id,
+            request.tool_call_id,
+            request.tool_name,
+            {
+                "summary": request.summary,
+                "parameters": request.parameters,
+                "preview": request.preview,
+            },
+        ),
+        on_resolve=lambda request, decision: store.resolve_approval(request.id, decision),
+        on_expire=lambda request: store.expire_approval(request.id),
+    )
     runtime = create_inspection_run(
         task,
         workspace,
         max_steps=max_steps,
         run_id=run.id,
         language=session.language or "same",
+        permission_mode=selected_permission,
+        session_id=session.id,
+        approvals=approvals,
     )
     exit_code = 0
     async for event in runtime.run(task):
@@ -287,6 +332,19 @@ async def _inspect(
             print(f"[step {event.step}] {event.summary}", file=sys.stderr)
         elif event.type == "tool.requested":
             print(f"[tool] {event.tool}", file=sys.stderr)
+        elif event.type == "approval.required" and event.metadata:
+            print(f"[approval] {event.summary or event.tool}", file=sys.stderr)
+            parameters = event.metadata.get("parameters")
+            if parameters:
+                print(f"[preview] {parameters}", file=sys.stderr)
+            decision = await asyncio.to_thread(input, "Approve this tool call? [y/N] ")
+            approvals.resolve(
+                run.id,
+                str(event.metadata["approval_id"]),
+                "approve" if decision.strip().casefold() in {"y", "yes"} else "reject",
+            )
+        elif event.type == "approval.resolved" and event.metadata:
+            print(f"[approval {event.metadata.get('decision')}] {event.tool}", file=sys.stderr)
         elif event.type == "tool.completed":
             status = "ok" if event.metadata and event.metadata.get("ok") else "error"
             print(f"[tool {status}] {event.tool}", file=sys.stderr)

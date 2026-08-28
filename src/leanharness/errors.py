@@ -95,3 +95,21 @@ class InvalidPermissionError(StorageError):
     """Raised when a permission mode is unknown or malformed."""
 
     code = "INVALID_PERMISSION_MODE"
+
+
+class RunConflictError(LeanHarnessError):
+    """Raised when a session already owns an active coding run."""
+
+    code = "RUN_ALREADY_ACTIVE"
+
+
+class ApprovalNotFoundError(LeanHarnessError):
+    code = "APPROVAL_NOT_FOUND"
+
+
+class ApprovalAlreadyResolvedError(LeanHarnessError):
+    code = "APPROVAL_ALREADY_RESOLVED"
+
+
+class ApprovalExpiredError(LeanHarnessError):
+    code = "APPROVAL_EXPIRED"

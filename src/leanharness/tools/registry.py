@@ -7,7 +7,12 @@ from pathlib import Path
 from leanharness.models import ToolCall, ToolDefinition
 from leanharness.permissions.policy import PermissionMode, authorize_tool
 from leanharness.tools.contracts import BuiltinTool, ToolErrorInfo, ToolExecutionError, ToolResult
-from leanharness.tools.controlled import GitInspectTool, WorkspaceCommandTool, WorkspacePatchTool
+from leanharness.tools.controlled import (
+    CancellationSignal,
+    GitInspectTool,
+    WorkspaceCommandTool,
+    WorkspacePatchTool,
+)
 from leanharness.tools.workspace import (
     WorkspaceBoundary,
     WorkspaceListTool,
@@ -38,7 +43,12 @@ class ToolRegistry:
     def definitions(self) -> tuple[ToolDefinition, ...]:
         return tuple(tool.definition for tool in self._tools.values())
 
-    def execute(self, call: ToolCall) -> ToolResult:
+    def execute(
+        self,
+        call: ToolCall,
+        *,
+        cancel_signal: CancellationSignal | None = None,
+    ) -> ToolResult:
         tool = self._tools.get(call.name)
         if tool is None:
             return _error_result(call, ToolExecutionError("TOOL_NOT_FOUND", "Unknown tool"))
@@ -49,6 +59,8 @@ class ToolRegistry:
                 ToolExecutionError(decision.code, "Tool is not allowed in inspect mode"),
             )
         try:
+            if isinstance(tool, WorkspaceCommandTool):
+                return tool.execute(call.id, call.arguments, cancel_signal=cancel_signal)
             return tool.execute(call.id, call.arguments)
         except ToolExecutionError as exc:
             return _error_result(call, exc)
@@ -75,7 +87,11 @@ class ToolRegistry:
         return preview(call.arguments)
 
     def execute_approved(
-        self, call: ToolCall, *, expected_hashes: dict[str, str | None] | None = None
+        self,
+        call: ToolCall,
+        *,
+        expected_hashes: dict[str, str | None] | None = None,
+        cancel_signal: CancellationSignal | None = None,
     ) -> ToolResult:
         tool = self._tools.get(call.name)
         if tool is None:
@@ -83,6 +99,8 @@ class ToolRegistry:
         try:
             if isinstance(tool, WorkspacePatchTool):
                 return tool.execute(call.id, call.arguments, expected_hashes=expected_hashes)
+            if isinstance(tool, WorkspaceCommandTool):
+                return tool.execute(call.id, call.arguments, cancel_signal=cancel_signal)
             return tool.execute(call.id, call.arguments)
         except ToolExecutionError as exc:
             return _error_result(call, exc)

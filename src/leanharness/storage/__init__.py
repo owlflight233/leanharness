@@ -1,6 +1,7 @@
 """Business-state persistence ports and adapters."""
 
 from leanharness.storage.store import (
+    ApprovalRecord,
     LocalStore,
     MessageRecord,
     ProjectRecord,
@@ -12,6 +13,7 @@ from leanharness.storage.store import (
 )
 
 __all__ = [
+    "ApprovalRecord",
     "LocalStore",
     "MessageRecord",
     "ProjectRecord",

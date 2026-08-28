@@ -40,5 +40,10 @@ def get_health(config: AppConfig) -> HealthSnapshot:
             "agent.streaming",
             "session.persistence",
             "run.trace",
+            "agent.edit",
+            "tool.patch",
+            "tool.command",
+            "tool.git.read",
+            "approval.interactive",
         ),
     )

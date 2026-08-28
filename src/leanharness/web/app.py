@@ -7,6 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -33,10 +34,14 @@ from leanharness.application.session_gateway import (
 )
 from leanharness.config import AppConfig
 from leanharness.errors import (
+    ApprovalAlreadyResolvedError,
+    ApprovalExpiredError,
+    ApprovalNotFoundError,
     ChatInputError,
     InvalidPermissionError,
     LeanHarnessError,
     ModelNotConfiguredError,
+    RunConflictError,
     RunInputError,
     SessionNotFoundError,
     StorageError,
@@ -47,6 +52,7 @@ from leanharness.models import (
     get_model_config_status,
     load_model_config,
 )
+from leanharness.permissions import ActiveRunRegistry, ApprovalCoordinator, ApprovalRequest
 from leanharness.runtime import RuntimeEvent
 from leanharness.storage import LocalStore
 
@@ -72,6 +78,10 @@ class SessionUpdateRequest(BaseModel):
     permission_mode: str | None = None
 
 
+class ApprovalDecisionRequest(BaseModel):
+    decision: Literal["approve", "reject"]
+
+
 def default_frontend_dir() -> Path:
     """Locate the repository frontend build when running from a source checkout."""
 
@@ -88,6 +98,27 @@ def create_app(
 
     store = LocalStore(config.data_dir)
     store.open()
+    store.interrupt_active_runs()
+
+    def persist_approval_request(request: ApprovalRequest) -> None:
+        store.create_approval(
+            request.id,
+            request.run_id,
+            request.tool_call_id,
+            request.tool_name,
+            {
+                "summary": request.summary,
+                "parameters": request.parameters,
+                "preview": request.preview,
+            },
+        )
+
+    approvals = ApprovalCoordinator(
+        on_request=persist_approval_request,
+        on_resolve=lambda request, decision: store.resolve_approval(request.id, decision),
+        on_expire=lambda request: store.expire_approval(request.id),
+    )
+    active_runs = ActiveRunRegistry()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -106,6 +137,8 @@ def create_app(
     app.state.frontend_dir = (frontend_dir or default_frontend_dir()).resolve()
     app.state.model_client_factory = model_client_factory
     app.state.store = store
+    app.state.approvals = approvals
+    app.state.active_runs = active_runs
 
     @app.exception_handler(LeanHarnessError)
     async def application_error(_request: Request, exc: LeanHarnessError) -> JSONResponse:
@@ -118,6 +151,12 @@ def create_app(
             status_code = 422
         elif isinstance(exc, StorageError):
             status_code = 500
+        elif isinstance(exc, RunConflictError | ApprovalAlreadyResolvedError):
+            status_code = 409
+        elif isinstance(exc, ApprovalExpiredError):
+            status_code = 410
+        elif isinstance(exc, ApprovalNotFoundError):
+            status_code = 404
         return JSONResponse(
             status_code=status_code,
             content={"error": {"code": exc.code, "message": exc.message}},
@@ -203,7 +242,9 @@ def create_app(
         store: LocalStore = app.state.store
         _, session = ensure_session(store, config.workspace, payload.session_id)
         session = apply_first_task_title(store, session, message)
+        active_runs.assert_available(session.id)
         run = store.create_run(session.id, "chat", message, 1)
+        active_runs.acquire(session.id, run.id)
         store.add_message(session.id, "user", message, run_id=run.id)
 
         async def ndjson_events() -> AsyncIterator[bytes]:
@@ -244,6 +285,8 @@ def create_app(
                         partial_answer="".join(content) or None,
                     )
                 raise
+            finally:
+                active_runs.release(session.id, run.id)
 
         return StreamingResponse(
             ndjson_events(),
@@ -256,7 +299,15 @@ def create_app(
         store: LocalStore = app.state.store
         _, session = ensure_session(store, config.workspace, payload.session_id)
         session = apply_first_task_title(store, session, payload.task)
-        run_record = store.create_run(session.id, "inspect", payload.task, payload.max_steps)
+        active_runs.assert_available(session.id)
+        run_record = store.create_run(
+            session.id,
+            "inspect",
+            payload.task,
+            payload.max_steps,
+            permission_mode=session.permission_mode,
+        )
+        active_runs.acquire(session.id, run_record.id)
         runtime = create_inspection_run(
             payload.task,
             config.workspace,
@@ -264,6 +315,9 @@ def create_app(
             client_factory=app.state.model_client_factory,
             run_id=run_record.id,
             language=session.language or "same",
+            permission_mode=session.permission_mode,
+            session_id=session.id,
+            approvals=approvals,
         )
         store.add_message(session.id, "user", payload.task, run_id=run_record.id)
 
@@ -293,12 +347,27 @@ def create_app(
                     )
                     persist_runtime_event(store, session, run_record, cancellation)
                 raise
+            finally:
+                approvals.cancel_run(run_record.id)
+                active_runs.release(session.id, run_record.id)
 
         return StreamingResponse(
             ndjson_events(),
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         )
+
+    @app.post("/api/v1/runs/{run_id}/approvals/{approval_id}")
+    async def resolve_approval(
+        run_id: str, approval_id: str, payload: ApprovalDecisionRequest
+    ) -> dict[str, object]:
+        request = approvals.resolve(run_id, approval_id, payload.decision)
+        return {
+            "approval_id": request.id,
+            "run_id": request.run_id,
+            "decision": payload.decision,
+            "status": "resolved",
+        }
 
     @app.get("/", include_in_schema=False)
     @app.get("/{requested_path:path}", include_in_schema=False)

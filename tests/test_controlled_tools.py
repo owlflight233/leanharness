@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -122,9 +123,13 @@ def test_command_rejects_unknown_profiles_and_dangerous_arguments(tmp_path: Path
     dangerous = registry.execute(
         call("workspace_command", profile="pytest", args=["tests", "&&", "whoami"])
     )
+    python_code = registry.execute(
+        call("workspace_command", profile="python-test", args=["-c", "print('unsafe')"])
+    )
 
     assert unknown.error is not None and unknown.error.code == "COMMAND_NOT_ALLOWED"
     assert dangerous.error is not None and dangerous.error.code == "COMMAND_ARGUMENT_DENIED"
+    assert python_code.error is not None and python_code.error.code == "COMMAND_ARGUMENT_DENIED"
 
 
 def test_command_uses_minimal_environment_and_captures_nonzero(tmp_path: Path) -> None:
@@ -137,6 +142,24 @@ def test_command_uses_minimal_environment_and_captures_nonzero(tmp_path: Path) -
     assert result.error.code == "COMMAND_FAILED"
     assert result.to_model_dict()["result"]["exit_code"] != 0
     assert "must-not-be-inherited" not in str(result)
+
+
+def test_command_honors_runtime_cancellation(tmp_path: Path) -> None:
+    (tmp_path / "test_wait.py").write_text(
+        "import time\n\ndef test_wait():\n    time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    cancelled = threading.Event()
+    cancelled.set()
+
+    result = ToolRegistry(tmp_path, mode=PermissionMode.UNRESTRICTED).execute(
+        call("workspace_command", profile="pytest", args=["test_wait.py"]),
+        cancel_signal=cancelled,
+    )
+
+    assert result.ok is False and result.error is not None
+    assert result.error.code == "COMMAND_CANCELLED"
+    assert result.public_metadata["cancelled"] is True
 
 
 def test_git_inspect_reports_status_and_rejects_writes(tmp_path: Path) -> None:

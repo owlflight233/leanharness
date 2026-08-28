@@ -125,6 +125,18 @@ class RunRecord:
     finished_at: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovalRecord:
+    id: str
+    run_id: str
+    tool_call_id: str
+    tool_name: str
+    request: dict[str, Any]
+    state: str
+    requested_at: str
+    decided_at: str | None
+
+
 class LocalStore:
     """Small synchronous repository for local, user-owned application state."""
 
@@ -493,6 +505,99 @@ class LocalStore:
         ).fetchall()
         return [json.loads(row["payload_json"]) for row in rows]
 
+    def create_approval(
+        self,
+        approval_id: str,
+        run_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        request: dict[str, Any],
+    ) -> ApprovalRecord:
+        safe_request = self.redactor.payload(request)
+        safe_request.pop("preview", None)
+        requested_at = utc_now()
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO approvals(id, run_id, tool_call_id, tool_name, request_json, state, requested_at, decided_at) VALUES(?,?,?,?,?,?,?,NULL)",
+                (
+                    approval_id,
+                    run_id,
+                    tool_call_id,
+                    tool_name,
+                    json.dumps(safe_request, ensure_ascii=False, separators=(",", ":")),
+                    "PENDING",
+                    requested_at,
+                ),
+            )
+        return ApprovalRecord(
+            approval_id,
+            run_id,
+            tool_call_id,
+            tool_name,
+            safe_request,
+            "PENDING",
+            requested_at,
+            None,
+        )
+
+    def resolve_approval(self, approval_id: str, decision: str) -> ApprovalRecord:
+        state = {"approve": "APPROVED", "reject": "REJECTED"}.get(decision)
+        if state is None:
+            raise StorageError("Approval decision is invalid")
+        decided_at = utc_now()
+        with self.connection:
+            cursor = self.connection.execute(
+                "UPDATE approvals SET state=?, decided_at=? WHERE id=? AND state='PENDING'",
+                (state, decided_at, approval_id),
+            )
+        if cursor.rowcount != 1:
+            raise StorageError("Approval was not pending")
+        return self.get_approval(approval_id)
+
+    def expire_approval(self, approval_id: str) -> ApprovalRecord:
+        decided_at = utc_now()
+        with self.connection:
+            cursor = self.connection.execute(
+                "UPDATE approvals SET state='EXPIRED', decided_at=? "
+                "WHERE id=? AND state='PENDING'",
+                (decided_at, approval_id),
+            )
+        if cursor.rowcount != 1:
+            raise StorageError("Approval was not pending")
+        return self.get_approval(approval_id)
+
+    def get_approval(self, approval_id: str) -> ApprovalRecord:
+        row = self.connection.execute(
+            "SELECT * FROM approvals WHERE id=?", (approval_id,)
+        ).fetchone()
+        if row is None:
+            raise StorageError("Approval was not found")
+        return ApprovalRecord(
+            row["id"],
+            row["run_id"],
+            row["tool_call_id"],
+            row["tool_name"],
+            json.loads(row["request_json"]),
+            row["state"],
+            row["requested_at"],
+            row["decided_at"],
+        )
+
+    def interrupt_active_runs(self) -> int:
+        """Mark process-local runs that cannot be resumed after restart as failed."""
+
+        now = utc_now()
+        with self.connection:
+            cursor = self.connection.execute(
+                "UPDATE runs SET state='FAILED', error_code='RUN_INTERRUPTED', finished_at=? WHERE state IN ('CREATED','PREPARING','REQUESTING_MODEL','INTERPRETING','EXECUTING_TOOL','WAITING_APPROVAL')",
+                (now,),
+            )
+            self.connection.execute(
+                "UPDATE approvals SET state='EXPIRED', decided_at=? WHERE state='PENDING'",
+                (now,),
+            )
+        return cursor.rowcount
+
     def trace_path(self, session_id: str, run_id: str) -> Path:
         session = self.get_session(session_id)
         return self._trace_path(session.project_id, session_id, run_id)
@@ -573,7 +678,21 @@ def _redact_mapping(
     value: dict[str, Any], *, event_type: str, redactor: TraceRedactor
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    forbidden = {"api_key", "authorization", "headers", "environment", "env", "cookie"}
+    forbidden = {
+        "api_key",
+        "authorization",
+        "headers",
+        "environment",
+        "env",
+        "cookie",
+        "preview",
+        "patch",
+        "diff",
+        "stdout",
+        "stderr",
+        "output",
+        "target_hashes",
+    }
     hidden_reasoning = {"analysis", "chain_of_thought", "reasoning", "thinking"}
     for key, item in value.items():
         if key.casefold() in forbidden | hidden_reasoning:

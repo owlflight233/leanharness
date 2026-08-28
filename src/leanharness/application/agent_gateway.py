@@ -1,4 +1,4 @@
-"""Application service exposing the read-only runtime to interfaces."""
+"""Application service exposing the coding runtime to interfaces."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ from pathlib import Path
 from leanharness.application.model_gateway import ModelClientFactory
 from leanharness.errors import RunInputError
 from leanharness.models import OpenAICompatibleClient, load_model_config
-from leanharness.runtime import ReadOnlyAgent, RunControlError, validate_run_task
+from leanharness.permissions import ApprovalCoordinator, PermissionMode
+from leanharness.runtime import CodingAgent, RunControlError, validate_run_task
 from leanharness.runtime.loop import MAX_MAX_STEPS, MIN_MAX_STEPS
 
 
@@ -19,8 +20,11 @@ def create_inspection_run(
     client_factory: ModelClientFactory = OpenAICompatibleClient,
     run_id: str | None = None,
     language: str = "same",
-) -> ReadOnlyAgent:
-    """Validate public input and create an ephemeral inspection runtime."""
+    permission_mode: str = "inspect",
+    session_id: str = "ephemeral",
+    approvals: ApprovalCoordinator | None = None,
+) -> CodingAgent:
+    """Validate public input and create a bounded coding runtime."""
 
     try:
         validate_run_task(task)
@@ -29,6 +33,20 @@ def create_inspection_run(
     if not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
         raise RunInputError(f"max_steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}")
     model = client_factory(load_model_config())
-    return ReadOnlyAgent(
-        workspace, model, max_steps=max_steps, run_id=run_id, language=language
+    try:
+        mode = PermissionMode(permission_mode)
+    except ValueError as exc:
+        raise RunInputError("permission_mode is invalid") from exc
+    return CodingAgent(
+        workspace,
+        model,
+        max_steps=max_steps,
+        run_id=run_id,
+        language=language,
+        permission_mode=mode,
+        session_id=session_id,
+        approvals=approvals,
     )
+
+
+create_coding_run = create_inspection_run

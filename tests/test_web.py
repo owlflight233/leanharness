@@ -81,6 +81,11 @@ def test_health_contract_is_exact(tmp_path: Path) -> None:
             "agent.streaming",
             "session.persistence",
             "run.trace",
+            "agent.edit",
+            "tool.patch",
+            "tool.command",
+            "tool.git.read",
+            "approval.interactive",
         ],
     }
 
