@@ -428,8 +428,12 @@ textarea:focus-visible {
 .run-process-count { margin-left: auto; color: var(--muted); font-size: 11px; }
 .run-process-chevron { width: 14px; color: var(--muted); text-align: center; }
 .run-process-list { margin: 0; padding: 4px 10px 8px 32px; list-style: none; }
-.run-process-list li { display: grid; grid-template-columns: 24px minmax(0, 1fr); min-height: 28px; align-items: center; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
+.run-process-step { display: block; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
+.run-process-step-heading { display: grid; min-height: 30px; grid-template-columns: 24px minmax(0, 1fr); align-items: center; }
 .run-process-list strong { overflow: hidden; color: #4c5654; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.run-process-tools { margin: 0 0 5px 24px; padding: 0 0 0 12px; border-left: 1px solid var(--border); list-style: none; }
+.run-process-tools li { display: grid; min-height: 24px; grid-template-columns: 24px minmax(0, 1fr); align-items: center; color: var(--muted); font-size: 10px; }
+.run-process-tools strong { color: var(--muted); font-weight: 450; }
 .run-process-metrics { padding: 7px 10px 9px 32px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .run-process-finish { color: var(--accent-dark); }
 

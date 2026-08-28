@@ -14,6 +14,13 @@ interface SemanticAction {
   id: string;
   sequence: number;
   label: string;
+  tools: SemanticTool[];
+}
+
+interface SemanticTool {
+  id: string;
+  sequence: number;
+  label: string;
 }
 
 export function RunProcess({
@@ -35,16 +42,30 @@ export function RunProcess({
       <button type="button" className="run-process-header" onClick={onToggle} aria-expanded={open}>
         <Activity size={15} />
         <span>{running ? "执行过程" : "执行过程已结束"}</span>
-        <span className="run-process-count">{actions.length} 个动作</span>
+        <span className="run-process-count">
+          {actions.length} 个步骤 · {actions.reduce((count, action) => count + action.tools.length, 0)} 个工具
+        </span>
         <span className="run-process-chevron" aria-hidden="true">{open ? "−" : "+"}</span>
       </button>
       {open && (
         <>
           <ol className="run-process-list">
             {actions.map((action) => (
-              <li key={action.id}>
-                <span>{action.sequence}</span>
-                <strong>{action.label}</strong>
+              <li key={action.id} className="run-process-step">
+                <div className="run-process-step-heading">
+                  <span>{action.sequence}</span>
+                  <strong>{action.label}</strong>
+                </div>
+                {action.tools.length > 0 && (
+                  <ol className="run-process-tools">
+                    {action.tools.map((tool) => (
+                      <li key={tool.id}>
+                        <span>{tool.sequence}</span>
+                        <strong>{tool.label}</strong>
+                      </li>
+                    ))}
+                  </ol>
+                )}
               </li>
             ))}
           </ol>
@@ -76,28 +97,45 @@ export function aggregateActions(trace: RunTraceItem[]): SemanticAction[] {
     tools.set(key, [...(tools.get(key) ?? []), event]);
   }
 
-  const actions: SemanticAction[] = [];
-  const stepsWithTools = new Set<number>();
+  const toolActions: Array<SemanticTool & { step?: number }> = [];
   for (const [id, events] of tools) {
     const first = events[0]!;
-    if (first.step !== undefined) stepsWithTools.add(first.step);
     const terminal = [...events].reverse().find((event) => event.type === "tool.completed");
     const approval = [...events].reverse().find((event) => event.type === "approval.required");
     const ok = terminal?.metadata?.ok;
     const status = terminal ? (ok === false ? "失败" : "完成") : approval ? "等待批准" : "执行中";
-    const note = first.step === undefined ? undefined : progress.get(first.step)?.summary;
-    actions.push({
+    toolActions.push({
       id,
       sequence: first.sequence,
-      label: note || `${first.tool ?? "工具"} · ${status}`,
+      step: first.step,
+      label: `${first.tool ?? "工具"} · ${status}`,
+    });
+  }
+  const actions: SemanticAction[] = [];
+  const groupedByStep = new Map<number, Array<SemanticTool & { step?: number }>>();
+  for (const tool of toolActions) {
+    if (tool.step === undefined) {
+      actions.push({ id: tool.id, sequence: tool.sequence, label: tool.label, tools: [tool] });
+    } else {
+      groupedByStep.set(tool.step, [...(groupedByStep.get(tool.step) ?? []), tool]);
+    }
+  }
+  for (const [step, stepTools] of groupedByStep) {
+    const first = stepTools[0]!;
+    actions.push({
+      id: `step-${step}`,
+      sequence: Math.min(first.sequence, progress.get(step)?.sequence ?? first.sequence),
+      label: progress.get(step)?.summary || `第 ${step} 步`,
+      tools: stepTools.sort((left, right) => left.sequence - right.sequence),
     });
   }
   for (const [step, event] of progress) {
-    if (!stepsWithTools.has(step)) {
+    if (!groupedByStep.has(step)) {
       actions.push({
         id: `progress-${event.sequence}`,
         sequence: event.sequence,
         label: event.summary || "Agent 行动",
+        tools: [],
       });
     }
   }
