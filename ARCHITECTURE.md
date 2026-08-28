@@ -51,7 +51,7 @@ The runtime uses explicit states:
 
 ```text
 CREATED -> PREPARING -> REQUESTING_MODEL -> INTERPRETING
-        -> EXECUTING_TOOL -> PREPARING
+        -> WAITING_APPROVAL | EXECUTING_TOOL -> PREPARING
         -> COMPLETED | EXHAUSTED | FAILED | CANCELLED
 ```
 
@@ -59,11 +59,27 @@ Every transition will be deterministic from the current run state and a typed
 input. Model calls and tools are effects requested by transitions rather than
 hidden side effects inside state objects.
 
-The current implementation enables only the inspect permission mode and three
-workspace-scoped tools: `workspace_list`, `workspace_read`, and
-`workspace_search`. Tool failures are returned to the model as structured
-results; repeated calls, context pressure, and step budgets are runtime
-decisions rather than model instructions.
+The runtime infers deterministic evidence requirements before the first model
+request. Inspection tasks need a successful workspace observation, mutation
+tasks need a successful `workspace_patch`, and explicit verification tasks
+need a successful command profile. A non-empty model answer is only a
+completion candidate; the fixed core accepts or rejects it from this evidence
+ledger. Failed edits therefore cannot be persisted as completed runs.
+
+`inspect` registers bounded workspace and read-only Git tools. `approve` and
+`unrestricted` additionally register guarded unified-diff patching and named
+verification commands. Tool failures are returned to the model as structured
+results; repeated calls, repeated equivalent failures, context pressure, and
+step budgets are runtime decisions rather than model instructions.
+
+Runtime responsibilities are separated by purpose:
+
+- `runtime/loop.py` coordinates effects and state transitions.
+- `runtime/completion.py` owns task requirements and completion evidence.
+- `runtime/continuation.py` defines the bounded cross-run capsule.
+- `runtime/prompting.py` owns model-facing public constraints.
+- `runtime/metrics.py` collects provider-neutral efficiency counters.
+- `context/store.py` performs local evidence-preserving compaction.
 
 ## Data strategy
 
@@ -73,7 +89,15 @@ each run under the application data directory. Both sinks receive the same
 `TraceRedactor` output: credentials, hidden reasoning, and raw tool/file
 content are excluded. Replaying traces can render what happened but does not
 replace relational recovery. Session history is presentation-only and is not
-automatically added to a subsequent model request.
+automatically replayed into a subsequent model request. Coding runs receive at
+most one 4 KiB continuation capsule from the immediately preceding terminal
+run. It contains only the previous task, terminal state, changed file names,
+public incomplete/error reason, and current permission mode. The model must
+still re-read the workspace before making claims.
+
+Storage code separates immutable records, forward-only migrations, the shared
+redaction policy, and SQLite operations into `storage/records.py`,
+`storage/migrations.py`, `storage/redaction.py`, and `storage/store.py`.
 
 The storage adapter applies numbered migrations, enables WAL and foreign keys,
 and uses UUID identifiers with UTC ISO-8601 timestamps. Deleting a session
@@ -84,3 +108,9 @@ cascades its relational records and removes its run trace directory.
 During development, Vite proxies `/api` to FastAPI. Production builds are
 served by the same FastAPI process, so the browser uses same-origin requests
 without broad CORS rules. The server listens only on loopback by default.
+
+The React client renders safe Markdown separately from the run-process view.
+Run-process lifecycle events are grouped by `tool_call_id`, so one request,
+approval, start, and completion sequence is displayed as one semantic action.
+Terminal metadata exposes model calls, tool calls, and token totals without
+persisting prompts or tool output.

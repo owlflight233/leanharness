@@ -64,4 +64,3 @@ class ApprovalRecord:
     state: str
     requested_at: str
     decided_at: str | None
-

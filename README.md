@@ -6,6 +6,8 @@ gateway, a read-only inspection loop, and controlled coding execution.
 
 For the permission model and execution limits, see
 [`CONTROLLED_EXECUTION.md`](CONTROLLED_EXECUTION.md).
+To understand the implementation in request-flow order, see
+[`READING_GUIDE.md`](READING_GUIDE.md).
 
 ## Current status
 
@@ -95,7 +97,10 @@ uv run leanharness serve
 require authentication. Plain HTTP is accepted only for `localhost`,
 `127.0.0.1`, or `::1`. Chat and coding runs persist public messages,
 summaries, and redacted event traces locally, but old messages are never
-injected into a later model request. Workspace changes are disabled in
+replayed into a later model request. A coding run may receive one bounded
+public capsule from the immediately preceding run so short follow-ups such as
+permission changes retain their task reference without importing full history.
+Workspace changes are disabled in
 `inspect`, require per-call confirmation in `approve`, and execute directly in
 `unrestricted` while still enforcing tool-level path, command, timeout, and
 output limits.

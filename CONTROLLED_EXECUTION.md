@@ -37,3 +37,15 @@ The API emits `approval.required` and `approval.resolved` events. Persistent
 SQLite/JSONL records contain tool names, normalized metadata, result status,
 hashes, and error codes, but never raw patches, source contents, command
 output, credentials, or hidden reasoning.
+
+## Completion evidence
+
+A model answer is a completion candidate, not the final authority. The runtime
+requires a successful observation for inspection work, a successful patch for
+requested changes, and a successful command profile when the task explicitly
+requests verification. If required evidence is missing, the runtime continues
+or emits `run.incomplete` on the reserved summary round.
+
+Terminal events include aggregate model-call, tool-call, and token counters.
+The web client groups request, approval, start, and completion lifecycle events
+for one `tool_call_id` into one displayed action.

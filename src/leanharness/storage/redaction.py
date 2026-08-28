@@ -9,9 +9,7 @@ from typing import Any
 
 from leanharness.logging import redact_text
 
-_HIDDEN_REASONING_BLOCK = re.compile(
-    r"(?is)<(?:think|thinking)>.*?</(?:think|thinking)>"
-)
+_HIDDEN_REASONING_BLOCK = re.compile(r"(?is)<(?:think|thinking)>.*?</(?:think|thinking)>")
 _FORBIDDEN_KEYS = {
     "api_key",
     "authorization",
@@ -90,4 +88,3 @@ def _redact_mapping(
         else:
             result[key] = item
     return result
-

@@ -60,4 +60,3 @@ describe("RunProcess", () => {
     expect(onToggle).toHaveBeenCalledOnce();
   });
 });
-
