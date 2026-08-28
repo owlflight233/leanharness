@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from leanharness.models import ToolCall
+from leanharness.permissions import PermissionMode
 from leanharness.tools import ToolRegistry
 
 
@@ -160,6 +161,37 @@ def test_symlink_escape_is_rejected_when_supported(tmp_path: Path) -> None:
 
     assert result.ok is False
     assert result.error is not None and result.error.code == "PATH_OUTSIDE_WORKSPACE"
+
+
+def test_mkdir_creates_nested_workspace_directories(tmp_path: Path) -> None:
+    registry = ToolRegistry(tmp_path, mode=PermissionMode.UNRESTRICTED)
+    result = registry.execute(call("workspace_mkdir", path="src/components/editor"))
+
+    assert result.ok is True
+    assert (tmp_path / "src/components/editor").is_dir()
+    assert result.public_metadata["directories_created"] == 3
+
+
+@pytest.mark.parametrize("path", ["../outside", "C:/outside"])
+def test_mkdir_rejects_paths_outside_workspace(tmp_path: Path, path: str) -> None:
+    result = ToolRegistry(tmp_path, mode=PermissionMode.UNRESTRICTED).execute(
+        call("workspace_mkdir", path=path)
+    )
+
+    assert result.ok is False and result.error is not None
+    assert result.error.code == "PATH_OUTSIDE_WORKSPACE"
+
+
+def test_mkdir_rejects_existing_directory_without_changes(tmp_path: Path) -> None:
+    existing = tmp_path / "src"
+    existing.mkdir()
+    result = ToolRegistry(tmp_path, mode=PermissionMode.UNRESTRICTED).execute(
+        call("workspace_mkdir", path="src")
+    )
+
+    assert result.ok is False and result.error is not None
+    assert result.error.code == "PATH_ALREADY_EXISTS"
+    assert existing.is_dir()
 
 
 def test_tool_definitions_expose_only_inspection_capabilities(tmp_path: Path) -> None:

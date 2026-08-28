@@ -11,6 +11,7 @@ from leanharness.tools.controlled import (
     CancellationSignal,
     GitInspectTool,
     WorkspaceCommandTool,
+    WorkspaceMkdirTool,
     WorkspacePatchTool,
 )
 from leanharness.tools.workspace import (
@@ -29,6 +30,7 @@ class ToolRegistry:
             WorkspaceReadTool(boundary),
             WorkspaceSearchTool(boundary),
             GitInspectTool(boundary),
+            WorkspaceMkdirTool(boundary),
             WorkspacePatchTool(boundary),
             WorkspaceCommandTool(boundary),
         )

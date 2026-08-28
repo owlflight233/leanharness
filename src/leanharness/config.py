@@ -38,6 +38,35 @@ def resolve_workspace(value: str | Path | None = None, *, cwd: Path | None = Non
     return resolved
 
 
+def create_workspace(value: str | Path) -> Path:
+    """Create one new workspace directory below an existing parent directory."""
+
+    if isinstance(value, str) and not value.strip():
+        raise WorkspaceError("Workspace path must not be blank")
+    candidate = Path(value).expanduser()
+    if not candidate.name or candidate.name in {".", ".."}:
+        raise WorkspaceError("Workspace path must name a new directory")
+    if candidate.exists() or candidate.is_symlink():
+        raise WorkspaceError(f"Workspace already exists: {candidate}")
+    try:
+        parent = candidate.parent.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise WorkspaceError(f"Workspace parent does not exist: {candidate.parent}") from exc
+    if not parent.is_dir():
+        raise WorkspaceError(f"Workspace parent is not a directory: {parent}")
+
+    target = parent / candidate.name
+    try:
+        target.mkdir()
+        resolved = target.resolve(strict=True)
+    except OSError as exc:
+        raise WorkspaceError(f"Workspace could not be created: {target}") from exc
+    if not resolved.is_dir() or resolved.parent != parent:
+        target.rmdir()
+        raise WorkspaceError("Created workspace could not be resolved safely")
+    return resolved
+
+
 def build_config(
     *,
     workspace: str | Path | None = None,

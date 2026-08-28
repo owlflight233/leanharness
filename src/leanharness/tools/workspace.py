@@ -80,6 +80,32 @@ class WorkspaceBoundary:
         normalized = candidate.relative_to(self.root).as_posix()
         return candidate, normalized
 
+    def resolve_directory_output(self, value: object) -> tuple[Path, str]:
+        """Resolve a new relative directory path without following symlinks."""
+
+        path_text = _require_string(value, "path")
+        relative = Path(path_text)
+        if (
+            relative.is_absolute()
+            or relative.drive
+            or ".." in relative.parts
+            or not relative.parts
+            or relative == Path(".")
+        ):
+            raise ToolExecutionError(
+                "PATH_OUTSIDE_WORKSPACE", "Directory path must stay inside the workspace"
+            )
+        current = self.root
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ToolExecutionError("PATH_SYMLINK", "Symbolic links cannot be modified")
+            if current.exists() and not current.is_dir():
+                raise ToolExecutionError(
+                    "PATH_NOT_DIRECTORY", f"Path component is not a directory: {part}"
+                )
+        return self.root.joinpath(relative), relative.as_posix()
+
 
 class WorkspaceListTool:
     definition = ToolDefinition(

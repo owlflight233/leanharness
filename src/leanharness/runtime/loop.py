@@ -565,6 +565,7 @@ def _fallback_summary(call: ToolCall, language: str = "same") -> str:
             "workspace_list": f"检查 {target} 下的项目结构。",
             "workspace_read": f"读取 {target} 以核对实现细节。",
             "workspace_search": f"在 {target} 下定位相关代码。",
+            "workspace_mkdir": f"准备创建目录 {target}。",
             "workspace_patch": "准备应用受控补丁。",
             "workspace_command": "准备运行受控验证命令。",
             "git_inspect": "检查当前 Git 状态和差异。",
@@ -579,6 +580,8 @@ def _fallback_summary(call: ToolCall, language: str = "same") -> str:
         return f"I will read {target} to verify the relevant implementation details."
     if call.name == "workspace_search":
         return f"I will search under {target} to locate the relevant code."
+    if call.name == "workspace_mkdir":
+        return f"I will create the guarded workspace directory {target}."
     if call.name == "workspace_patch":
         return "I will apply a guarded workspace patch."
     if call.name == "workspace_command":
@@ -601,6 +604,7 @@ def _safe_arguments(call: ToolCall) -> dict[str, object]:
         "timeout_seconds",
         "operation",
         "revision",
+        "parents",
     ):
         if key in call.arguments and isinstance(call.arguments[key], str | int | bool):
             safe[key] = call.arguments[key]
@@ -611,12 +615,18 @@ def _safe_arguments(call: ToolCall) -> dict[str, object]:
 
 def _approval_summary(call: ToolCall, language: str) -> str:
     if language == "zh":
-        return "需要批准补丁写入。" if call.name == "workspace_patch" else "需要批准验证命令。"
-    return (
-        "Approval is required to apply this patch."
-        if call.name == "workspace_patch"
-        else "Approval is required to run this verification command."
-    )
+        summaries = {
+            "workspace_mkdir": "需要批准创建工作区目录。",
+            "workspace_patch": "需要批准补丁写入。",
+            "workspace_command": "需要批准验证命令。",
+        }
+        return summaries.get(call.name, "需要批准此工具操作。")
+    summaries = {
+        "workspace_mkdir": "Approval is required to create this workspace directory.",
+        "workspace_patch": "Approval is required to apply this patch.",
+        "workspace_command": "Approval is required to run this verification command.",
+    }
+    return summaries.get(call.name, "Approval is required for this tool action.")
 
 
 def _run_started_summary(language: str) -> str:

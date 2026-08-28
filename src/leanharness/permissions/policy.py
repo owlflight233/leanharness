@@ -22,7 +22,7 @@ class PermissionDecision:
 INSPECT_TOOLS = frozenset(
     {"workspace_list", "workspace_read", "workspace_search", "git_inspect"}
 )
-MUTATING_TOOLS = frozenset({"workspace_patch", "workspace_command"})
+MUTATING_TOOLS = frozenset({"workspace_mkdir", "workspace_patch", "workspace_command"})
 
 
 def authorize_tool(mode: PermissionMode, tool_name: str) -> PermissionDecision:

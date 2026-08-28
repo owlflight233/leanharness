@@ -49,12 +49,15 @@ class CompletionLedger:
         if result.ok:
             if tool in _OBSERVATION_TOOLS:
                 self.successful_observations += 1
-            elif tool == "workspace_patch":
+            elif tool in {"workspace_mkdir", "workspace_patch"}:
                 self.successful_mutations += 1
-                files = result.public_metadata.get("files", [])
-                if isinstance(files, list):
-                    self.changed_files.update(str(path) for path in files)
+                paths = result.public_metadata.get("files", [])
+                if tool == "workspace_mkdir":
+                    paths = result.public_metadata.get("created_paths", [])
+                if isinstance(paths, list):
+                    self.changed_files.update(str(path) for path in paths)
                 self._clear_tool_errors("PATCH_")
+                self._clear_tool_errors("DIRECTORY_")
             elif tool == "workspace_command":
                 self.successful_verifications += 1
                 self._clear_tool_errors("COMMAND_")
@@ -68,9 +71,10 @@ class CompletionLedger:
                 accepted=False,
                 reason="MUTATION_NOT_APPLIED",
                 guidance=(
-                    "The task requests a workspace change, but no workspace_patch call has "
-                    "succeeded. Continue with a valid unified diff, or state the concrete "
-                    "blocker in the reserved summary round."
+                    "The task requests a workspace change, but no workspace_mkdir or "
+                    "workspace_patch call has succeeded. Continue with an appropriate "
+                    "workspace mutation, or state the concrete blocker in the reserved "
+                    "summary round."
                 ),
             )
         if requirements.verification_required and not self.successful_verifications:

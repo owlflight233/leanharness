@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
@@ -39,6 +40,95 @@ class FilePatch:
     @property
     def path(self) -> str:
         return self.new_path or self.old_path or ""
+
+
+class WorkspaceMkdirTool:
+    definition = ToolDefinition(
+        name="workspace_mkdir",
+        description=(
+            "Create a new directory inside the workspace. Use a relative path only. "
+            "Set parents=true to create missing parent directories. Existing paths, "
+            "symbolic links, and paths outside the workspace are rejected."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative directory path."},
+                "parents": {"type": "boolean", "default": True},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    )
+
+    def __init__(self, boundary: WorkspaceBoundary) -> None:
+        self._boundary = boundary
+
+    def preview(self, arguments: dict[str, Any]) -> dict[str, object]:
+        path, relative, parents = self._validate(arguments)
+        if path.exists():
+            raise ToolExecutionError("PATH_ALREADY_EXISTS", f"Path already exists: {relative}")
+        return {"path": relative, "parents": parents}
+
+    def execute(self, tool_call_id: str, arguments: dict[str, Any]) -> ToolResult:
+        target, relative, parents = self._validate(arguments)
+        if target.exists():
+            raise ToolExecutionError("PATH_ALREADY_EXISTS", f"Path already exists: {relative}")
+
+        created: list[Path] = []
+        current = self._boundary.root
+        try:
+            for index, part in enumerate(Path(relative).parts):
+                current = current / part
+                is_target = index == len(Path(relative).parts) - 1
+                if current.is_symlink():
+                    raise ToolExecutionError(
+                        "PATH_SYMLINK", "Symbolic links cannot be modified"
+                    )
+                if current.exists():
+                    if not current.is_dir():
+                        raise ToolExecutionError(
+                            "PATH_NOT_DIRECTORY", f"Path component is not a directory: {part}"
+                        )
+                    if is_target:
+                        raise ToolExecutionError(
+                            "PATH_ALREADY_EXISTS", f"Path already exists: {relative}"
+                        )
+                    continue
+                if not parents and not is_target:
+                    raise ToolExecutionError(
+                        "PATH_NOT_FOUND", "Parent directory does not exist"
+                    )
+                current.mkdir()
+                created.append(current)
+        except ToolExecutionError:
+            _remove_created_directories(created)
+            raise
+        except OSError as exc:
+            _remove_created_directories(created)
+            raise ToolExecutionError(
+                "DIRECTORY_CREATE_FAILED",
+                "Directory creation failed and was rolled back",
+                recoverable=False,
+            ) from exc
+
+        created_paths = [path.relative_to(self._boundary.root).as_posix() for path in created]
+        metadata = {
+            "path": relative,
+            "directories_created": len(created_paths),
+            "created_paths": created_paths,
+        }
+        return ToolResult(
+            tool_call_id, self.definition.name, True, metadata, public_metadata=metadata
+        )
+
+    def _validate(self, arguments: dict[str, Any]) -> tuple[Path, str, bool]:
+        _reject_unknown(arguments, {"path", "parents"})
+        parents = arguments.get("parents", True)
+        if not isinstance(parents, bool):
+            raise ToolExecutionError("TOOL_INVALID_ARGUMENTS", "parents must be boolean")
+        path, relative = self._boundary.resolve_directory_output(arguments.get("path"))
+        return path, relative, parents
 
 
 class WorkspacePatchTool:
@@ -396,6 +486,12 @@ _COMMAND_PROFILES: dict[str, tuple[str, ...]] = {
     "npm-lint": ("npm", "run", "lint", "--"),
     "npm-build": ("npm", "run", "build", "--"),
 }
+
+
+def _remove_created_directories(paths: list[Path]) -> None:
+    for path in reversed(paths):
+        with suppress(OSError):
+            path.rmdir()
 
 
 def _parse_unified_diff(text: str) -> tuple[FilePatch, ...]:

@@ -82,6 +82,7 @@ def test_health_contract_is_exact(tmp_path: Path) -> None:
             "session.persistence",
             "run.trace",
             "agent.edit",
+            "tool.mkdir",
             "tool.patch",
             "tool.command",
             "tool.git.read",
@@ -101,6 +102,29 @@ def test_workspace_can_be_selected_for_subsequent_requests(tmp_path: Path) -> No
     assert selected.json() == {"workspace": str(next_workspace.resolve())}
     assert get(app, "/api/v1/health").json()["workspace"] == str(next_workspace.resolve())
     assert get(app, "/api/v1/sessions").json()["sessions"] == []
+
+
+def test_workspace_can_be_created_and_becomes_current(tmp_path: Path) -> None:
+    app = create_app(build_config(workspace=tmp_path, data_dir=tmp_path / "data"))
+    new_workspace = tmp_path / "new-project"
+
+    created = post(app, "/api/v1/workspace/create", json_body={"path": str(new_workspace)})
+
+    assert created.status_code == 200
+    assert created.json() == {"workspace": str(new_workspace.resolve()), "created": True}
+    assert new_workspace.is_dir()
+    assert get(app, "/api/v1/health").json()["workspace"] == str(new_workspace.resolve())
+
+
+def test_workspace_create_rejects_existing_target(tmp_path: Path) -> None:
+    target = tmp_path / "existing"
+    target.mkdir()
+    app = create_app(build_config(workspace=tmp_path, data_dir=tmp_path / "data"))
+
+    response = post(app, "/api/v1/workspace/create", json_body={"path": str(target)})
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "INVALID_WORKSPACE"
 
 
 def test_frontend_build_is_served_with_spa_fallback(tmp_path: Path) -> None:

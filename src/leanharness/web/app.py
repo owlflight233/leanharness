@@ -35,7 +35,7 @@ from leanharness.application.session_gateway import (
     session_detail,
     session_to_dict,
 )
-from leanharness.config import AppConfig, resolve_workspace
+from leanharness.config import AppConfig, create_workspace, resolve_workspace
 from leanharness.errors import (
     ApprovalAlreadyResolvedError,
     ApprovalExpiredError,
@@ -110,6 +110,10 @@ class ApprovalDecisionRequest(BaseModel):
 
 
 class WorkspaceSelectRequest(BaseModel):
+    path: str
+
+
+class WorkspaceCreateRequest(BaseModel):
     path: str
 
 
@@ -237,6 +241,14 @@ def create_app(
             raise RunConflictError("Stop the active run before changing workspace")
         app.state.workspace = selected
         return {"workspace": str(selected)}
+
+    @app.post("/api/v1/workspace/create")
+    async def create_workspace_route(payload: WorkspaceCreateRequest) -> dict[str, object]:
+        if getattr(active_runs, "has_active", lambda: False)():
+            raise RunConflictError("Stop the active run before changing workspace")
+        selected = create_workspace(payload.path)
+        app.state.workspace = selected
+        return {"workspace": str(selected), "created": True}
 
     @app.get("/api/v1/model/status")
     async def model_status() -> dict[str, object]:

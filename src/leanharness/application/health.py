@@ -41,6 +41,7 @@ def get_health(config: AppConfig) -> HealthSnapshot:
             "session.persistence",
             "run.trace",
             "agent.edit",
+            "tool.mkdir",
             "tool.patch",
             "tool.command",
             "tool.git.read",
