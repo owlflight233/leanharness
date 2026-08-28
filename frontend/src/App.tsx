@@ -44,9 +44,16 @@ import {
 } from "./api/sessions";
 import { Markdown } from "./components/Markdown";
 import { RunProcess } from "./components/RunProcess";
+import {
+  createPlan,
+  fetchPlan,
+  streamPlanAction,
+  updatePlan,
+  type Plan,
+} from "./api/plans";
 
 type InspectorTab = "plan" | "trace";
-type RunMode = "chat" | "inspect";
+type RunMode = "chat" | "inspect" | "plan";
 type TraceEvent = TurnEvent | RunEvent;
 type LoadState<T> =
   | { status: "loading" }
@@ -144,6 +151,8 @@ function App({
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("inspect");
+  const [plan, setPlan] = useState<Plan | null>(null);
+  const [planLoading, setPlanLoading] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const nextMessageId = useRef(1);
   const activeRequest = useRef<AbortController | null>(null);
@@ -209,6 +218,7 @@ function App({
     modelStatus.status === "ready" &&
     modelStatus.data.configured &&
     !isStreaming &&
+    !planLoading &&
     input.trim().length > 0 &&
     input.length <= 32_000;
 
@@ -216,6 +226,20 @@ function App({
     if (!canSubmit) return;
     const message = input;
     const userId = nextMessageId.current++;
+    if (mode === "plan") {
+      setInput("");
+      setPlanLoading(true);
+      try {
+        const created = await createPlan(input.trim(), sessionId ?? undefined);
+        setPlan(created);
+        setInspectorTab("plan");
+      } catch (error: unknown) {
+        setSessionError(errorMessage(error));
+      } finally {
+        setPlanLoading(false);
+      }
+      return;
+    }
     const assistantId = mode === "chat" ? nextMessageId.current++ : null;
     const activeSessionId = sessionId;
     let resolvedSessionId = activeSessionId;
@@ -478,6 +502,38 @@ function App({
     }
   }
 
+  async function runPlanAction(action: "confirm" | "resume") {
+    if (!plan || isStreaming) return;
+    const controller = new AbortController();
+    activeRequest.current = controller;
+    setIsStreaming(true);
+    setInspectorTab("trace");
+    try {
+      for await (const event of streamPlanAction(plan.id, action, controller.signal)) {
+        setTrace((current) => [...current, event as TraceEvent]);
+        if (event.type === "run.completed" || event.type === "run.incomplete" || event.type === "run.failed") {
+          setPlan((current) => current ? { ...current, state: event.type === "run.completed" ? "COMPLETED" : event.type === "run.incomplete" ? "PAUSED" : "FAILED" } : current);
+        }
+      }
+      setPlan(await fetchPlan(plan.id));
+    } catch (error: unknown) {
+      if (!isAbortError(error)) setSessionError(errorMessage(error));
+    } finally {
+      if (activeRequest.current === controller) activeRequest.current = null;
+      setIsStreaming(false);
+    }
+  }
+
+  async function editPlanStep(stepId: string, field: "title" | "instruction", value: string) {
+    if (!plan || plan.state !== "AWAITING_CONFIRMATION") return;
+    const steps = plan.steps.map((step) => step.id === stepId ? { ...step, [field]: value } : step);
+    try {
+      setPlan(await updatePlan(plan, plan.title, steps));
+    } catch (error: unknown) {
+      setSessionError(errorMessage(error));
+    }
+  }
+
   function setProcessVisibility(runId: string, open: boolean) {
     setOpenProcesses((current) => ({ ...current, [runId]: open }));
   }
@@ -528,6 +584,7 @@ function App({
           <div className="mode-select" role="group" aria-label="运行模式">
             <button type="button" className={`mode-button ${mode === "chat" ? "active" : ""}`} aria-pressed={mode === "chat"} disabled={isStreaming} onClick={() => selectMode("chat")}>单轮</button>
             <button type="button" className={`mode-button ${mode === "inspect" ? "active" : ""}`} aria-pressed={mode === "inspect"} disabled={isStreaming} onClick={() => selectMode("inspect")}>Agent</button>
+            <button type="button" className={`mode-button ${mode === "plan" ? "active" : ""}`} aria-pressed={mode === "plan"} disabled={isStreaming || planLoading} onClick={() => selectMode("plan")}>计划</button>
           </div>
           <button className="icon-button mobile-only" type="button" title="打开检查器" aria-label="打开检查器" onClick={() => setRightOpen(true)}><PanelRight size={19} /></button>
         </header>
@@ -585,7 +642,7 @@ function App({
               </div>
             </div>
           )}
-          <textarea aria-label="任务输入" placeholder={modelStatus.status === "ready" && !modelStatus.data.configured ? "请先配置模型环境变量" : mode === "chat" ? "输入一条消息" : "输入一个仓库分析任务"} rows={2} value={input} maxLength={32_000} disabled={health.status !== "ready" || modelStatus.status !== "ready" || !modelStatus.data.configured || isStreaming} onChange={(event) => setInput(event.target.value)} />
+              <textarea aria-label="任务输入" placeholder={modelStatus.status === "ready" && !modelStatus.data.configured ? "请先配置模型环境变量" : mode === "chat" ? "输入一条消息" : mode === "plan" ? "描述需要完成的工作" : "输入一个仓库分析任务"} rows={2} value={input} maxLength={32_000} disabled={health.status !== "ready" || modelStatus.status !== "ready" || !modelStatus.data.configured || isStreaming || planLoading} onChange={(event) => setInput(event.target.value)} />
           <div className="composer-actions">
             <div className="composer-settings"><label htmlFor="permission-mode">权限</label><select id="permission-mode" value={permissionMode} onChange={(event) => void changePermission(event.target.value as PermissionMode)} disabled={isStreaming}><option value="inspect">只读检查</option><option value="approve">逐次批准</option><option value="unrestricted">受控直接执行</option></select></div><span className="composer-state">{isStreaming ? mode === "chat" ? "模型正在生成" : "Agent 正在执行" : modelStatus.status === "ready" && modelStatus.data.configured ? mode === "chat" ? "单轮对话 · 本地保存" : "受控编码 · 本地保存" : `模型${modelCopy}`}</span>
             {isStreaming ? (
@@ -606,7 +663,14 @@ function App({
           <button className="icon-button mobile-only" type="button" title="关闭检查器" aria-label="关闭检查器" onClick={() => setRightOpen(false)}><X size={18} /></button>
         </div>
         {inspectorTab === "plan" ? (
-          <div className="inspector-body" role="tabpanel"><div className="panel-empty"><CircleDot size={18} /><strong>没有活动计划</strong><span>单轮对话不创建计划</span></div></div>
+          <div className="inspector-body" role="tabpanel">
+            {!plan ? <div className="panel-empty"><CircleDot size={18} /><strong>没有活动计划</strong><span>切换到计划模式生成执行计划</span></div> : <div className="plan-panel">
+              <div className="plan-panel-heading"><input aria-label="计划标题" value={plan.title} disabled={plan.state !== "AWAITING_CONFIRMATION"} onChange={(event) => setPlan((current) => current ? { ...current, title: event.target.value } : current)} /><span>{plan.state}</span></div>
+              <Markdown content={plan.source_markdown} />
+              <ol className="plan-steps">{plan.steps.map((step) => <li key={step.id} className={step.state.toLowerCase()}><input aria-label={`步骤 ${step.sequence} 标题`} value={step.title} disabled={plan.state !== "AWAITING_CONFIRMATION"} onChange={(event) => void editPlanStep(step.id, "title", event.target.value)} /><textarea aria-label={`步骤 ${step.sequence} 说明`} value={step.instruction} disabled={plan.state !== "AWAITING_CONFIRMATION"} onChange={(event) => void editPlanStep(step.id, "instruction", event.target.value)} /><small>{step.state}</small></li>)}</ol>
+              <div className="plan-actions">{plan.state === "AWAITING_CONFIRMATION" && <button type="button" onClick={() => void runPlanAction("confirm")} disabled={isStreaming}>确认执行</button>}{plan.state === "PAUSED" && <button type="button" onClick={() => void runPlanAction("resume")} disabled={isStreaming}>恢复计划</button>}</div>
+            </div>}
+          </div>
         ) : (
           <div className="inspector-body" role="tabpanel">
             {trace.length === 0 ? <div className="panel-empty"><Activity size={18} /><strong>没有运行轨迹</strong><span>0 条事件</span></div> : <ol className="trace-list">{trace.map((event) => <li key={`${"run_id" in event ? event.run_id : "turn"}-${event.sequence}-${event.type}`}><span>{event.sequence}</span><strong title={traceLabel(event)}>{traceLabel(event)}</strong></li>)}</ol>}

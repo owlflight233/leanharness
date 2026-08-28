@@ -670,6 +670,78 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+.plan-panel {
+  padding: 12px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.plan-panel-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.plan-panel-heading input {
+  min-width: 0;
+  flex: 1;
+  padding: 5px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-weight: 650;
+}
+
+.plan-panel-heading span,
+.plan-steps small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.plan-steps {
+  margin: 10px 0;
+  padding-left: 22px;
+}
+
+.plan-steps li {
+  margin-bottom: 9px;
+}
+
+.plan-steps input,
+.plan-steps textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 4px;
+  padding: 4px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.plan-steps textarea {
+  min-height: 42px;
+  resize: vertical;
+}
+
+.plan-steps li.completed small { color: var(--accent); }
+
+.plan-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.plan-actions button {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 4px;
+  color: white;
+  background: var(--accent);
+  font-size: 11px;
+}
+
 .trace-list {
   margin: 0;
   padding: 8px 12px;

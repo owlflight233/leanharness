@@ -1,0 +1,99 @@
+export interface PlanStep {
+  id: string;
+  sequence: number;
+  title: string;
+  instruction: string;
+  enabled: boolean;
+  state: string;
+  evidence?: Record<string, unknown> | null;
+}
+
+export interface Plan {
+  id: string;
+  session_id: string;
+  title: string;
+  task: string;
+  state: string;
+  version: number;
+  source_markdown: string;
+  run_id?: string | null;
+  steps: PlanStep[];
+}
+
+export async function createPlan(task: string, sessionId?: string): Promise<Plan> {
+  const response = await fetch("/api/v1/plans", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ task, ...(sessionId ? { session_id: sessionId } : {}) }),
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  return (await response.json()) as Plan;
+}
+
+export async function fetchPlan(id: string): Promise<Plan> {
+  const response = await fetch(`/api/v1/plans/${encodeURIComponent(id)}`);
+  if (!response.ok) throw new Error(await readError(response));
+  return (await response.json()) as Plan;
+}
+
+export async function updatePlan(
+  plan: Plan,
+  title: string,
+  steps: PlanStep[],
+): Promise<Plan> {
+  const response = await fetch(`/api/v1/plans/${encodeURIComponent(plan.id)}`, {
+    method: "PATCH",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title,
+      version: plan.version,
+      steps: steps.map(({ id, title: stepTitle, instruction, enabled }) => ({
+        id,
+        title: stepTitle,
+        instruction,
+        enabled,
+      })),
+    }),
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  return (await response.json()) as Plan;
+}
+
+export async function* streamPlanAction(
+  id: string,
+  action: "confirm" | "resume",
+  signal: AbortSignal,
+): AsyncGenerator<Record<string, unknown>> {
+  const response = await fetch(`/api/v1/plans/${encodeURIComponent(id)}/${action}`, {
+    method: "POST",
+    headers: { Accept: "application/x-ndjson" },
+    signal,
+  });
+  if (!response.ok) throw new Error(await readError(response));
+  if (!response.body) throw new Error("计划运行没有返回事件流");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) if (line.trim()) yield JSON.parse(line) as Record<string, unknown>;
+      if (done) break;
+    }
+    if (buffer.trim()) yield JSON.parse(buffer) as Record<string, unknown>;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function readError(response: Response): Promise<string> {
+  try {
+    const value = (await response.json()) as { error?: { message?: string } };
+    return value.error?.message || `请求失败 (${response.status})`;
+  } catch {
+    return `请求失败 (${response.status})`;
+  }
+}
