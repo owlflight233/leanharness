@@ -48,7 +48,9 @@
 `tools/registry.py` 是统一分发器，负责将异常转换成安全的结构化错误。
 
 - `tools/workspace.py`：列目录、读文本、字面量搜索和路径边界。
-- `tools/controlled.py:WorkspacePatchTool`：解析 unified diff 并原子写入。
+- `tools/controlled.py:WorkspaceWriteTool`：安全创建或完整替换单个文本文件。
+- `tools/controlled.py:WorkspaceEditTool`：使用完整文件哈希进行有界行编辑。
+- `tools/controlled.py:WorkspacePatchTool`：复杂多 hunk 变更的 unified diff 工具。
 - `tools/controlled.py:WorkspaceCommandTool`：只运行命名命令配置。
 - `tools/controlled.py:GitInspectTool`：只读 Git 操作。
 
@@ -90,5 +92,10 @@ JSONL。三者应具有相同的公开事件顺序，但都不应包含原始工
 3. 检查失败是否会变成结构化错误，而不是异常泄漏或误报完成。
 4. 检查新字段能否安全进入公开 trace。
 5. 运行 Ruff、pytest、前端类型检查、前端测试和生产构建。
+
+真实模型行为不要只靠手工点击判断。`evals/scenarios.py` 定义隔离任务，
+`evals/runner.py` 在系统临时目录中运行真实 Runtime，并只输出完成状态、证据、
+错误码、调用次数、延迟和 token 等有界指标。评测不会使用当前 Web 项目，且必须
+显式选择场景，避免意外调用付费 API。
 
 Plan Mode 已复用同一个 CodingAgent；插件、子 Agent 和 Budget Mode 仍是后续能力。

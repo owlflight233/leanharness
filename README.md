@@ -146,7 +146,7 @@ For frontend development, keep the Python server on port 4318 and run
 ## Verify
 
 ```sh
-uv run ruff check src tests
+uv run ruff check src tests evals
 uv run pytest
 uv build
 cd frontend
@@ -154,6 +154,19 @@ pnpm typecheck
 pnpm test
 pnpm build
 ```
+
+Real-model evaluations always use disposable system temporary directories and
+never target the selected Web project or normal local data directory. Scenarios
+must be selected explicitly to avoid accidental API charges:
+
+```sh
+uv run python -m evals.runner --list
+uv run python -m evals.runner --scenario create_tested_project
+```
+
+Evaluation reports contain outcome, evidence, latency, calls, tool failures, and
+token metrics. Generated source, command output, credentials, and final answer
+text are excluded.
 
 ## Direction
 
