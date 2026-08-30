@@ -102,8 +102,12 @@ def collect_diagnostics(
     checks.append(
         DiagnosticCheck(
             "model-config",
-            model_status.configured,
-            model_status.model or "non-secret model settings are not configured",
+            True,
+            (
+                model_status.model
+                if model_status.configured
+                else "not configured (optional; use `leanharness model configure`)"
+            ),
         )
     )
     return tuple(checks)

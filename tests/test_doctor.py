@@ -27,6 +27,24 @@ def test_collect_diagnostics_fails_a_missing_dependency(tmp_path: Path) -> None:
     assert not next(check for check in checks if check.name == "git").ok
 
 
+def test_collect_diagnostics_does_not_block_before_model_configuration(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("LEANHARNESS_MODEL_BASE_URL", raising=False)
+    monkeypatch.delenv("LEANHARNESS_MODEL_NAME", raising=False)
+
+    checks = collect_diagnostics(
+        tmp_path,
+        command_probe=lambda name: f"{name} version",
+        data_dir=tmp_path / "data",
+    )
+
+    model = next(check for check in checks if check.name == "model-config")
+    assert model.ok is True
+    assert "optional" in model.detail
+
+
 def test_collect_diagnostics_reports_persistent_model_settings(
     tmp_path: Path,
     monkeypatch,
