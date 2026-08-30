@@ -13,9 +13,9 @@ from leanharness import __version__
 from leanharness.application.agent_gateway import create_coding_run
 from leanharness.application.model_gateway import check_model, stream_chat
 from leanharness.application.plan_gateway import create_plan_generator
+from leanharness.application.run_intent import resolve_run_intent
 from leanharness.application.session_gateway import (
     apply_first_task_title,
-    continuation_for_session,
     ensure_session,
     history_for_session,
     persist_model_event,
@@ -339,7 +339,7 @@ async def _inspect(
     )
     session = apply_first_task_title(store, session, task)
     selected_permission = permission or session.permission_mode
-    continuation = continuation_for_session(store, session)
+    intent = resolve_run_intent(store, session, task, permission_mode=selected_permission)
     history = history_for_session(store, session)
     run = store.create_run(
         session.id,
@@ -367,7 +367,7 @@ async def _inspect(
         on_expire=lambda request: store.expire_approval(request.id),
     )
     runtime = create_coding_run(
-        task,
+        intent.effective_task,
         workspace,
         max_steps=max_steps,
         run_id=run.id,
@@ -375,11 +375,14 @@ async def _inspect(
         permission_mode=selected_permission,
         session_id=session.id,
         approvals=approvals,
-        continuation=continuation,
+        continuation=intent.continuation,
         history=history,
+        task_requirements=intent.requirements,
+        original_message=intent.original_message,
+        run_metadata=intent.metadata(),
     )
     exit_code = 0
-    async for event in runtime.run(task):
+    async for event in runtime.run(intent.effective_task):
         persist_runtime_event(store, session, run, event)
         if event.type == "assistant.progress":
             print(f"[step {event.step}] {event.summary}", file=sys.stderr)

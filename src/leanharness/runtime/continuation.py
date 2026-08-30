@@ -15,6 +15,10 @@ class ContinuationContext:
     changed_files: tuple[str, ...] = ()
     incomplete_reason: str | None = None
     permission_mode: str = "inspect"
+    previous_run_permission_mode: str | None = None
+    source_run_id: str | None = None
+    mutation_required: bool = False
+    verification_required: bool = False
 
     def to_model_message(self) -> str:
         payload = {
@@ -23,9 +27,19 @@ class ContinuationContext:
             "changed_files": list(self.changed_files),
             "incomplete_or_error_reason": self.incomplete_reason,
             "current_permission_mode": self.permission_mode,
+            "previous_run_permission_mode": self.previous_run_permission_mode,
+            "source_run_id": self.source_run_id,
+            "requirements": {
+                "mutation_required": self.mutation_required,
+                "verification_required": self.verification_required,
+            },
+            "continuation_rule": (
+                "The previous answer may reflect an older permission. The current run's "
+                "permission snapshot and supplied tools are authoritative."
+            ),
         }
         prefix = (
-            "Bounded continuation context from the immediately preceding run. "
+            "Bounded continuation context from the selected prior substantive run. "
             "Use it only to resolve references in the current task; verify workspace state "
             "with tools before making claims:\n"
         )

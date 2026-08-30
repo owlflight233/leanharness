@@ -14,6 +14,7 @@ from leanharness.runtime import (
     RunControlError,
     validate_run_task,
 )
+from leanharness.runtime.completion import TaskRequirements
 from leanharness.runtime.loop import MAX_MAX_STEPS, MIN_MAX_STEPS
 
 
@@ -30,6 +31,9 @@ def create_coding_run(
     approvals: ApprovalCoordinator | None = None,
     continuation: ContinuationContext | None = None,
     history: tuple[ModelMessage, ...] = (),
+    task_requirements: TaskRequirements | None = None,
+    original_message: str | None = None,
+    run_metadata: dict[str, object] | None = None,
 ) -> CodingAgent:
     """Validate public input and create a bounded coding runtime."""
 
@@ -55,6 +59,9 @@ def create_coding_run(
         approvals=approvals,
         continuation=continuation,
         history=history,
+        task_requirements=task_requirements,
+        original_message=original_message,
+        run_metadata=run_metadata,
     )
 
 

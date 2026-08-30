@@ -66,6 +66,8 @@ class CodingAgent:
         continuation: ContinuationContext | None = None,
         history: tuple[ModelMessage, ...] = (),
         task_requirements: TaskRequirements | None = None,
+        original_message: str | None = None,
+        run_metadata: dict[str, object] | None = None,
         initial_sequence: int = 0,
         reserve_summary_round: bool = True,
     ) -> None:
@@ -86,6 +88,8 @@ class CodingAgent:
         self.continuation = continuation
         self.history = history
         self.task_requirements = task_requirements
+        self.original_message = original_message
+        self.run_metadata = dict(run_metadata or {})
         self.reserve_summary_round = reserve_summary_round
         self._sequence = initial_sequence
         self.evidence = CompletionLedger()
@@ -157,11 +161,24 @@ class CodingAgent:
         if initialize_context:
             for message in self.history:
                 self.context.append(message)
-        self.context.append(ModelMessage(role="user", content=validated_task))
+        self.context.append(
+            ModelMessage(
+                role="user",
+                content=(self.original_message if initialize_context else None)
+                or validated_task,
+            )
+        )
         yield self._event(
             "run.started",
             summary=_run_started_summary(self.language),
-            metadata={"permission_mode": self.permission_mode.value},
+            metadata={
+                "permission_mode": self.permission_mode.value,
+                "requirements": {
+                    "mutation_required": requirements.mutation_required,
+                    "verification_required": requirements.verification_required,
+                },
+                **self.run_metadata,
+            },
         )
 
         missing = missing_capabilities(

@@ -112,12 +112,10 @@ class LocalStore:
             "SELECT * FROM projects WHERE root_path = ?", (str(root),)
         ).fetchone()
         if row:
-            self.connection.execute(
-                "UPDATE projects SET permission_mode = ?, updated_at = ? WHERE id = ?",
-                (permission_mode, now, row["id"]),
-            )
-            self.connection.commit()
-            return self._project_row(row, permission_mode=permission_mode, updated_at=now)
+            # Project reads must be idempotent. Session permissions are the
+            # active user preference; touching a project here must not change
+            # its identity, timestamp, or navigation order.
+            return self._project_row(row)
         project_id = str(uuid.uuid4())
         self.connection.execute(
             "INSERT INTO projects(id, root_path, permission_mode, created_at, updated_at) VALUES(?,?,?,?,?)",
@@ -127,9 +125,9 @@ class LocalStore:
         return ProjectRecord(project_id, str(root), permission_mode, now, now)
 
     def list_projects(self) -> list[ProjectRecord]:
-        """Return known projects, most recently used first."""
+        """Return known projects in stable first-created order."""
         rows = self.connection.execute(
-            "SELECT * FROM projects ORDER BY updated_at DESC, created_at DESC"
+            "SELECT * FROM projects ORDER BY created_at ASC, root_path ASC"
         ).fetchall()
         projects: list[ProjectRecord] = []
         for row in rows:

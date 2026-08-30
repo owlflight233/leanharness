@@ -7,6 +7,7 @@ from typing import Any
 
 from leanharness.application.language import detect_session_language
 from leanharness.application.plan_gateway import plan_to_dict
+from leanharness.application.run_intent import continuation_for_run, latest_substantive_run
 from leanharness.models import ModelEvent, ModelMessage
 from leanharness.runtime import ContinuationContext
 from leanharness.runtime.events import RuntimeEvent
@@ -134,46 +135,10 @@ def continuation_for_session(
     store: LocalStore,
     session: SessionRecord,
 ) -> ContinuationContext | None:
-    """Return a bounded public capsule for the immediately preceding terminal run."""
+    """Return a bounded capsule for the latest substantive terminal run."""
 
-    runs = store.list_runs(session.id)
-    terminal = next(
-        (
-            run
-            for run in reversed(runs)
-            if run.state in {"COMPLETED", "EXHAUSTED", "FAILED", "CANCELLED"}
-        ),
-        None,
-    )
-    if terminal is None:
-        return None
-    events = store.list_events(terminal.id)
-    terminal_event = next(
-        (
-            event
-            for event in reversed(events)
-            if event.get("type")
-            in {"run.completed", "run.incomplete", "run.failed", "run.cancelled"}
-        ),
-        {},
-    )
-    metadata = terminal_event.get("metadata")
-    evidence = metadata.get("evidence") if isinstance(metadata, dict) else None
-    changed = evidence.get("changed_files") if isinstance(evidence, dict) else None
-    changed_files = (
-        tuple(str(path) for path in changed[:50]) if isinstance(changed, list) else ()
-    )
-    reason = terminal.error_code
-    if reason is None and isinstance(metadata, dict):
-        candidate = metadata.get("incomplete_reason")
-        reason = str(candidate) if candidate else None
-    return ContinuationContext(
-        previous_task=terminal.task,
-        previous_state=terminal.state,
-        changed_files=changed_files,
-        incomplete_reason=reason,
-        permission_mode=session.permission_mode,
-    )
+    terminal = latest_substantive_run(store, session)
+    return continuation_for_run(store, session, terminal) if terminal else None
 
 
 def history_for_session(

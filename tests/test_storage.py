@@ -34,6 +34,23 @@ def test_store_migrates_and_recovers_sessions(tmp_path: Path) -> None:
         assert reopened.list_events(run.id)[0]["summary"] == "started"
 
 
+def test_projects_keep_creation_order_and_reads_do_not_touch_metadata(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path / "data")
+    roots = [tmp_path / name for name in ("a", "b", "c")]
+    for root in roots:
+        root.mkdir()
+    created = [store.ensure_project(root) for root in roots]
+
+    for index in (0, 2, 1, 0):
+        observed = store.ensure_project(roots[index], permission_mode="unrestricted")
+        assert observed.updated_at == created[index].updated_at
+        assert observed.permission_mode == created[index].permission_mode
+
+    assert [project.root_path for project in store.list_projects()] == [
+        str(root.resolve()) for root in roots
+    ]
+
+
 def test_history_for_session_returns_public_chat_messages_only(tmp_path: Path) -> None:
     from leanharness.application.session_gateway import history_for_session
 

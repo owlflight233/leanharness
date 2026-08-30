@@ -24,9 +24,9 @@ from leanharness.application.model_gateway import (
     validate_chat_message,
 )
 from leanharness.application.plan_gateway import create_plan_generator, plan_to_dict
+from leanharness.application.run_intent import resolve_run_intent
 from leanharness.application.session_gateway import (
     apply_first_task_title,
-    continuation_for_session,
     ensure_session,
     history_for_session,
     persist_model_event,
@@ -281,6 +281,7 @@ def create_app(
     @app.get("/api/v1/projects")
     async def projects() -> dict[str, object]:
         store: LocalStore = app.state.store
+        store.ensure_project(app.state.workspace)
         current = str(app.state.workspace.resolve())
         return {
             "current_workspace": current,
@@ -315,6 +316,8 @@ def create_app(
     @app.patch("/api/v1/sessions/{session_id}")
     async def update_session(session_id: str, payload: SessionUpdateRequest) -> dict[str, object]:
         ensure_session(app.state.store, app.state.workspace, session_id)
+        if payload.permission_mode is not None:
+            active_runs.assert_available(session_id)
         session = app.state.store.update_session(
             session_id,
             title=payload.title,
@@ -400,7 +403,7 @@ def create_app(
         _, session = ensure_session(store, app.state.workspace, payload.session_id)
         session = apply_first_task_title(store, session, payload.task)
         active_runs.assert_available(session.id)
-        continuation = continuation_for_session(store, session)
+        intent = resolve_run_intent(store, session, payload.task)
         history = history_for_session(store, session)
         run_record = store.create_run(
             session.id,
@@ -411,7 +414,7 @@ def create_app(
         )
         active_runs.acquire(session.id, run_record.id)
         runtime = create_coding_run(
-            payload.task,
+            intent.effective_task,
             app.state.workspace,
             max_steps=payload.max_steps,
             client_factory=app.state.model_client_factory,
@@ -420,8 +423,11 @@ def create_app(
             permission_mode=session.permission_mode,
             session_id=session.id,
             approvals=approvals,
-            continuation=continuation,
+            continuation=intent.continuation,
             history=history,
+            task_requirements=intent.requirements,
+            original_message=intent.original_message,
+            run_metadata=intent.metadata(),
         )
         store.add_message(session.id, "user", payload.task, run_id=run_record.id)
 
@@ -429,7 +435,7 @@ def create_app(
             last_sequence = -1
             terminal_seen = False
             try:
-                async for event in runtime.run(payload.task):
+                async for event in runtime.run(intent.effective_task):
                     last_sequence = event.sequence
                     persist_runtime_event(store, session, run_record, event)
                     terminal_seen = event.type in {

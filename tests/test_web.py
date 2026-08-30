@@ -193,10 +193,35 @@ def test_projects_list_groups_known_workspaces(tmp_path: Path) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["current_workspace"] == str(second.resolve())
-    assert {item["root_path"] for item in payload["projects"]} == {
+    assert [item["root_path"] for item in payload["projects"]] == [
         str(first.resolve()),
         str(second.resolve()),
-    }
+    ]
+
+    for workspace in (first, second, first, second):
+        post(app, "/api/v1/workspace", json_body={"path": str(workspace)})
+        get(app, "/api/v1/sessions")
+        assert [
+            item["root_path"] for item in get(app, "/api/v1/projects").json()["projects"]
+        ] == [str(first.resolve()), str(second.resolve())]
+
+
+def test_active_run_permission_cannot_be_changed(tmp_path: Path) -> None:
+    app = create_app(build_config(workspace=tmp_path, data_dir=tmp_path / "data"))
+    session = post(app, "/api/v1/sessions", json_body={}).json()
+    app.state.active_runs.acquire(session["id"], "active-run")
+
+    response = patch(
+        app,
+        f"/api/v1/sessions/{session['id']}",
+        json_body={"permission_mode": "unrestricted"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "RUN_ALREADY_ACTIVE"
+    assert get(app, f"/api/v1/sessions/{session['id']}").json()["session"][
+        "permission_mode"
+    ] == "inspect"
 
 
 def test_workspace_create_rejects_existing_target(tmp_path: Path) -> None:
