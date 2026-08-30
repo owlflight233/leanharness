@@ -156,6 +156,7 @@ function App({
   const [composerMenuOpen, setComposerMenuOpen] = useState(false);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [trace, setTrace] = useState<Array<TraceEvent | SavedRunTrace | PersistedTraceEvent>>([]);
+  const [restoredRunPermission, setRestoredRunPermission] = useState<PermissionMode | null>(null);
   const [openProcesses, setOpenProcesses] = useState<Record<string, boolean>>({});
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
@@ -271,7 +272,7 @@ function App({
     !planLoading &&
     input.trim().length > 0 &&
     input.length <= 32_000;
-  const runPermissionMode = latestRunPermission(trace);
+  const runPermissionMode = latestRunPermission(trace) ?? restoredRunPermission;
 
   async function submitMessage() {
     if (!canSubmit) return;
@@ -486,6 +487,7 @@ function App({
           ],
         ),
       );
+      setRestoredRunPermission(detail.runs.at(-1)?.permission_mode ?? null);
       setOpenProcesses({});
       setActiveRunId(null);
       setPendingApproval(null);
@@ -509,6 +511,7 @@ function App({
       setHealth({ status: "ready", data: refreshed });
       setMessages([]);
       setTrace([]);
+      setRestoredRunPermission(null);
       setPlan(null);
       setSessionId(null);
       setSessions([]);
@@ -527,6 +530,7 @@ function App({
       setHealth({ status: "ready", data: refreshed });
       setMessages([]);
       setTrace([]);
+      setRestoredRunPermission(null);
       setPlan(null);
       setSessionId(null);
       setSessions([]);
@@ -547,6 +551,7 @@ function App({
       setHealth({ status: "ready", data: { ...refreshed, workspace: created.workspace } });
       setMessages([]);
       setTrace([]);
+      setRestoredRunPermission(null);
       setPlan(null);
       setSessionId(null);
       setSessions([]);
@@ -776,12 +781,17 @@ function App({
             <div className="section-label"><span>项目</span><button className="icon-button compact" type="button" disabled={isStreaming || health.status !== "ready"} aria-label="添加项目" title="新建项目" onClick={() => void createProject()}><Plus size={14} /></button></div>
             {projects.length > 0 ? projects.map((project) => (
               <button key={project.id} className={`empty-row workspace-picker ${project.root_path === workspace ? "active" : ""}`} type="button" title={project.root_path} onClick={() => void selectProject(project)} disabled={isStreaming || health.status !== "ready"}>
-                <FolderGit2 size={16} /><span>{project.root_path}</span>{project.root_path === workspace && <span className="project-current">当前</span>}
+                <FolderGit2 size={16} />
+                <span className="project-label">
+                  <strong>{projectPathParts(project.root_path).name}</strong>
+                  <small>{projectPathParts(project.root_path).parent}</small>
+                </span>
+                {project.root_path === workspace && <span className="project-current">当前</span>}
               </button>
             )) : <button className="empty-row workspace-picker" type="button" title="切换工作区" onClick={() => void changeWorkspace()} disabled={isStreaming || health.status !== "ready"}><FolderGit2 size={16} /><span>{workspace}</span><Pencil size={12} /></button>}
           </section>
           <section className="rail-section sessions-section">
-            <div className="section-label"><span>当前运行</span></div>
+            <div className="section-label"><span>会话</span></div>
             {sessionError && <div className="session-error">{sessionError}</div>}
             {sessionsLoading ? <div className="empty-row muted"><Bot size={16} /><span>正在加载会话</span></div> : sessions.length === 0 ? <div className="empty-row muted"><Bot size={16} /><span>暂无会话</span></div> : sessions.map((session) => (
               <div className={`session-row ${session.id === sessionId ? "active" : ""}`} key={session.id}>
@@ -810,7 +820,7 @@ function App({
             <div className="conversation-empty">
               <div className="empty-glyph"><Bot size={22} /></div>
               <h1>{connectionCopy.title}</h1>
-              <p>{modelStatus.status === "ready" && !modelStatus.data.configured ? "请在环境变量中配置模型" : `LeanHarness ${version}`}</p>
+              <p>{modelStatus.status === "ready" && !modelStatus.data.configured ? "模型尚未配置" : `LeanHarness ${version}`}</p>
             </div>
           ) : (
             <div className="message-list">
@@ -885,7 +895,7 @@ function App({
               </div>
             </div>
           )}
-              <textarea aria-label="任务输入" placeholder={modelStatus.status === "ready" && !modelStatus.data.configured ? "请先配置模型环境变量" : mode === "plan" ? "描述需要完成的工作" : "输入一个仓库任务"} rows={2} value={input} maxLength={32_000} disabled={health.status !== "ready" || modelStatus.status !== "ready" || !modelStatus.data.configured || isStreaming || planLoading} onChange={(event) => setInput(event.target.value)} />
+              <textarea aria-label="任务输入" placeholder={modelStatus.status === "ready" && !modelStatus.data.configured ? "模型尚未配置" : mode === "plan" ? "描述需要完成的工作" : "输入一个仓库任务"} rows={2} value={input} maxLength={32_000} disabled={health.status !== "ready" || modelStatus.status !== "ready" || !modelStatus.data.configured || isStreaming || planLoading} onChange={(event) => setInput(event.target.value)} />
           <div className="composer-actions">
             <div className="composer-menu-wrap">
               <button
@@ -973,6 +983,15 @@ function latestRunPermission(
     if (value === "inspect" || value === "approve" || value === "unrestricted") return value;
   }
   return null;
+}
+
+function projectPathParts(path: string): { name: string; parent: string } {
+  const normalized = path.replace(/[\\/]+$/, "");
+  const separator = normalized.includes("\\") ? "\\" : "/";
+  const parts = normalized.split(/[\\/]+/).filter(Boolean);
+  const name = parts.at(-1) ?? normalized;
+  const parent = parts.slice(-3, -1).join(separator) || normalized;
+  return { name, parent };
 }
 
 function permissionLabel(permission: PermissionMode): string {

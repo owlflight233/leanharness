@@ -169,9 +169,37 @@ textarea:focus-visible {
 
 .workspace-picker {
   width: 100%;
+  min-height: 44px;
   border: 0;
   text-align: left;
   cursor: pointer;
+}
+
+.empty-row .project-label {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  white-space: normal;
+}
+
+.project-label strong,
+.project-label small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: 0;
+}
+
+.project-label strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.project-label small {
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .workspace-picker:disabled {

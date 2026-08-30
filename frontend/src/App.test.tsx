@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -188,6 +188,8 @@ describe("application shell", () => {
       (element) => element.tagName === "BUTTON",
     )!;
     expect(firstButton.compareDocumentPosition(secondButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(firstButton).getByText("one")).toBeInTheDocument();
+    expect(within(firstButton).getByText("C:\\projects")).toBeInTheDocument();
 
     await user.click(secondButton);
     expect((await screen.findAllByText(secondSession.title)).length).toBeGreaterThan(0);
@@ -253,9 +255,30 @@ describe("application shell", () => {
   it("keeps chat disabled when the model is not configured", async () => {
     render(<App healthLoader={successfulHealth} modelStatusLoader={unconfiguredModel} />);
 
-    expect(await screen.findByText("请在环境变量中配置模型")).toBeInTheDocument();
+    expect(await screen.findByText("模型尚未配置")).toBeInTheDocument();
     expect(screen.getByLabelText("任务输入")).toBeDisabled();
     expect(screen.getByText("模型未配置")).toBeInTheDocument();
+  });
+
+  it("restores the latest run permission even when old trace metadata is absent", async () => {
+    const detail = sessionDetail();
+    detail.runs[0].permission_mode = "approve";
+    const client = mockSessionClient();
+    client.get = vi.fn(async () => detail);
+
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        sessionClient={client}
+      />,
+    );
+
+    const inspector = await screen.findByLabelText("运行检查器");
+    await waitFor(() => {
+      expect(within(inspector).getByText("逐次批准")).toBeInTheDocument();
+      expect(within(inspector).queryByText("尚未运行")).not.toBeInTheDocument();
+    });
   });
 
   it("renders agent content and trace events", async () => {
