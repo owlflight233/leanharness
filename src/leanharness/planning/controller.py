@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from leanharness.context import ContextSource
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.planning.contracts import Plan, PlanStep, PlanStepState
 from leanharness.runtime import CodingAgent, RuntimeEvent
@@ -69,6 +70,7 @@ class PlanController:
         initial_sequence: int = 0,
         on_step: StepUpdater | None = None,
         cancel_event: asyncio.Event | None = None,
+        history_sources: tuple[ContextSource, ...] = (),
     ) -> None:
         if not plan.run_id:
             raise ValueError("Confirmed plan must be attached to a run")
@@ -98,6 +100,7 @@ class PlanController:
             initial_sequence=initial_sequence,
             cancel_event=cancel_event,
             reserve_summary_round=False,
+            history_sources=history_sources,
         )
 
     async def run(self) -> AsyncIterator[RuntimeEvent | PlanEvent]:

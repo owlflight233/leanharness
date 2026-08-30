@@ -528,6 +528,7 @@ async def _plan_lifecycle(
         permission_mode=PermissionMode(session.permission_mode),
         language=session.language or "same",
         approvals=approvals,
+        history_sources=context_history_for_session(store, session, exclude_run_id=run.id),
     )
     answer = None
     async for event in controller.run():

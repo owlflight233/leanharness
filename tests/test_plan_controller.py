@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from leanharness.models import ModelRequest, ModelResponse, ToolCall
+from leanharness.context import ContextSource
+from leanharness.models import ModelMessage, ModelRequest, ModelResponse, ToolCall
 from leanharness.permissions import PermissionMode
 from leanharness.planning import Plan, PlanController, PlanState, PlanStep, PlanStepState
 
@@ -98,6 +99,38 @@ def test_controller_executes_all_steps_in_one_agent_context(tmp_path: Path) -> N
     assert events[-1].metadata["metrics"]["model_calls"] == 4
     first_tool = next(event for event in events if event.type == "tool.requested")
     assert first_tool.metadata["plan_step"] == 1
+
+
+def test_controller_projects_public_session_history_into_first_step(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response("call-1"),
+            ModelResponse(content="Repository inspected."),
+            tool_response("call-2"),
+            ModelResponse(content="Tests inspected."),
+        ]
+    )
+    controller = PlanController(
+        make_plan(),
+        tmp_path,
+        model,
+        permission_mode=PermissionMode.INSPECT,
+        language="en",
+        max_steps=4,
+        history_sources=(
+            ContextSource("message:prior", ModelMessage(role="user", content="Prior task")),
+        ),
+    )
+
+    async def collect():
+        return [event async for event in controller.run()]
+
+    asyncio.run(collect())
+
+    assert any(
+        message.role == "user" and message.content == "Prior task"
+        for message in model.requests[0].messages
+    )
 
 
 def test_controller_pauses_when_step_is_incomplete(tmp_path: Path) -> None:

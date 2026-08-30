@@ -674,6 +674,9 @@ def create_app(
             ),
             initial_sequence=initial_sequence,
             cancel_event=plan_cancellations.setdefault(run.id, asyncio.Event()),
+            history_sources=context_history_for_session(
+                store, session, exclude_run_id=run.id
+            ),
         )
 
         async def events() -> AsyncIterator[bytes]:
