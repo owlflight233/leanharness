@@ -123,7 +123,7 @@ class CodingAgent:
         self.evidence = CompletionLedger()
         self.metrics = RunMetrics()
         self._protocol_recovery = ModelProtocolRecovery()
-        self._failure_tracker = ToolFailureTracker()
+        self._failure_tracker = ToolFailureTracker(self.language)
         self._model_step = ModelStepExecutor(
             context=self.context,
             model_client=self.model_client,

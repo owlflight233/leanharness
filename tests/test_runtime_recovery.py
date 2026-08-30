@@ -79,6 +79,20 @@ def test_git_repository_failure_groups_different_operations() -> None:
     assert second.terminal_error_code == "GIT_NOT_REPOSITORY"
 
 
+def test_recovery_guidance_uses_runtime_language() -> None:
+    tracker = ToolFailureTracker("zh")
+    git_call = call("git-status", "git_inspect", operation="status")
+
+    guidance = tracker.record_result(
+        git_call, failed(git_call, "GIT_NOT_REPOSITORY")
+    ).guidance
+
+    assert guidance == (
+        "当前工作区不是 Git 仓库。不要再次调用 git_inspect\uFF0C"
+        "请继续使用工作区工具。"
+    )
+
+
 def test_user_rejections_never_trigger_automatic_stall() -> None:
     tracker = ToolFailureTracker()
     decisions = []

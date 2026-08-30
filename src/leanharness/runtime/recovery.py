@@ -18,7 +18,8 @@ class ProtocolRepair:
 class ModelProtocolRecovery:
     """Permit one safe correction without retaining malformed provider output."""
 
-    def __init__(self) -> None:
+    def __init__(self, language: str = "same") -> None:
+        self._language = language
         self._used = False
 
     def reset(self) -> None:
@@ -53,7 +54,8 @@ class FailureDecision:
 class ToolFailureTracker:
     """Bound retries by public operation identity without choosing the next action."""
 
-    def __init__(self) -> None:
+    def __init__(self, language: str = "same") -> None:
+        self._language = language
         self._repeat_key: tuple[str, str] | None = None
         self._repeat_count = 0
         self._failure_counts: dict[tuple[str, str, str], int] = {}
@@ -89,7 +91,7 @@ class ToolFailureTracker:
         if code == "GIT_NOT_REPOSITORY":
             if count >= 2:
                 return FailureDecision(
-                    guidance=_git_guidance(),
+                    guidance=_git_guidance(self._language),
                     terminal_error_code="GIT_NOT_REPOSITORY",
                     terminal_message=(
                         "The workspace is not a Git repository; repeated Git inspection "
@@ -97,7 +99,7 @@ class ToolFailureTracker:
                     ),
                     incomplete_reason="GIT_NOT_REPOSITORY",
                 )
-            return FailureDecision(guidance=_git_guidance())
+            return FailureDecision(guidance=_git_guidance(self._language))
         if _should_stall_on_tool_error(code) and count >= 3:
             return FailureDecision(
                 terminal_error_code="RUN_STALLED",
@@ -106,11 +108,7 @@ class ToolFailureTracker:
             )
         if count == 2:
             return FailureDecision(
-                guidance=(
-                    f"The {call.name} tool has failed twice with {code}. "
-                    "Do not repeat the same approach. Re-read the relevant state, correct "
-                    "the arguments, or explain the blocker in the final incomplete summary."
-                )
+                guidance=_repeat_failure_guidance(call.name, code, self._language)
             )
         return FailureDecision()
 
@@ -168,8 +166,23 @@ def _should_stall_on_tool_error(error_code: str) -> bool:
     ) or error_code == "TOOL_INVALID_ARGUMENTS"
 
 
-def _git_guidance() -> str:
+def _git_guidance(language: str = "same") -> str:
+    if language == "zh":
+        return "当前工作区不是 Git 仓库。不要再次调用 git_inspect\uFF0C请继续使用工作区工具。"
     return (
         "This workspace is not a Git repository. Do not call git_inspect again; "
         "continue with workspace tools."
+    )
+
+
+def _repeat_failure_guidance(tool: str, code: str, language: str) -> str:
+    if language == "zh":
+        return (
+            f"{tool} 工具已因 {code} 连续失败两次。不要重复相同方法\uFF1B请重新读取相关状态\uFF0C"
+            "修正参数\uFF0C或在最终未完成摘要中说明阻塞原因。"
+        )
+    return (
+        f"The {tool} tool has failed twice with {code}. Do not repeat the same approach. "
+        "Re-read the relevant state, correct the arguments, or explain the blocker in the "
+        "final incomplete summary."
     )
