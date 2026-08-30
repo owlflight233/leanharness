@@ -41,6 +41,7 @@
 - `runtime/prompting.py`：语言和能力约束，不含隐藏思维提示。
 - `runtime/recovery.py`：协议纠正、相同调用和等价工具失败的有界恢复。
 - `runtime/tool_dispatch.py`：工具预览、受控执行及安全错误转换。
+- `runtime/user_input.py`：模型发起的有界澄清问题和单次回答协调。
 - `context/store.py`：活跃上下文超限时将旧工具结果替换为证据胶囊。
 
 关键原则是：模型只能提出“完成候选”。是否完成由本地证据决定。

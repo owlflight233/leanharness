@@ -12,6 +12,8 @@ RuntimeEventType = Literal[
     "tool.requested",
     "approval.required",
     "approval.resolved",
+    "input.required",
+    "input.resolved",
     "tool.started",
     "tool.completed",
     "step.completed",

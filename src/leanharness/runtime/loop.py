@@ -39,6 +39,14 @@ from leanharness.runtime.prompting import system_prompt
 from leanharness.runtime.recovery import ModelProtocolRecovery, ToolFailureTracker
 from leanharness.runtime.state import RunState, transition
 from leanharness.runtime.tool_dispatch import ToolDispatcher, tool_error_result
+from leanharness.runtime.user_input import (
+    REQUEST_USER_INPUT_TOOL,
+    REQUEST_USER_INPUT_TOOL_NAME,
+    UserInputCoordinator,
+    UserInputExpiredError,
+    UserInputProtocolError,
+    parse_user_input_call,
+)
 from leanharness.tools import ToolRegistry, ToolResult
 
 DEFAULT_MAX_STEPS = 24
@@ -78,6 +86,7 @@ class CodingAgent:
         permission_mode: PermissionMode = PermissionMode.INSPECT,
         session_id: str = "ephemeral",
         approvals: ApprovalCoordinator | None = None,
+        user_inputs: UserInputCoordinator | None = None,
         history: tuple[ModelMessage, ...] = (),
         history_sources: tuple[ContextSource, ...] = (),
         initial_sequence: int = 0,
@@ -102,6 +111,7 @@ class CodingAgent:
         self.permission_mode = permission_mode
         self.session_id = session_id
         self.approvals = approvals
+        self.user_inputs = user_inputs
         self.history_sources = history_sources or tuple(
             ContextSource(f"history:{index}", message)
             for index, message in enumerate(history)
@@ -325,6 +335,115 @@ class CodingAgent:
                 return
 
             calls = response.tool_calls
+            if len(calls) == 1 and calls[0].name == REQUEST_USER_INPUT_TOOL_NAME:
+                call = calls[0]
+                yield self._event(
+                    "tool.requested",
+                    step=step,
+                    tool=call.name,
+                    metadata={"tool_call_id": call.id},
+                )
+                result: ToolResult | None = None
+                try:
+                    question, options = parse_user_input_call(call)
+                except UserInputProtocolError as exc:
+                    result = tool_error_result(call, exc.code, exc.message)
+                if result is None and self.user_inputs is None:
+                    result = tool_error_result(
+                        call,
+                        "INPUT_UNAVAILABLE",
+                        "Interactive user input is unavailable",
+                    )
+                if result is None:
+                    assert self.user_inputs is not None
+                    request = self.user_inputs.request(
+                        run_id=self.run_id,
+                        session_id=self.session_id,
+                        tool_call_id=call.id,
+                        question=question,
+                        options=options,
+                    )
+                    self.state = transition(self.state, RunState.WAITING_INPUT)
+                    yield self._event(
+                        "input.required",
+                        step=step,
+                        tool=call.name,
+                        metadata={
+                            "input_id": request.id,
+                            "tool_call_id": call.id,
+                            "question": request.question,
+                            "options": [
+                                {
+                                    "label": option.label,
+                                    "description": option.description,
+                                }
+                                for option in request.options
+                            ],
+                        },
+                    )
+                    try:
+                        answer = await self.user_inputs.wait(request)
+                    except UserInputExpiredError:
+                        result = tool_error_result(
+                            call,
+                            "INPUT_TIMEOUT",
+                            "User input was not provided before the timeout",
+                        )
+                    except asyncio.CancelledError:
+                        self.state = transition(self.state, RunState.CANCELLED)
+                        for event in self._cancel_pending_tool_calls(
+                            calls, 0, step, current_requested=True
+                        ):
+                            yield event
+                        yield self._event(
+                            "run.cancelled",
+                            step=step,
+                            summary=_cancelled_summary(self.language),
+                            metadata=self._terminal_metadata(
+                                incomplete_reason="RUN_CANCELLED"
+                            ),
+                        )
+                        return
+                    else:
+                        yield self._event(
+                            "input.resolved",
+                            step=step,
+                            tool=call.name,
+                            metadata={"input_id": request.id, "tool_call_id": call.id},
+                        )
+                        result = ToolResult(
+                            tool_call_id=call.id,
+                            tool=call.name,
+                            ok=True,
+                            data={"answer": answer},
+                            public_metadata={"input_id": request.id},
+                        )
+                assert result is not None
+                self.context.append(
+                    ModelMessage(
+                        role="tool",
+                        content=result.to_model_content(),
+                        tool_call_id=call.id,
+                    )
+                )
+                yield self._event(
+                    "tool.completed",
+                    step=step,
+                    tool=call.name,
+                    metadata={
+                        **result.public_metadata,
+                        **(
+                            {"error_code": result.error.code}
+                            if result.error is not None
+                            else {}
+                        ),
+                        "tool_call_id": call.id,
+                        "ok": result.ok,
+                    },
+                )
+                self.state = transition(self.state, RunState.PREPARING)
+                yield self._event("step.completed", step=step)
+                continue
             if len(calls) == 1 and calls[0].name == OUTCOME_TOOL_NAME:
                 call = calls[0]
                 yield self._event(
@@ -759,7 +878,11 @@ class CodingAgent:
                 ()
                 if summary_round
                 else (
-                    (*self.tools.definitions, OUTCOME_TOOL)
+                    (
+                        *self.tools.definitions,
+                        OUTCOME_TOOL,
+                        *((REQUEST_USER_INPUT_TOOL,) if self.user_inputs else ()),
+                    )
                     if self.include_outcome_tool
                     else self.tools.definitions
                 )
