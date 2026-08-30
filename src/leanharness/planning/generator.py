@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from leanharness.application.language import language_instruction
+from leanharness.context import ContextSource
 from leanharness.models import ModelRequest, ModelResponse
 from leanharness.permissions import PermissionMode
 from leanharness.planning.contracts import PlanStep
@@ -73,6 +74,8 @@ class PlanGenerator:
         language: str,
         run_id: str | None = None,
         session_id: str = "ephemeral",
+        history_sources: tuple[ContextSource, ...] = (),
+        context_sanitizer: Callable[[str], str] | None = None,
     ) -> None:
         self.agent = CodingAgent(
             workspace,
@@ -82,6 +85,8 @@ class PlanGenerator:
             permission_mode=PermissionMode.INSPECT,
             run_id=run_id,
             session_id=session_id,
+            history_sources=history_sources,
+            context_sanitizer=context_sanitizer,
             include_outcome_tool=False,
         )
 

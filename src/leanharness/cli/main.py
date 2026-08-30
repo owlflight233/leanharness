@@ -14,8 +14,8 @@ from leanharness.application.model_gateway import check_model
 from leanharness.application.plan_gateway import create_plan_generator
 from leanharness.application.session_gateway import (
     apply_first_task_title,
+    context_history_for_session,
     ensure_session,
-    history_for_session,
     persist_runtime_event,
 )
 from leanharness.cli.doctor import collect_diagnostics
@@ -279,7 +279,7 @@ async def _inspect(
     )
     session = apply_first_task_title(store, session, task)
     selected_permission = permission or session.permission_mode
-    history = history_for_session(store, session)
+    history = context_history_for_session(store, session)
     run = store.create_run(
         session.id,
         "coding",
@@ -314,7 +314,8 @@ async def _inspect(
         permission_mode=selected_permission,
         session_id=session.id,
         approvals=approvals,
-        history=history,
+        history_sources=history,
+        context_sanitizer=store.redactor.text,
     )
     exit_code = 0
     async for event in runtime.run(task):
@@ -393,7 +394,14 @@ async def _plan_generate(
     store = LocalStore(Path(data_dir).expanduser() if data_dir else None)
     _, session = ensure_session(store, workspace, session_id)
     session = apply_first_task_title(store, session, task)
-    generator = create_plan_generator(workspace, language=session.language or "same")
+    history = context_history_for_session(store, session)
+    generator = create_plan_generator(
+        workspace,
+        language=session.language or "same",
+        session_id=session.id,
+        history_sources=history,
+        context_sanitizer=store.redactor.text,
+    )
     generated = None
     try:
         async for item in generator.generate(task):

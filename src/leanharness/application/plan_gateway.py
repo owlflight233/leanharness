@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from leanharness.application.model_gateway import ModelClientFactory
+from leanharness.context import ContextSource
 from leanharness.models import OpenAICompatibleClient, load_model_config
 from leanharness.planning import Plan, PlanStep
 from leanharness.planning.generator import PlanGenerator
@@ -17,6 +19,8 @@ def create_plan_generator(
     run_id: str | None = None,
     session_id: str = "ephemeral",
     client_factory: ModelClientFactory = OpenAICompatibleClient,
+    history_sources: tuple[ContextSource, ...] = (),
+    context_sanitizer: Callable[[str], str] | None = None,
 ) -> PlanGenerator:
     return PlanGenerator(
         workspace,
@@ -24,6 +28,8 @@ def create_plan_generator(
         language=language,
         run_id=run_id,
         session_id=session_id,
+        history_sources=history_sources,
+        context_sanitizer=context_sanitizer,
     )
 
 

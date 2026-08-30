@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 from leanharness.application.language import detect_session_language
 from leanharness.application.plan_gateway import plan_to_dict
+from leanharness.context import ContextSource
 from leanharness.models import ModelMessage
 from leanharness.runtime.events import RuntimeEvent
 from leanharness.storage import LocalStore, MessageRecord, ProjectRecord, RunRecord, SessionRecord
 
 MAX_HISTORY_MESSAGES = 24
 MAX_HISTORY_CHARS = 32_000
+MAX_PROJECTED_HISTORY_CHARS = 64_000
+MAX_HISTORY_ANSWER_CHARS = 8_000
+MAX_RUN_EVIDENCE_CHARS = 2_000
 
 
 def ensure_session(
@@ -175,6 +181,130 @@ def history_for_session(
         size += cost
     selected.reverse()
     return tuple(ModelMessage(role=item.role, content=item.content) for item in selected)
+
+
+def context_history_for_session(
+    store: LocalStore,
+    session: SessionRecord,
+    *,
+    exclude_run_id: str | None = None,
+) -> tuple[ContextSource, ...]:
+    """Project bounded public messages and redacted run evidence.
+
+    This application adapter is the only place where the generic context layer
+    learns about LocalStore records.  It does not infer intent or rewrite the
+    user's message; it only maps durable public facts to stable source IDs.
+    """
+
+    evidence_by_run = {
+        run.id: _run_evidence(store, run)
+        for run in store.list_runs(session.id)
+        if run.id != exclude_run_id
+        and run.state in {"COMPLETED", "EXHAUSTED", "FAILED", "CANCELLED"}
+    }
+    candidates: list[ContextSource] = []
+    emitted_evidence: set[str] = set()
+    for message in store.list_messages(session.id):
+        if message.run_id == exclude_run_id or message.role not in {"user", "assistant"}:
+            continue
+        content = message.content.strip()
+        if not content:
+            continue
+        if message.role == "assistant" and len(content) > MAX_HISTORY_ANSWER_CHARS:
+            content = content[:MAX_HISTORY_ANSWER_CHARS]
+        if message.role == "assistant" and message.run_id in evidence_by_run:
+            candidates.append(evidence_by_run[message.run_id])
+            emitted_evidence.add(message.run_id)
+        candidates.append(
+            ContextSource(
+                source_id=f"message:{message.id}",
+                message=ModelMessage(role=message.role, content=content),
+            )
+        )
+    for run in store.list_runs(session.id):
+        if run.id in evidence_by_run and run.id not in emitted_evidence:
+            candidates.append(evidence_by_run[run.id])
+
+    selected: list[ContextSource] = []
+    size = 0
+    for source in reversed(candidates):
+        cost = len(source.message.content) + 64
+        if selected and size + cost > MAX_PROJECTED_HISTORY_CHARS:
+            break
+        if not selected and cost > MAX_PROJECTED_HISTORY_CHARS:
+            continue
+        selected.append(source)
+        size += cost
+    selected.reverse()
+    return tuple(selected)
+
+
+def _run_evidence(store: LocalStore, run: RunRecord) -> ContextSource:
+    terminal_evidence: dict[str, object] = {}
+    tools: list[dict[str, object]] = []
+    for event in store.list_events(run.id):
+        event_type = event.get("type")
+        metadata = event.get("metadata")
+        if (
+            event_type in {"run.completed", "run.incomplete", "run.failed", "run.cancelled"}
+            and isinstance(metadata, dict)
+            and isinstance(metadata.get("evidence"), dict)
+        ):
+            terminal_evidence = metadata["evidence"]
+        if event_type == "tool.completed" and isinstance(metadata, dict):
+            safe = {
+                key: metadata[key]
+                for key in (
+                    "path",
+                    "files",
+                    "created_paths",
+                    "profile",
+                    "operation",
+                    "exit_code",
+                    "ok",
+                    "error_code",
+                    "recoverable",
+                )
+                if key in metadata
+            }
+            tools.append({"tool": event.get("tool", "unknown"), **safe})
+    payload: dict[str, object] = {
+        "historical_run_evidence": {
+            "run_id": run.id,
+            "mode": run.mode,
+            "state": run.state,
+            "permission_mode": run.permission_mode,
+            "error_code": run.error_code,
+            "evidence": terminal_evidence,
+            "tools": tools[-12:],
+            "re_read_workspace_for_current_facts": True,
+        }
+    }
+    while True:
+        content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if len(content) <= MAX_RUN_EVIDENCE_CHARS:
+            break
+        if tools:
+            tools.pop(0)
+            payload["historical_run_evidence"]["tools"] = tools[-12:]  # type: ignore[index]
+            continue
+        evidence_json = json.dumps(terminal_evidence, ensure_ascii=False, sort_keys=True)
+        payload = {
+            "historical_run_evidence": {
+                "run_id": run.id,
+                "mode": run.mode,
+                "state": run.state,
+                "permission_mode": run.permission_mode,
+                "error_code": run.error_code,
+                "evidence_sha256": hashlib.sha256(evidence_json.encode("utf-8")).hexdigest(),
+                "evidence_compacted": True,
+                "re_read_workspace_for_current_facts": True,
+            }
+        }
+    return ContextSource(
+        source_id=f"run:{run.id}:evidence",
+        message=ModelMessage(role="system", content=content),
+    )
 
 
 def persist_runtime_event(

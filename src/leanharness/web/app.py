@@ -21,8 +21,8 @@ from leanharness.application.model_gateway import ModelClientFactory, check_mode
 from leanharness.application.plan_gateway import create_plan_generator, plan_to_dict
 from leanharness.application.session_gateway import (
     apply_first_task_title,
+    context_history_for_session,
     ensure_session,
-    history_for_session,
     persist_runtime_event,
     session_detail,
     session_to_dict,
@@ -322,7 +322,7 @@ def create_app(
         _, session = ensure_session(store, app.state.workspace, payload.session_id)
         session = apply_first_task_title(store, session, payload.task)
         active_runs.assert_available(session.id)
-        history = history_for_session(store, session)
+        history = context_history_for_session(store, session)
         run_record = store.create_run(
             session.id,
             "coding",
@@ -341,7 +341,8 @@ def create_app(
             permission_mode=session.permission_mode,
             session_id=session.id,
             approvals=approvals,
-            history=history,
+            history_sources=history,
+            context_sanitizer=store.redactor.text,
         )
         store.add_message(session.id, "user", payload.task, run_id=run_record.id)
 
@@ -391,12 +392,15 @@ def create_app(
         session = apply_first_task_title(store, session, task)
         run = store.create_run(session.id, "plan_draft", task, 8, permission_mode="inspect")
         store.add_message(session.id, "user", task, run_id=run.id)
+        history = context_history_for_session(store, session, exclude_run_id=run.id)
         generator = create_plan_generator(
             app.state.workspace,
             language=session.language or "same",
             run_id=run.id,
             session_id=session.id,
             client_factory=app.state.model_client_factory,
+            history_sources=history,
+            context_sanitizer=store.redactor.text,
         )
         generated: GeneratedPlan | None = None
         generation_events: list[RuntimeEvent] = []
@@ -449,12 +453,15 @@ def create_app(
         active_runs.assert_available(session.id)
         run = store.create_run(session.id, "plan_draft", task, 8, permission_mode="inspect")
         store.add_message(session.id, "user", task, run_id=run.id)
+        history = context_history_for_session(store, session, exclude_run_id=run.id)
         generator = create_plan_generator(
             app.state.workspace,
             language=session.language or "same",
             run_id=run.id,
             session_id=session.id,
             client_factory=app.state.model_client_factory,
+            history_sources=history,
+            context_sanitizer=store.redactor.text,
         )
         active_runs.acquire(session.id, run.id)
 

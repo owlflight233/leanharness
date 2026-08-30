@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from leanharness.application.model_gateway import ModelClientFactory
+from leanharness.context import ContextSource
 from leanharness.errors import RunInputError
 from leanharness.models import ModelMessage, OpenAICompatibleClient, load_model_config
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
@@ -28,6 +30,8 @@ def create_coding_run(
     session_id: str = "ephemeral",
     approvals: ApprovalCoordinator | None = None,
     history: tuple[ModelMessage, ...] = (),
+    history_sources: tuple[ContextSource, ...] = (),
+    context_sanitizer: Callable[[str], str] | None = None,
 ) -> CodingAgent:
     """Validate public input and create a bounded coding runtime."""
 
@@ -52,6 +56,8 @@ def create_coding_run(
         session_id=session_id,
         approvals=approvals,
         history=history,
+        history_sources=history_sources,
+        context_sanitizer=context_sanitizer,
     )
 
 
