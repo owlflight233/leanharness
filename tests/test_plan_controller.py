@@ -93,6 +93,9 @@ def test_controller_executes_all_steps_in_one_agent_context(tmp_path: Path) -> N
     assert events[-1].answer is not None
     assert "## Inspect files" in events[-1].answer
     assert "## Inspect tests" in events[-1].answer
+    assert events[-1].metadata["completed_step_ids"] == ["step-1", "step-2"]
+    assert events[-1].metadata["evidence"]["observations"] == 2
+    assert events[-1].metadata["metrics"]["model_calls"] == 4
     first_tool = next(event for event in events if event.type == "tool.requested")
     assert first_tool.metadata["plan_step"] == 1
 

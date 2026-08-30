@@ -77,6 +77,14 @@ class PlanController:
         self._on_step = on_step
         self._remaining_budget = max_steps
         self._step_answers: list[tuple[str, str]] = []
+        self._step_evidence: list[dict[str, object]] = [
+            step.evidence
+            for step in plan.steps
+            if step.state is PlanStepState.COMPLETED and isinstance(step.evidence, dict)
+        ]
+        self._completed_step_ids: list[str] = [
+            step.id for step in plan.steps if step.state is PlanStepState.COMPLETED
+        ]
         self.agent = CodingAgent(
             workspace,
             model_client,
@@ -104,6 +112,7 @@ class PlanController:
                 "run.completed",
                 answer="All enabled plan steps are complete.",
                 summary="Plan completed",
+                metadata=self._terminal_metadata(),
             )
             return
         last_answer: str | None = None
@@ -123,7 +132,9 @@ class PlanController:
                     "run.incomplete",
                     answer=answer or None,
                     summary="Plan model budget exhausted",
-                    metadata={"incomplete_reason": "PLAN_BUDGET_EXHAUSTED"},
+                    metadata=self._terminal_metadata(
+                        incomplete_reason="PLAN_BUDGET_EXHAUSTED"
+                    ),
                 )
                 return
             self._update_step(step, PlanStepState.RUNNING)
@@ -184,6 +195,8 @@ class PlanController:
                 evidence = _terminal_evidence(terminal)
                 answer = _bounded_text(terminal.answer or "", MAX_STEP_ANSWER_CHARS)
                 self._update_step(step, PlanStepState.COMPLETED, evidence=evidence)
+                self._step_evidence.append(evidence)
+                self._completed_step_ids.append(step.id)
                 if answer:
                     self._step_answers.append((step.title, answer))
                     last_answer = answer
@@ -240,6 +253,7 @@ class PlanController:
             "run.completed",
             answer=self._combined_answer() or last_answer or "All enabled plan steps are complete.",
             summary="Plan completed",
+            metadata=self._terminal_metadata(),
         )
 
     def _annotate_runtime_event(self, event: RuntimeEvent, step: PlanStep) -> RuntimeEvent:
@@ -254,6 +268,20 @@ class PlanController:
             f"## {title}\n{answer}" for title, answer in self._step_answers
         )
         return _bounded_text(rendered, MAX_PLAN_ANSWER_CHARS)
+
+    def _terminal_metadata(
+        self,
+        *,
+        incomplete_reason: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "plan_id": self.plan.id,
+            "completed_step_ids": list(self._completed_step_ids),
+            "evidence": _aggregate_evidence(self._step_evidence),
+            "metrics": self.agent.metrics.to_dict(),
+            "context": self.agent.metrics.context_dict(),
+            **({"incomplete_reason": incomplete_reason} if incomplete_reason else {}),
+        }
 
     def _update_step(
         self,
@@ -320,3 +348,42 @@ def _terminal_evidence(event: RuntimeEvent) -> dict[str, object]:
     metadata = event.metadata or {}
     evidence = metadata.get("evidence")
     return evidence if isinstance(evidence, dict) else {}
+
+
+def _aggregate_evidence(items: list[dict[str, object]]) -> dict[str, object]:
+    count_keys = (
+        "observations",
+        "mutation_attempts",
+        "mutations",
+        "verification_attempts",
+        "verifications",
+    )
+    counts = {
+        key: sum(
+            value
+            for item in items
+            if isinstance((value := item.get(key)), int)
+        )
+        for key in count_keys
+    }
+    changed_files = sorted(
+        {
+            str(path)
+            for item in items
+            for path in item.get("changed_files", [])
+            if isinstance(path, str)
+        }
+    )
+    unresolved_errors = list(
+        dict.fromkeys(
+            str(code)
+            for item in items
+            for code in item.get("unresolved_errors", [])
+            if isinstance(code, str)
+        )
+    )
+    return {
+        **counts,
+        "changed_files": changed_files,
+        "unresolved_errors": unresolved_errors,
+    }

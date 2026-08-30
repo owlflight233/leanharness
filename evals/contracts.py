@@ -7,6 +7,7 @@ from typing import Literal
 
 ExpectedTerminal = Literal["run.completed", "run.incomplete", "run.cancelled"]
 ApprovalPolicy = Literal["none", "approve", "reject"]
+EvaluationMode = Literal["coding", "plan"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,10 +20,18 @@ class FileExpectation:
 
 
 @dataclass(frozen=True, slots=True)
+class PlanStepSpec:
+    title: str
+    instruction: str
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationScenario:
     id: str
     task: str
     permission_mode: str
+    mode: EvaluationMode = "coding"
+    plan_steps: tuple[PlanStepSpec, ...] = ()
     setup_files: dict[str, str] = field(default_factory=dict)
     expected_files: tuple[FileExpectation, ...] = ()
     expected_terminal: ExpectedTerminal = "run.completed"

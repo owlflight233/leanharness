@@ -8,6 +8,7 @@ from evals.contracts import (
     EvaluationReport,
     EvaluationScenario,
     FileExpectation,
+    PlanStepSpec,
 )
 from evals.runner import evaluate_scenario, main
 
@@ -208,6 +209,72 @@ def test_evaluation_resolves_required_model_input_and_records_it(tmp_path: Path)
         for message in model.requests[1].messages
         if message.role == "tool" and message.tool_call_id == "input-1"
     )
+
+
+def test_plan_evaluation_aggregates_mutation_and_verification_evidence(
+    tmp_path: Path,
+) -> None:
+    scenario = EvaluationScenario(
+        id="plan",
+        task="Create and verify a module.",
+        permission_mode="unrestricted",
+        mode="plan",
+        plan_steps=(
+            PlanStepSpec("Create", "Create arithmetic.py and its test."),
+            PlanStepSpec("Verify", "Run pytest."),
+        ),
+        expected_files=(
+            FileExpectation("arithmetic.py", contains=("def add",)),
+            FileExpectation("test_arithmetic.py", contains=("test_add",)),
+        ),
+        require_mutation=True,
+        require_verification=True,
+        max_steps=8,
+    )
+    model = ScriptedModel(
+        [
+            ModelResponse(
+                content="",
+                tool_calls=(
+                    ToolCall(
+                        "write-code",
+                        "workspace_write",
+                        {
+                            "path": "arithmetic.py",
+                            "content": "def add(a, b):\n    return a + b\n",
+                            "mode": "create",
+                        },
+                    ),
+                    ToolCall(
+                        "write-test",
+                        "workspace_write",
+                        {
+                            "path": "test_arithmetic.py",
+                            "content": (
+                                "from arithmetic import add\n\n\n"
+                                "def test_add():\n    assert add(2, 3) == 5\n"
+                            ),
+                            "mode": "create",
+                        },
+                    ),
+                ),
+            ),
+            outcome("completed", "Created the module and test."),
+            tool_response(
+                "verify",
+                "workspace_command",
+                {"profile": "python-test", "args": ["test_arithmetic.py", "-q"]},
+            ),
+            outcome("completed", "Pytest passed."),
+        ]
+    )
+
+    result = run_eval(scenario, model, tmp_path)
+
+    assert result.passed is True
+    assert result.terminal == "run.completed"
+    assert result.changed_files == ("arithmetic.py", "test_arithmetic.py")
+    assert result.model_calls == 4
 
 
 def test_report_aggregates_without_answer_or_source_text() -> None:

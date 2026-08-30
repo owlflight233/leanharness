@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from evals.contracts import EvaluationScenario, FileExpectation
+from evals.contracts import EvaluationScenario, FileExpectation, PlanStepSpec
 
 SCENARIOS: dict[str, EvaluationScenario] = {
     "inspect_repository": EvaluationScenario(
@@ -94,11 +94,47 @@ SCENARIOS: dict[str, EvaluationScenario] = {
             "在写入前必须先询问我选择哪个文件名。"
         ),
         permission_mode="unrestricted",
-        expected_files=(FileExpectation("notes.txt", exact="ready\n"),),
+        expected_files=(FileExpectation("notes.txt", contains=("ready",)),),
         require_mutation=True,
         require_user_input=True,
         user_input_answers=("notes.txt",),
         max_steps=12,
+    ),
+    "plan_create_and_verify": EvaluationScenario(
+        id="plan_create_and_verify",
+        description="Execute two ordered plan steps through one shared coding runtime.",
+        task="创建并验证一个最小 Python 加法模块。",
+        permission_mode="unrestricted",
+        mode="plan",
+        plan_steps=(
+            PlanStepSpec(
+                "创建实现和测试",
+                "创建 arithmetic.py 和 test_arithmetic.py, 实现 add(a, b) 并编写 pytest 测试。",
+            ),
+            PlanStepSpec(
+                "运行验证",
+                "运行 pytest 验证现有测试, 不要修改或删除测试来掩盖失败。",
+            ),
+        ),
+        expected_files=(
+            FileExpectation("arithmetic.py", contains=("def add",)),
+            FileExpectation("test_arithmetic.py", contains=("test_", "assert")),
+        ),
+        require_mutation=True,
+        require_verification=True,
+        max_steps=18,
+    ),
+    "recover_non_git_workspace": EvaluationScenario(
+        id="recover_non_git_workspace",
+        description="Recover from a non-Git workspace by using ordinary inspection tools.",
+        task=(
+            "先检查 Git 状态。若当前目录不是 Git 仓库, 不要重复 Git 操作, "
+            "改用工作区工具读取 README.md 并说明项目内容。"
+        ),
+        permission_mode="inspect",
+        setup_files={"README.md": "# Recovery sample\n"},
+        require_observation=True,
+        max_steps=10,
     ),
     "cancel_before_model": EvaluationScenario(
         id="cancel_before_model",

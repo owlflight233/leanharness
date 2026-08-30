@@ -20,13 +20,14 @@ from evals.contracts import (
     FileExpectation,
 )
 from evals.scenarios import SCENARIOS
+from leanharness.application.model_settings import load_effective_model_config
 from leanharness.models import (
     ModelRequest,
     ModelResponse,
     OpenAICompatibleClient,
-    load_model_config,
 )
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
+from leanharness.planning import Plan, PlanController, PlanEvent, PlanState, PlanStep
 from leanharness.runtime import CodingAgent, RuntimeEvent
 from leanharness.runtime.user_input import UserInputCoordinator
 
@@ -69,32 +70,71 @@ async def evaluate_scenario(
             if scenario.require_user_input or scenario.user_input_answers
             else None
         )
-        agent = CodingAgent(
-            workspace,
-            model_client,
-            max_steps=scenario.max_steps,
-            cancel_event=cancel_event,
-            permission_mode=PermissionMode(scenario.permission_mode),
-            approvals=coordinator,
-            user_inputs=user_inputs,
-            language="zh",
-        )
-        events: list[RuntimeEvent] = []
+        if scenario.mode == "plan":
+            if not scenario.plan_steps:
+                raise ValueError("Plan evaluation requires at least one plan step")
+            plan = Plan(
+                id=f"eval-plan-{scenario.id}",
+                session_id=f"eval-session-{scenario.id}",
+                title=scenario.id,
+                task=scenario.task,
+                state=PlanState.RUNNING,
+                version=1,
+                source_markdown="",
+                run_id=f"eval-run-{scenario.id}",
+                created_at="evaluation",
+                updated_at="evaluation",
+                steps=tuple(
+                    PlanStep(
+                        id=f"eval-step-{index}",
+                        sequence=index,
+                        title=spec.title,
+                        instruction=spec.instruction,
+                    )
+                    for index, spec in enumerate(scenario.plan_steps, start=1)
+                ),
+            )
+            controller = PlanController(
+                plan,
+                workspace,
+                model_client,
+                max_steps=scenario.max_steps,
+                cancel_event=cancel_event,
+                permission_mode=PermissionMode(scenario.permission_mode),
+                approvals=coordinator,
+                language="zh",
+            )
+            stream = controller.run()
+            run_id = plan.run_id or ""
+        else:
+            agent = CodingAgent(
+                workspace,
+                model_client,
+                max_steps=scenario.max_steps,
+                cancel_event=cancel_event,
+                permission_mode=PermissionMode(scenario.permission_mode),
+                approvals=coordinator,
+                user_inputs=user_inputs,
+                language="zh",
+            )
+            stream = agent.run(scenario.task)
+            run_id = agent.run_id
+        events: list[RuntimeEvent | PlanEvent] = []
         pending_answers = iter(scenario.user_input_answers)
-        async for event in agent.run(scenario.task):
+        async for event in stream:
             events.append(event)
             if event.type == "approval.required" and coordinator is not None:
                 approval_id = str((event.metadata or {})["approval_id"])
                 decision = "approve" if scenario.approval_policy == "approve" else "reject"
-                coordinator.resolve(agent.run_id, approval_id, decision)
+                coordinator.resolve(run_id, approval_id, decision)
             if event.type == "input.required" and user_inputs is not None:
                 try:
                     answer = next(pending_answers)
                 except StopIteration:
-                    agent.cancel_event.set()
+                    cancel_event.set()
                 else:
                     user_inputs.resolve(
-                        agent.run_id,
+                        run_id,
                         str((event.metadata or {})["input_id"]),
                         answer,
                     )
@@ -114,7 +154,7 @@ def _assess(
     repetition: int,
     workspace: Path,
     initial_hashes: dict[str, str],
-    events: list[RuntimeEvent],
+    events: list[RuntimeEvent | PlanEvent],
     *,
     duration_ms: int,
 ) -> EvaluationResult:
@@ -242,7 +282,7 @@ def _metric(metrics: dict[str, object], key: str) -> int:
 
 
 async def _run_selected(ids: Sequence[str], repetitions: int) -> EvaluationReport:
-    config = load_model_config()
+    config = load_effective_model_config()
     client = OpenAICompatibleClient(config)
     started = datetime.now(UTC)
     results = []
