@@ -268,6 +268,7 @@ def test_repeated_invalid_mutations_stall_by_target_even_when_arguments_change(
     assert events[-1].type == "run.failed"
     assert events[-1].error_code == "RUN_STALLED"
     assert events[-1].metadata["incomplete_reason"] == "REPEATED_TOOL_FAILURE"
+    assert events[-1].metadata["primary_error_code"] == "WRITE_STALE"
     assert len(model.requests) == 3
 
 
@@ -287,26 +288,41 @@ def test_tool_error_returns_to_model_and_can_recover(tmp_path: Path) -> None:
     assert json.loads(first_result.content)["error"]["code"] == "PATH_NOT_FOUND"
 
 
-def test_repeated_git_inspection_stops_in_non_repository_workspace(tmp_path: Path) -> None:
+def test_git_inspection_is_disabled_and_model_can_recover_in_non_repository_workspace(
+    tmp_path: Path,
+) -> None:
     model = ScriptedModel(
         [
             tool_response("git-1", "git_inspect", {"operation": "status"}),
             tool_response("git-2", "git_inspect", {"operation": "log"}),
+            tool_response("list-1", "workspace_list", {"path": "."}),
+            ModelResponse(content="The workspace is not a Git repository and is empty."),
         ]
     )
 
     events = collect(ReadOnlyAgent(tmp_path, model), "Inspect the repository")
 
-    assert events[-1].type == "run.failed"
-    assert events[-1].error_code == "GIT_NOT_REPOSITORY"
-    assert events[-1].metadata["incomplete_reason"] == "GIT_NOT_REPOSITORY"
-    assert events[-1].metadata["evidence"]["observations"] == 0
-    completed = [event for event in events if event.type == "tool.completed"]
+    assert events[-1].type == "run.completed"
+    assert events[-1].metadata["evidence"]["observations"] == 1
+    completed = [
+        event
+        for event in events
+        if event.type == "tool.completed" and "error_code" in event.metadata
+    ]
     assert [event.metadata["error_code"] for event in completed] == [
         "GIT_NOT_REPOSITORY",
-        "GIT_NOT_REPOSITORY",
+        "TOOL_UNAVAILABLE",
     ]
-    assert len(model.requests) == 2
+    assert any(
+        event.type == "tool.completed"
+        and event.tool == "workspace_list"
+        and event.metadata["ok"] is True
+        for event in events
+    )
+    assert len(model.requests) == 4
+    assert all(
+        definition.name != "git_inspect" for definition in model.requests[2].tools
+    )
 
 
 def test_tool_call_overflow_returns_recoverable_results_and_can_continue(tmp_path: Path) -> None:

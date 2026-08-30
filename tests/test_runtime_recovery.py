@@ -76,7 +76,8 @@ def test_git_repository_failure_groups_different_operations() -> None:
     second = tracker.record_result(log, failed(log, "GIT_NOT_REPOSITORY"))
 
     assert first.guidance is not None
-    assert second.terminal_error_code == "GIT_NOT_REPOSITORY"
+    assert second.terminal_error_code is None
+    assert second.guidance is not None
 
 
 def test_recovery_guidance_uses_runtime_language() -> None:
@@ -93,7 +94,7 @@ def test_recovery_guidance_uses_runtime_language() -> None:
     )
 
 
-def test_terminal_recovery_message_uses_runtime_language() -> None:
+def test_git_recovery_guidance_remains_non_terminal() -> None:
     tracker = ToolFailureTracker("zh")
     calls = [call(f"git-{index}", "git_inspect", operation="status") for index in range(2)]
 
@@ -104,8 +105,25 @@ def test_terminal_recovery_message_uses_runtime_language() -> None:
         calls[1], failed(calls[1], "GIT_NOT_REPOSITORY")
     )
 
-    assert decision.terminal_error_code == "GIT_NOT_REPOSITORY"
-    assert decision.terminal_message == "当前工作区不是 Git 仓库\uFF0C重复的 Git 检查已停止。"
+    assert decision.terminal_error_code is None
+    assert decision.guidance == (
+        "当前工作区不是 Git 仓库。不要再次调用 git_inspect\uFF0C"
+        "请继续使用工作区工具。"
+    )
+
+
+def test_command_failures_provide_immediate_recovery_guidance() -> None:
+    tracker = ToolFailureTracker("zh")
+    command = call("command", "workspace_command", profile="ruff")
+    decision = tracker.record_result(command, failed(command, "COMMAND_FAILED"))
+    assert decision.terminal_error_code is None
+    assert "stdout/stderr" in (decision.guidance or "")
+
+    denied = call("denied", "workspace_command", profile="ruff")
+    decision = tracker.record_result(
+        denied, failed(denied, "COMMAND_ARGUMENT_DENIED")
+    )
+    assert "允许 profile" in (decision.guidance or "")
 
 
 def test_user_rejections_never_trigger_automatic_stall() -> None:

@@ -124,6 +124,11 @@ class CodingAgent:
         self.metrics = RunMetrics()
         self._protocol_recovery = ModelProtocolRecovery()
         self._failure_tracker = ToolFailureTracker(self.language)
+        # Tools can become unavailable after a deterministic environment fact
+        # (for example, git_inspect in a non-repository workspace).  The model
+        # still owns the next action; this set only projects the facts observed
+        # by the runtime into subsequent tool definitions.
+        self._disabled_tools: set[str] = set()
         self._model_step = ModelStepExecutor(
             context=self.context,
             model_client=self.model_client,
@@ -152,6 +157,7 @@ class CodingAgent:
         self.state = RunState.CREATED
         self.evidence = CompletionLedger()
         self._failure_tracker.reset()
+        self._disabled_tools.clear()
         self._protocol_recovery.reset()
         async for event in self._run_task(task, initialize_context=False):
             yield event
@@ -642,6 +648,12 @@ class CodingAgent:
                                 "TOOL_REPEATED",
                                 "Identical tool call was already attempted twice",
                             )
+                        elif call.name in self._disabled_tools:
+                            result = _runtime_tool_error(
+                                call,
+                                "TOOL_UNAVAILABLE",
+                                _disabled_tool_message(call.name, self.language),
+                            )
                         else:
                             result = None
                             if call.name == OUTCOME_TOOL_NAME:
@@ -810,6 +822,12 @@ class CodingAgent:
                     step_result_bytes += content_bytes
                     self.evidence.record(call.name, result)
                     failure = self._failure_tracker.record_result(call, result)
+                    if (
+                        call.name == "git_inspect"
+                        and result.error is not None
+                        and result.error.code == "GIT_NOT_REPOSITORY"
+                    ):
+                        self._disabled_tools.add(call.name)
                     if failure.guidance:
                         recovery_guidance.append(failure.guidance)
                     self.context.append(
@@ -834,17 +852,23 @@ class CodingAgent:
                         },
                     )
                     if failure.terminal_error_code:
+                        terminal_code = failure.terminal_error_code
                         self.state = transition(self.state, RunState.FAILED)
                         yield self._event(
                             "run.failed",
                             step=step,
-                            error_code=failure.terminal_error_code,
+                            error_code=terminal_code,
                             error_message=failure.terminal_message,
                             metadata=self._terminal_metadata(
                                 incomplete_reason=(
                                     failure.incomplete_reason
-                                    or failure.terminal_error_code
-                                )
+                                    or terminal_code
+                                ),
+                                **(
+                                    {"primary_error_code": self.evidence.primary_error_code}
+                                    if self.evidence.primary_error_code
+                                    else {}
+                                ),
                             ),
                         )
                         return
@@ -920,17 +944,24 @@ class CodingAgent:
         self,
         *,
         incomplete_reason: str | None = None,
+        **extra: object,
     ) -> dict[str, object]:
         return {
             "evidence": self.evidence.public_summary(),
             "metrics": self.metrics.to_dict(),
             "context": self.metrics.context_dict(),
+            **extra,
             **({"incomplete_reason": incomplete_reason} if incomplete_reason else {}),
         }
 
     def _model_request(
         self, messages: tuple[ModelMessage, ...], summary_round: bool
     ) -> ModelRequest:
+        available_definitions = tuple(
+            definition
+            for definition in self.tools.definitions
+            if definition.name not in self._disabled_tools
+        )
         return ModelRequest(
             messages=messages,
             max_tokens=2_048,
@@ -939,12 +970,14 @@ class CodingAgent:
                 if summary_round
                 else (
                     (
-                        *self.tools.definitions,
+                        *available_definitions,
+                        # Definitions for tools disabled by observed workspace
+                        # facts are intentionally omitted on later requests.
                         OUTCOME_TOOL,
                         *((REQUEST_USER_INPUT_TOOL,) if self.user_inputs else ()),
                     )
                     if self.include_outcome_tool
-                    else self.tools.definitions
+                    else available_definitions
                 )
             ),
             tool_choice="none" if summary_round else "auto",
@@ -1144,6 +1177,15 @@ def _safe_arguments(call: ToolCall) -> dict[str, object]:
     if isinstance(query := call.arguments.get("query"), str):
         safe["query"] = query[:120]
     return safe
+
+
+def _disabled_tool_message(tool: str, language: str) -> str:
+    if language == "zh":
+        return f"{tool} 已根据工作区事实标记为不可用\uFF1B请使用其他可用工具继续。"
+    return (
+        f"{tool} was disabled by an observed workspace fact; "
+        "continue with another available tool."
+    )
 
 
 def _approval_summary(call: ToolCall, language: str) -> str:

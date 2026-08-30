@@ -89,14 +89,14 @@ class ToolFailureTracker:
         count = self._failure_counts.get(key, 0) + 1
         self._failure_counts[key] = count
         if code == "GIT_NOT_REPOSITORY":
-            if count >= 2:
-                return FailureDecision(
-                    guidance=_git_guidance(self._language),
-                    terminal_error_code="GIT_NOT_REPOSITORY",
-                    terminal_message=_git_terminal_message(self._language),
-                    incomplete_reason="GIT_NOT_REPOSITORY",
-                )
+            # A missing repository is a stable workspace fact, not a retryable
+            # failure.  Feed that fact back to the model and let the loop choose
+            # another available inspection tool.
             return FailureDecision(guidance=_git_guidance(self._language))
+        if code == "COMMAND_FAILED":
+            return FailureDecision(guidance=_command_failure_guidance(self._language))
+        if code == "COMMAND_ARGUMENT_DENIED":
+            return FailureDecision(guidance=_command_argument_guidance(self._language))
         if _should_stall_on_tool_error(code) and count >= 3:
             return FailureDecision(
                 terminal_error_code="RUN_STALLED",
@@ -189,6 +189,33 @@ def _git_terminal_message(language: str) -> str:
     if language == "zh":
         return "当前工作区不是 Git 仓库\uFF0C重复的 Git 检查已停止。"
     return "The workspace is not a Git repository; repeated Git inspection was stopped."
+
+
+def _command_failure_guidance(language: str) -> str:
+    if language == "zh":
+        return (
+            "验证命令已经执行但返回非零退出码。请根据工具结果中的 stdout/stderr "
+            "修正实际问题\uFF1B不要猜测工作目录\uFF0C也不要重复相同命令。"
+        )
+    return (
+        "The verification command ran but returned a non-zero exit code. Use the bounded "
+        "stdout/stderr in the tool result to fix the actual issue; do not guess the working "
+        "directory or repeat the same command."
+    )
+
+
+def _command_argument_guidance(language: str) -> str:
+    if language == "zh":
+        return (
+            "命令参数不被允许。请使用工具定义中的允许 profile 及其默认参数\uFF0C"
+            "不要传入解释器\u3001"
+            "安装、命令连接符或任意脚本参数。"
+        )
+    return (
+        "The command arguments are not allowed. Use an allowed profile with its default "
+        "arguments; do not pass interpreters, install steps, command chaining, or arbitrary "
+        "script arguments."
+    )
 
 
 def _stall_terminal_message(language: str) -> str:

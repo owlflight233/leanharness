@@ -23,6 +23,11 @@ class CompletionLedger:
     changed_files: set[str] = field(default_factory=set)
     unresolved_errors: list[str] = field(default_factory=list)
 
+    @property
+    def primary_error_code(self) -> str | None:
+        """Return the first unresolved error, preserving the causal failure."""
+        return self.unresolved_errors[0] if self.unresolved_errors else None
+
     def record(self, tool: str, result: ToolResult) -> None:
         if tool in {"workspace_mkdir", "workspace_patch", "workspace_write", "workspace_edit"}:
             self.mutation_attempts += 1
