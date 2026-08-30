@@ -88,12 +88,14 @@ runs, and ordered run events. A separate append-only JSONL trace is written for
 each run under the application data directory. Both sinks receive the same
 `TraceRedactor` output: credentials, hidden reasoning, and raw tool/file
 content are excluded. Replaying traces can render what happened but does not
-replace relational recovery. Session history is presentation-only and is not
-automatically replayed into a subsequent model request. Coding runs receive at
-most one 4 KiB continuation capsule from the immediately preceding terminal
-run. It contains only the previous task, terminal state, changed file names,
-public incomplete/error reason, and current permission mode. The model must
-still re-read the workspace before making claims.
+replace relational recovery. New runs in a session receive a bounded history of
+recent public `user` and `assistant` chat messages (at most 24 messages and
+32,000 characters). Tool results, progress events, hidden reasoning, and Plan
+Mode messages are excluded. Coding runs also receive at most one 4 KiB
+continuation capsule from the immediately preceding terminal run. It contains
+only the previous task, terminal state, changed file names, public
+incomplete/error reason, and current permission mode. The model must still
+re-read the workspace before making claims.
 
 Storage code separates immutable records, forward-only migrations, the shared
 redaction policy, and SQLite operations into `storage/records.py`,

@@ -33,6 +33,7 @@ _NEGATED_VERIFICATION = re.compile(
 _OBSERVATION_TOOLS = frozenset(
     {"workspace_list", "workspace_read", "workspace_search", "git_inspect"}
 )
+_MUTATION_TOOLS = frozenset({"workspace_mkdir", "workspace_patch"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +49,18 @@ class TaskRequirements:
             mutation_required=bool(_MUTATION_INTENT.search(normalized)),
             verification_required=bool(_VERIFICATION_INTENT.search(verification_text)),
         )
+
+
+def missing_capabilities(
+    requirements: TaskRequirements, available_tools: set[str] | frozenset[str]
+) -> tuple[str, ...]:
+    """Return capabilities required by a task but absent from the tool registry."""
+    missing: list[str] = []
+    if requirements.mutation_required and not (_MUTATION_TOOLS & available_tools):
+        missing.append("workspace_mutation")
+    if requirements.verification_required and "workspace_command" not in available_tools:
+        missing.append("workspace_verification")
+    return tuple(missing)
 
 
 @dataclass(slots=True)

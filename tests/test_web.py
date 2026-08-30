@@ -82,6 +82,26 @@ class PlanModelClient:
         return ModelResponse(content="# Demo plan\n1. **Inspect** - Read the project")
 
 
+class HistoryRuntimeClient:
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def complete(self, request):
+        self.requests.append(request)
+        if len(self.requests) % 2 == 1:
+            return ModelResponse(
+                content="Inspecting the workspace.",
+                tool_calls=(
+                    ToolCall(
+                        id=f"list-{len(self.requests)}",
+                        name="workspace_list",
+                        arguments={"path": "."},
+                    ),
+                ),
+            )
+        return ModelResponse(content="The workspace was inspected.")
+
+
 def test_health_contract_is_exact(tmp_path: Path) -> None:
     config = build_config(workspace=tmp_path, data_dir=tmp_path / "data")
     app = create_app(config, frontend_dir=tmp_path / "missing-frontend")
@@ -276,6 +296,36 @@ def test_model_check_and_chat_contracts(
         "turn.completed",
     ]
     assert events[1]["content"] == "hello 世界"
+
+
+def test_coding_runs_replay_bounded_public_history_with_same_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LEANHARNESS_MODEL_BASE_URL", "https://models.example.test/v1")
+    monkeypatch.setenv("LEANHARNESS_MODEL_NAME", "example-model")
+    client = HistoryRuntimeClient()
+    app = create_app(
+        build_config(workspace=tmp_path, data_dir=tmp_path / "data"),
+        model_client_factory=lambda _config: client,
+    )
+
+    first = post(app, "/api/v1/runs", json_body={"task": "Inspect the workspace"})
+    first_events = [json.loads(line) for line in first.text.splitlines()]
+    session_id = first_events[0]["session_id"]
+    second = post(
+        app,
+        "/api/v1/runs",
+        json_body={"task": "What did we do before?", "session_id": session_id},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    second_request = client.requests[2]
+    contents = [message.content for message in second_request.messages]
+    assert "Inspect the workspace" in contents
+    assert "The workspace was inspected." in contents
+    assert "What did we do before?" in contents
 
 
 @pytest.mark.parametrize("body", [{}, {"message": "   "}, {"message": "x" * 32_001}])

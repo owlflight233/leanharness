@@ -12,6 +12,10 @@ all enabled steps through one `CodingAgent` and one persisted run. Each step
 has an evidence requirement inferred from its instruction: analysis needs a
 workspace observation, changes need a successful patch, and verification needs
 an allowed command. A step cannot be marked complete without that evidence.
+Before a step starts, the runtime checks that the session permission mode exposes
+the tools required by that evidence rule. If it does not, the plan is paused with
+`PERMISSION_INSUFFICIENT` without issuing a model request; the session permission
+is never raised automatically.
 
 Plans are local records in the same SQLite database as sessions and runs.
 Runtime events are appended to the run trace after redaction. A process restart

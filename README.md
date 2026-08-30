@@ -102,10 +102,14 @@ uv run leanharness serve
 `LEANHARNESS_MODEL_API_KEY` may be omitted for a local endpoint that does not
 require authentication. Plain HTTP is accepted only for `localhost`,
 `127.0.0.1`, or `::1`. Chat and coding runs persist public messages,
-summaries, and redacted event traces locally, but old messages are never
-replayed into a later model request. A coding run may receive one bounded
-public capsule from the immediately preceding run so short follow-ups such as
-permission changes retain their task reference without importing full history.
+summaries, and redacted event traces locally. A new run in the same session
+receives a bounded history of recent public user and assistant chat messages
+(up to 24 messages and 32,000 characters), so follow-ups such as "what did we
+do before" have conversational context. Tool results, progress events, hidden
+reasoning, and Plan Mode messages are excluded. Coding runs may also receive
+one bounded public capsule from the immediately preceding run so permission
+changes and incomplete work retain their task reference; the workspace is
+still re-read before making claims.
 Workspace changes are disabled in
 `inspect`, require per-call confirmation in `approve`, and execute directly in
 `unrestricted` while still enforcing tool-level path, command, timeout, and

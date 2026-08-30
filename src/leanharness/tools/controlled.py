@@ -445,12 +445,27 @@ class GitInspectTool:
         stdout = _bounded_output(completed.stdout)
         stderr = _bounded_output(completed.stderr)
         if completed.returncode != 0:
+            not_repo = (
+                completed.returncode == 128
+                and "not a git repository" in completed.stderr.decode(
+                    "utf-8", errors="replace"
+                ).lower()
+            )
             return ToolResult(
                 tool_call_id,
                 self.definition.name,
                 False,
-                error=_tool_error("GIT_FAILED", "Git inspection returned a non-zero exit code"),
-                public_metadata={"operation": operation, "exit_code": completed.returncode},
+                error=_tool_error(
+                    "GIT_NOT_REPOSITORY" if not_repo else "GIT_FAILED",
+                    "Workspace is not a Git repository"
+                    if not_repo
+                    else "Git inspection returned a non-zero exit code",
+                ),
+                public_metadata={
+                    "operation": operation,
+                    "exit_code": completed.returncode,
+                    **({"repository": False} if not_repo else {}),
+                },
             )
         metadata = {
             "operation": operation,

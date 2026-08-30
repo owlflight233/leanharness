@@ -11,7 +11,7 @@ from typing import Any
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.planning.contracts import Plan, PlanStep, PlanStepState
 from leanharness.runtime import CodingAgent, RuntimeEvent
-from leanharness.runtime.completion import TaskRequirements
+from leanharness.runtime.completion import TaskRequirements, missing_capabilities
 from leanharness.runtime.loop import RuntimeModelClient
 from leanharness.tools import ToolRegistry
 
@@ -127,6 +127,43 @@ class PlanController:
                     metadata={"incomplete_reason": "PLAN_BUDGET_EXHAUSTED"},
                 )
                 return
+            requirements = TaskRequirements.infer(step.instruction)
+            missing = missing_capabilities(
+                requirements, {definition.name for definition in self.agent.tools.definitions}
+            )
+            if missing:
+                self._update_step(step, PlanStepState.PENDING, error_code="PERMISSION_INSUFFICIENT")
+                message = (
+                    "当前会话权限无法满足此计划步骤: " + ", ".join(missing)
+                    if self.agent.language == "zh"
+                    else "The current permission mode cannot satisfy this plan step: "
+                    + ", ".join(missing)
+                )
+                yield self._event(
+                    "plan.paused",
+                    step=step.sequence,
+                    summary=message,
+                    metadata={
+                        "step_id": step.id,
+                        "missing_capabilities": list(missing),
+                        "permission_mode": self.agent.permission_mode.value,
+                    },
+                    error_code="PERMISSION_INSUFFICIENT",
+                    error_message=message,
+                )
+                yield self._runtime_event(
+                    "run.incomplete",
+                    step=step.sequence,
+                    summary=message,
+                    metadata={
+                        "incomplete_reason": "PERMISSION_INSUFFICIENT",
+                        "missing_capabilities": list(missing),
+                        "permission_mode": self.agent.permission_mode.value,
+                    },
+                    error_code="PERMISSION_INSUFFICIENT",
+                    error_message=message,
+                )
+                return
             self._update_step(step, PlanStepState.RUNNING)
             yield self._event(
                 "plan.step.started",
@@ -135,7 +172,6 @@ class PlanController:
                 metadata={"step_id": step.id, "instruction": step.instruction},
             )
             task = _step_task(self.plan, step, completed_titles)
-            requirements = TaskRequirements.infer(step.instruction)
             self.agent.max_steps = self._remaining_budget
             self.agent.set_event_sequence(self._sequence)
             if index == 0:

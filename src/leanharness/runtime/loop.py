@@ -14,7 +14,11 @@ from leanharness.context import ContextBudgetError, ContextStore
 from leanharness.errors import ApprovalExpiredError, ModelError
 from leanharness.models import ModelMessage, ModelRequest, ModelResponse, ToolCall
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
-from leanharness.runtime.completion import CompletionLedger, TaskRequirements
+from leanharness.runtime.completion import (
+    CompletionLedger,
+    TaskRequirements,
+    missing_capabilities,
+)
 from leanharness.runtime.continuation import ContinuationContext
 from leanharness.runtime.events import RuntimeEvent, RuntimeEventType
 from leanharness.runtime.metrics import RunMetrics
@@ -155,6 +159,22 @@ class CodingAgent:
                 self.context.append(message)
         self.context.append(ModelMessage(role="user", content=validated_task))
         yield self._event("run.started", summary=_run_started_summary(self.language))
+
+        missing = missing_capabilities(
+            requirements, {definition.name for definition in self.tools.definitions}
+        )
+        if missing:
+            self.state = transition(self.state, RunState.FAILED)
+            yield self._event(
+                "run.failed",
+                error_code="PERMISSION_INSUFFICIENT",
+                error_message=_capability_message(missing, self.language),
+                metadata={
+                    "missing_capabilities": list(missing),
+                    "permission_mode": self.permission_mode.value,
+                },
+            )
+            return
 
         for step in range(1, self.max_steps + 1):
             if self.cancel_event.is_set():
@@ -451,6 +471,20 @@ class CodingAgent:
                             "ok": result.ok,
                         },
                     )
+                    if result.error and result.error.code == "GIT_NOT_REPOSITORY":
+                        failure_key = (call.name, result.error.code)
+                        if self._failure_counts.get(failure_key, 0) >= 2:
+                            self.state = transition(self.state, RunState.FAILED)
+                            yield self._event(
+                                "run.failed",
+                                step=step,
+                                error_code="GIT_NOT_REPOSITORY",
+                                error_message=(
+                                    "The workspace is not a Git repository; repeated Git "
+                                    "inspection was stopped."
+                                ),
+                            )
+                            return
                 if recovery_guidance:
                     self.context.append(
                         ModelMessage(role="user", content="\n".join(recovery_guidance))
@@ -512,6 +546,11 @@ class CodingAgent:
         key = (call.name, result.error.code)
         count = self._failure_counts.get(key, 0) + 1
         self._failure_counts[key] = count
+        if result.error.code == "GIT_NOT_REPOSITORY":
+            return (
+                "This workspace is not a Git repository. Do not call git_inspect again; "
+                "continue with workspace tools."
+            )
         if count != 2:
             return None
         return (
@@ -681,6 +720,13 @@ def _approval_summary(call: ToolCall, language: str) -> str:
 
 def _run_started_summary(language: str) -> str:
     return "编码任务已开始" if language == "zh" else "Coding run started"
+
+
+def _capability_message(missing: tuple[str, ...], language: str) -> str:
+    capabilities = ", ".join(missing)
+    if language == "zh":
+        return f"当前会话权限无法满足此任务: {capabilities}"
+    return f"The current permission mode cannot satisfy this task: {capabilities}"
 
 
 def _completed_summary(language: str) -> str:

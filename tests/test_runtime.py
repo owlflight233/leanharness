@@ -143,6 +143,38 @@ def test_mutation_task_without_successful_patch_is_not_completed(tmp_path: Path)
     assert failed_patch.metadata["error_code"] == "PATCH_INVALID"
 
 
+def test_mutation_task_fails_before_model_when_permission_has_no_mutation_tools(
+    tmp_path: Path,
+) -> None:
+    model = ScriptedModel([])
+
+    events = collect(
+        CodingAgent(tmp_path, model, permission_mode=PermissionMode.INSPECT),
+        "Create a new app.py file",
+    )
+
+    assert events[-1].type == "run.failed"
+    assert events[-1].error_code == "PERMISSION_INSUFFICIENT"
+    assert events[-1].metadata == {
+        "missing_capabilities": ["workspace_mutation"],
+        "permission_mode": "inspect",
+    }
+    assert model.requests == []
+
+
+def test_verification_task_fails_before_model_when_command_tool_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    model = ScriptedModel([])
+
+    events = collect(ReadOnlyAgent(tmp_path, model), "Run the tests")
+
+    assert events[-1].type == "run.failed"
+    assert events[-1].error_code == "PERMISSION_INSUFFICIENT"
+    assert events[-1].metadata["missing_capabilities"] == ["workspace_verification"]
+    assert model.requests == []
+
+
 def test_approval_preview_preserves_safe_patch_error(tmp_path: Path) -> None:
     model = ScriptedModel(
         [
@@ -221,18 +253,14 @@ def test_runtime_reserves_last_step_for_incomplete_summary(tmp_path: Path) -> No
 
 
 def test_explicit_verification_task_requires_successful_command(tmp_path: Path) -> None:
-    model = ScriptedModel(
-        [
-            tool_response("call-1", "workspace_list", {"path": "."}),
-            ModelResponse(content="The workspace was inspected without running tests."),
-            ModelResponse(content="Tests were not run; verification is incomplete."),
-        ]
-    )
+    model = ScriptedModel([])
 
     events = collect(ReadOnlyAgent(tmp_path, model, max_steps=3), "Run the tests")
 
-    assert events[-1].type == "run.incomplete"
-    assert events[-1].metadata["incomplete_reason"] == "VERIFICATION_NOT_RUN"
+    assert events[-1].type == "run.failed"
+    assert events[-1].error_code == "PERMISSION_INSUFFICIENT"
+    assert events[-1].metadata["missing_capabilities"] == ["workspace_verification"]
+    assert model.requests == []
 
 
 def test_terminal_event_reports_efficiency_metrics(tmp_path: Path) -> None:
@@ -287,6 +315,26 @@ def test_tool_error_returns_to_model_and_can_recover(tmp_path: Path) -> None:
     assert events[-1].type == "run.completed"
     first_result = model.requests[1].messages[-1]
     assert json.loads(first_result.content)["error"]["code"] == "PATH_NOT_FOUND"
+
+
+def test_repeated_git_inspection_stops_in_non_repository_workspace(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response("git-1", "git_inspect", {"operation": "status"}),
+            tool_response("git-2", "git_inspect", {"operation": "log"}),
+        ]
+    )
+
+    events = collect(ReadOnlyAgent(tmp_path, model), "Inspect the repository")
+
+    assert events[-1].type == "run.failed"
+    assert events[-1].error_code == "GIT_NOT_REPOSITORY"
+    completed = [event for event in events if event.type == "tool.completed"]
+    assert [event.metadata["error_code"] for event in completed] == [
+        "GIT_NOT_REPOSITORY",
+        "GIT_NOT_REPOSITORY",
+    ]
+    assert len(model.requests) == 2
 
 
 def test_tool_call_overflow_returns_recoverable_results_and_can_continue(tmp_path: Path) -> None:

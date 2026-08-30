@@ -122,6 +122,43 @@ def test_controller_pauses_when_step_is_incomplete(tmp_path: Path) -> None:
     assert not any(event.type == "plan.completed" for event in events)
 
 
+def test_controller_pauses_before_model_when_step_exceeds_session_permission(
+    tmp_path: Path,
+) -> None:
+    model = ScriptedModel([])
+    plan = Plan(
+        id="plan-write",
+        session_id="session-1",
+        title="Write",
+        task="Create a project",
+        state=PlanState.RUNNING,
+        version=1,
+        source_markdown="# Write\n1. Create files",
+        run_id="run-write",
+        created_at="now",
+        updated_at="now",
+        steps=(PlanStep("step-write", 1, "Create files", "Create app.py"),),
+    )
+    controller = PlanController(
+        plan,
+        tmp_path,
+        model,
+        permission_mode=PermissionMode.INSPECT,
+        language="en",
+    )
+
+    async def collect_events():
+        return [event async for event in controller.run()]
+
+    events = asyncio.run(collect_events())
+
+    assert [event.type for event in events] == ["plan.paused", "run.incomplete"]
+    assert events[0].error_code == "PERMISSION_INSUFFICIENT"
+    assert events[1].error_code == "PERMISSION_INSUFFICIENT"
+    assert events[0].metadata["missing_capabilities"] == ["workspace_mutation"]
+    assert model.requests == []
+
+
 def test_controller_budget_is_shared_across_plan_steps(tmp_path: Path) -> None:
     model = ScriptedModel(
         [

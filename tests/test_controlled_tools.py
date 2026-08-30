@@ -176,6 +176,14 @@ def test_git_inspect_reports_status_and_rejects_writes(tmp_path: Path) -> None:
     assert denied.error.code == "GIT_OPERATION_DENIED"
 
 
+def test_git_inspect_distinguishes_non_repository(tmp_path: Path) -> None:
+    result = ToolRegistry(tmp_path).execute(call("git_inspect", operation="status"))
+
+    assert result.ok is False and result.error is not None
+    assert result.error.code == "GIT_NOT_REPOSITORY"
+    assert result.public_metadata["repository"] is False
+
+
 def test_git_log_can_be_scoped_to_a_workspace_file(tmp_path: Path) -> None:
     os.system(f'git -C "{tmp_path}" init -q')
     tracked = tmp_path / "tracked.txt"
