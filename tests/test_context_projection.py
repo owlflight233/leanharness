@@ -453,6 +453,13 @@ def test_runtime_recovers_one_provider_context_overflow(tmp_path: Path) -> None:
             self.task_calls += 1
             if self.task_calls == 1:
                 raise ModelContextLengthError("provider context exceeded")
+            if self.task_calls == 2:
+                return ModelResponse(
+                    content="",
+                    tool_calls=(
+                        ToolCall("observe", "workspace_list", {"path": "."}),
+                    ),
+                )
             return ModelResponse(content="Recovered successfully.")
 
     model = OverflowModel()
@@ -466,7 +473,7 @@ def test_runtime_recovers_one_provider_context_overflow(tmp_path: Path) -> None:
     events = run(_collect(agent, "Inspect the project"))
 
     assert events[-1].type == "run.completed"
-    assert model.task_calls == 2
+    assert model.task_calls == 3
     assert model.summary_calls == 1
     assert any(event.type == "context.compacted" for event in events)
 

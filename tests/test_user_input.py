@@ -100,9 +100,9 @@ def test_model_requested_answer_returns_as_tool_result_in_same_turn(tmp_path) ->
         async def complete(self, request: ModelRequest) -> ModelResponse:
             self.requests.append(request)
             if len(self.requests) == 1:
-                    return ModelResponse(
-                        content="",
-                        tool_calls=(
+                return ModelResponse(
+                    content="",
+                    tool_calls=(
                         input_call(
                             question="Which target?",
                             options=[
@@ -110,7 +110,14 @@ def test_model_requested_answer_returns_as_tool_result_in_same_turn(tmp_path) ->
                                 {"label": "Web", "description": "Web client"},
                             ],
                         ),
-                    )
+                    ),
+                )
+            if len(self.requests) == 2:
+                return ModelResponse(
+                    content="",
+                    tool_calls=(
+                        ToolCall("observe-1", "workspace_list", {"path": "."}),
+                    ),
                 )
             return ModelResponse(
                 content="",
@@ -120,7 +127,7 @@ def test_model_requested_answer_returns_as_tool_result_in_same_turn(tmp_path) ->
                         OUTCOME_TOOL_NAME,
                         {"status": "completed", "answer": "Selected the API target."},
                     ),
-                )
+                ),
             )
 
     async def scenario():

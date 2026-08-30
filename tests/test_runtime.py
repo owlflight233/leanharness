@@ -90,7 +90,7 @@ def test_runtime_executes_tool_observes_result_and_accepts_final_answer(tmp_path
     assert "# Example" not in json.dumps([event.to_dict() for event in events])
 
 
-def test_runtime_accepts_model_completion_without_application_intent_rules(tmp_path: Path) -> None:
+def test_runtime_requires_observation_without_application_intent_rules(tmp_path: Path) -> None:
     model = ScriptedModel(
         [
             ModelResponse(content="Done without inspection."),
@@ -103,7 +103,11 @@ def test_runtime_accepts_model_completion_without_application_intent_rules(tmp_p
     events = collect(agent)
 
     assert events[-1].type == "run.completed"
-    assert len(model.requests) == 1
+    assert len(model.requests) == 3
+    assert not any(event.type == "run.completed" for event in events[:-1])
+    retry_message = model.requests[1].messages[-1]
+    assert retry_message.role == "user"
+    assert "workspace observation" in retry_message.content
 
 
 def test_mutation_task_without_successful_patch_is_not_completed(tmp_path: Path) -> None:
@@ -405,6 +409,7 @@ def test_structured_write_is_reported_as_changed_file(tmp_path: Path) -> None:
                     "create_parents": True,
                 },
             ),
+            tool_response("read-1", "workspace_read", {"path": "mini/app.py"}),
             outcome_response("completed", "Created mini/app.py."),
         ]
     )
@@ -456,6 +461,7 @@ def test_mini_project_can_be_created_verified_and_completed(tmp_path: Path) -> N
                 "workspace_command",
                 {"profile": "python-test", "args": ["mini_todo/test_app.py", "-q"]},
             ),
+            tool_response("observe-1", "workspace_list", {"path": "mini_todo"}),
             outcome_response("completed", "Created and verified the mini project."),
         ]
     )
@@ -464,7 +470,7 @@ def test_mini_project_can_be_created_verified_and_completed(tmp_path: Path) -> N
         CodingAgent(
             tmp_path,
             model,
-            max_steps=4,
+            max_steps=6,
             permission_mode=PermissionMode.UNRESTRICTED,
         ),
         "Create and test a tiny addition project.",
@@ -644,11 +650,14 @@ def test_model_can_report_incomplete_without_keyword_inference(tmp_path: Path) -
 
 
 def test_plain_text_is_a_model_completion_decision(tmp_path: Path) -> None:
-    model = ScriptedModel([ModelResponse(content="The task is complete.")])
+    model = ScriptedModel(
+        [ModelResponse(content="The task is complete.")] * 24
+    )
 
     events = collect(ReadOnlyAgent(tmp_path, model))
 
-    assert events[-1].type == "run.completed"
+    assert events[-1].type == "run.incomplete"
+    assert not any(event.type == "run.completed" for event in events)
     assert events[-1].answer == "The task is complete."
 
 

@@ -92,6 +92,17 @@ class PlanResumeModelClient:
                     ),
                 ),
             )
+        if self.calls == 2:
+            return ModelResponse(
+                content="",
+                tool_calls=(
+                    ToolCall(
+                        id="observe-1",
+                        name="workspace_list",
+                        arguments={"path": "."},
+                    ),
+                ),
+            )
         return ModelResponse(content="The directory was created.")
 
 
@@ -506,7 +517,7 @@ def test_plan_resume_explicitly_uses_current_session_permission(
         "permission_mode": "unrestricted",
     }
     assert events[-1]["type"] == "run.completed"
-    assert client.calls == 2
+    assert client.calls == 3
     assert (tmp_path / "mini-app").is_dir()
     assert (
         get(app, f"/api/v1/plans/{plan.id}").json()["execution_permission_mode"]

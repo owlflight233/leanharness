@@ -9,6 +9,8 @@ from leanharness.tools import ToolResult
 _OBSERVATION_TOOLS = frozenset(
     {"workspace_list", "workspace_read", "workspace_search", "git_inspect"}
 )
+
+
 @dataclass(slots=True)
 class CompletionLedger:
     """Run-owned public evidence; raw tool content never enters this structure."""
@@ -61,6 +63,15 @@ class CompletionLedger:
     def validate_completed(self) -> CompletionDecision:
         """Reject completion only when observed tool facts contradict it."""
 
+        if self.successful_observations < 1:
+            return CompletionDecision(
+                accepted=False,
+                reason="OBSERVATION_REQUIRED",
+                guidance=(
+                    "Before reporting completion, obtain at least one successful "
+                    "workspace observation."
+                ),
+            )
         if self.mutation_attempts and not self.successful_mutations:
             return CompletionDecision(
                 accepted=False,

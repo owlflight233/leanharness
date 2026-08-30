@@ -48,11 +48,22 @@ def test_approve_mode_waits_and_applies_one_tool_call(tmp_path: Path) -> None:
 
     async def scenario():
         coordinator = ApprovalCoordinator(timeout_seconds=1)
-        model = ScriptedModel([patch_response(), ModelResponse(content="Updated and verified.")])
+        model = ScriptedModel(
+            [
+                patch_response(),
+                ModelResponse(
+                    content="",
+                    tool_calls=(
+                        ToolCall("read-1", "workspace_read", {"path": "value.txt"}),
+                    ),
+                ),
+                ModelResponse(content="Updated and verified."),
+            ]
+        )
         agent = CodingAgent(
             tmp_path,
             model,
-            max_steps=3,
+            max_steps=4,
             permission_mode=PermissionMode.APPROVE,
             approvals=coordinator,
             session_id="session-1",
@@ -93,11 +104,22 @@ def test_approve_mode_creates_new_file_from_valid_unified_diff(tmp_path: Path) -
 
     async def scenario():
         coordinator = ApprovalCoordinator(timeout_seconds=1)
-        model = ScriptedModel([response, ModelResponse(content="Created created.txt.")])
+        model = ScriptedModel(
+            [
+                response,
+                ModelResponse(
+                    content="",
+                    tool_calls=(
+                        ToolCall("read-1", "workspace_read", {"path": "created.txt"}),
+                    ),
+                ),
+                ModelResponse(content="Created created.txt."),
+            ]
+        )
         agent = CodingAgent(
             tmp_path,
             model,
-            max_steps=3,
+            max_steps=4,
             permission_mode=PermissionMode.APPROVE,
             approvals=coordinator,
         )

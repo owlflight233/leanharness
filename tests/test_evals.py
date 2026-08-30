@@ -94,6 +94,7 @@ def test_evaluation_runs_in_disposable_workspace_and_records_metrics(tmp_path: P
                 "workspace_write",
                 {"path": "result.txt", "content": "ready\n", "mode": "create"},
             ),
+            tool_response("read-1", "workspace_read", {"path": "result.txt"}),
             outcome("completed", "Created result.txt."),
         ]
     )
@@ -102,8 +103,8 @@ def test_evaluation_runs_in_disposable_workspace_and_records_metrics(tmp_path: P
 
     assert result.passed is True
     assert result.false_completion is False
-    assert result.model_calls == 2
-    assert result.tool_calls == 1
+    assert result.model_calls == 3
+    assert result.tool_calls == 2
     assert result.changed_files == ("result.txt",)
     assert result.answer_chars == len("Created result.txt.")
     assert result.answer_sha256 is not None
@@ -123,7 +124,8 @@ def test_evaluation_detects_false_completion_without_mutation(tmp_path: Path) ->
     result = run_eval(scenario, model, tmp_path)
 
     assert result.passed is False
-    assert result.false_completion is True
+    assert result.false_completion is False
+    assert result.terminal == "run.failed"
     assert "file_missing:missing.txt" in result.failed_checks
     assert "mutation_missing" in result.failed_checks
 
@@ -196,6 +198,7 @@ def test_evaluation_resolves_required_model_input_and_records_it(tmp_path: Path)
                 "workspace_write",
                 {"path": "notes.txt", "content": "ready\n", "mode": "create"},
             ),
+            tool_response("read-1", "workspace_read", {"path": "notes.txt"}),
             outcome("completed", "Created notes.txt after clarification."),
         ]
     )
@@ -259,12 +262,14 @@ def test_plan_evaluation_aggregates_mutation_and_verification_evidence(
                     ),
                 ),
             ),
+            tool_response("observe-create", "workspace_list", {"path": "."}),
             outcome("completed", "Created the module and test."),
             tool_response(
                 "verify",
                 "workspace_command",
                 {"profile": "python-test", "args": ["test_arithmetic.py", "-q"]},
             ),
+            tool_response("observe-verify", "workspace_list", {"path": "."}),
             outcome("completed", "Pytest passed."),
         ]
     )
@@ -274,7 +279,7 @@ def test_plan_evaluation_aggregates_mutation_and_verification_evidence(
     assert result.passed is True
     assert result.terminal == "run.completed"
     assert result.changed_files == ("arithmetic.py", "test_arithmetic.py")
-    assert result.model_calls == 4
+    assert result.model_calls == 6
 
 
 def test_report_aggregates_without_answer_or_source_text() -> None:
