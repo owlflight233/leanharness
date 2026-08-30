@@ -28,6 +28,18 @@ def test_model_config_loads_complete_environment_without_exposing_key() -> None:
     assert secret not in repr(config)
 
 
+def test_model_config_accepts_deepseek_api_key_alias() -> None:
+    config = load_model_config(
+        {
+            "LEANHARNESS_MODEL_BASE_URL": "https://api.deepseek.com",
+            "LEANHARNESS_MODEL_NAME": "deepseek-chat",
+            "DEEPSEEK_API_KEY": "deepseek-secret",
+        }
+    )
+
+    assert config.api_key == "deepseek-secret"
+
+
 def test_model_config_can_enable_deepseek_thinking() -> None:
     config = load_model_config(
         {

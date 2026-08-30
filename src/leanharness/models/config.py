@@ -13,6 +13,7 @@ MODEL_PROTOCOL = "openai-compatible"
 MODEL_BASE_URL_ENV = "LEANHARNESS_MODEL_BASE_URL"
 MODEL_NAME_ENV = "LEANHARNESS_MODEL_NAME"
 MODEL_API_KEY_ENV = "LEANHARNESS_MODEL_API_KEY"
+MODEL_API_KEY_ALIASES = (MODEL_API_KEY_ENV, "DEEPSEEK_API_KEY")
 MODEL_THINKING_ENV = "LEANHARNESS_MODEL_THINKING"
 MODEL_REASONING_EFFORT_ENV = "LEANHARNESS_MODEL_REASONING_EFFORT"
 
@@ -48,7 +49,14 @@ def load_model_config(environ: Mapping[str, str] | None = None) -> ModelConfig:
     values = os.environ if environ is None else environ
     base_url = values.get(MODEL_BASE_URL_ENV, "").strip()
     model = values.get(MODEL_NAME_ENV, "").strip()
-    api_key = values.get(MODEL_API_KEY_ENV, "").strip() or None
+    api_key = next(
+        (
+            values.get(name, "").strip()
+            for name in MODEL_API_KEY_ALIASES
+            if values.get(name, "").strip()
+        ),
+        None,
+    )
     thinking_value = values.get(MODEL_THINKING_ENV, "enabled").strip().lower()
     if thinking_value not in {"enabled", "disabled", "true", "false", "1", "0"}:
         raise ModelNotConfiguredError(

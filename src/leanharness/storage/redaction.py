@@ -38,7 +38,9 @@ class TraceRedactor:
 
     @classmethod
     def from_environment(cls) -> TraceRedactor:
-        api_key = os.environ.get("LEANHARNESS_MODEL_API_KEY", "")
+        api_key = os.environ.get("LEANHARNESS_MODEL_API_KEY", "") or os.environ.get(
+            "DEEPSEEK_API_KEY", ""
+        )
         return cls(secrets=(api_key,) if api_key else ())
 
     def text(self, value: str) -> str:

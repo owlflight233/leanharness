@@ -131,7 +131,17 @@ class LocalStore:
         rows = self.connection.execute(
             "SELECT * FROM projects ORDER BY updated_at DESC, created_at DESC"
         ).fetchall()
-        return [self._project_row(row) for row in rows]
+        projects: list[ProjectRecord] = []
+        for row in rows:
+            project = self._project_row(row)
+            # Test runs and deleted folders can leave historical project rows.
+            # Keep them auditable in SQLite but hide unusable roots from navigation.
+            try:
+                if Path(project.root_path).is_dir():
+                    projects.append(project)
+            except OSError:
+                continue
+        return projects
 
     def create_session(
         self,
