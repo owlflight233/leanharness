@@ -93,17 +93,14 @@ class ToolFailureTracker:
                 return FailureDecision(
                     guidance=_git_guidance(self._language),
                     terminal_error_code="GIT_NOT_REPOSITORY",
-                    terminal_message=(
-                        "The workspace is not a Git repository; repeated Git inspection "
-                        "was stopped."
-                    ),
+                    terminal_message=_git_terminal_message(self._language),
                     incomplete_reason="GIT_NOT_REPOSITORY",
                 )
             return FailureDecision(guidance=_git_guidance(self._language))
         if _should_stall_on_tool_error(code) and count >= 3:
             return FailureDecision(
                 terminal_error_code="RUN_STALLED",
-                terminal_message="The same tool failure recurred for the same target",
+                terminal_message=_stall_terminal_message(self._language),
                 incomplete_reason="REPEATED_TOOL_FAILURE",
             )
         if count == 2:
@@ -186,3 +183,15 @@ def _repeat_failure_guidance(tool: str, code: str, language: str) -> str:
         "Re-read the relevant state, correct the arguments, or explain the blocker in the "
         "final incomplete summary."
     )
+
+
+def _git_terminal_message(language: str) -> str:
+    if language == "zh":
+        return "当前工作区不是 Git 仓库\uFF0C重复的 Git 检查已停止。"
+    return "The workspace is not a Git repository; repeated Git inspection was stopped."
+
+
+def _stall_terminal_message(language: str) -> str:
+    if language == "zh":
+        return "相同目标的工具失败重复出现\uFF0C运行已停止。"
+    return "The same tool failure recurred for the same target"

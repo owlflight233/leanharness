@@ -93,6 +93,21 @@ def test_recovery_guidance_uses_runtime_language() -> None:
     )
 
 
+def test_terminal_recovery_message_uses_runtime_language() -> None:
+    tracker = ToolFailureTracker("zh")
+    calls = [call(f"git-{index}", "git_inspect", operation="status") for index in range(2)]
+
+    decision = tracker.record_result(
+        calls[0], failed(calls[0], "GIT_NOT_REPOSITORY")
+    )
+    decision = tracker.record_result(
+        calls[1], failed(calls[1], "GIT_NOT_REPOSITORY")
+    )
+
+    assert decision.terminal_error_code == "GIT_NOT_REPOSITORY"
+    assert decision.terminal_message == "当前工作区不是 Git 仓库\uFF0C重复的 Git 检查已停止。"
+
+
 def test_user_rejections_never_trigger_automatic_stall() -> None:
     tracker = ToolFailureTracker()
     decisions = []
