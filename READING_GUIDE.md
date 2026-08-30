@@ -37,6 +37,7 @@
 - `runtime/completion.py`：记录已发生的工具事实，并拒绝与事实冲突的完成声明。
 - `runtime/outcome.py`：模型可调用的显式完成/未完成控制契约。
 - `runtime/metrics.py`：模型次数、工具次数和 token 用量。
+- `runtime/model_step.py`：一次模型请求的投影、压缩恢复和协议修正信号。
 - `runtime/prompting.py`：语言和能力约束，不含隐藏思维提示。
 - `runtime/recovery.py`：协议纠正、相同调用和等价工具失败的有界恢复。
 - `runtime/tool_dispatch.py`：工具预览、受控执行及安全错误转换。

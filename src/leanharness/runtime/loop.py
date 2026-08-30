@@ -15,17 +15,19 @@ from leanharness.context import (
     ContextSource,
     ContextStore,
 )
-from leanharness.errors import (
-    ApprovalExpiredError,
-    ModelContextLengthError,
-    ModelError,
-    ModelProtocolError,
-)
+from leanharness.errors import ApprovalExpiredError, ModelError, ModelProtocolError
 from leanharness.models import ModelMessage, ModelRequest, ModelResponse, ToolCall
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.runtime.completion import CompletionLedger
 from leanharness.runtime.events import RuntimeEvent, RuntimeEventType
 from leanharness.runtime.metrics import RunMetrics
+from leanharness.runtime.model_step import (
+    ModelStepExecutor,
+    ProjectionSignal,
+    ProtocolRepairSignal,
+    RequestStartedSignal,
+    ResponseSignal,
+)
 from leanharness.runtime.outcome import (
     OUTCOME_TOOL,
     OUTCOME_TOOL_NAME,
@@ -111,6 +113,14 @@ class CodingAgent:
         self.metrics = RunMetrics()
         self._protocol_recovery = ModelProtocolRecovery()
         self._failure_tracker = ToolFailureTracker()
+        self._model_step = ModelStepExecutor(
+            context=self.context,
+            model_client=self.model_client,
+            metrics=self.metrics,
+            protocol_recovery=self._protocol_recovery,
+            request_builder=self._model_request,
+            language=self.language,
+        )
 
     async def run(self, task: str) -> AsyncIterator[RuntimeEvent]:
         self._protocol_recovery.reset()
@@ -192,61 +202,38 @@ class CodingAgent:
                 summary=_step_started_summary(step, self.language),
             )
             summary_round = self.reserve_summary_round and step == self.max_steps
+            response: ModelResponse | None = None
+            protocol_repaired = False
             try:
-                projection = await self.context.projector.project_async(
-                    self.history_sources,
-                    self.context,
-                    self.model_client,
-                )
-                self.metrics.record_projection(
-                    chars=projection.projected_chars,
-                    messages=len(projection.messages),
-                    compressed_steps=projection.compressed_steps,
-                    compressed_tool_results=projection.compressed_messages,
-                    semantic_calls=self.context.projector.semantic_calls,
-                    semantic_fallback=projection.semantic_fallback,
-                    generation=projection.generation,
-                )
-                yield self._context_projected_event(step, projection)
-                if projection.changed or projection.semantic_fallback:
-                    yield self._context_compacted_event(step, projection)
-                self.state = transition(self.state, RunState.REQUESTING_MODEL)
-                self.metrics.model_calls += 1
-                try:
-                    response = await self.model_client.complete(
-                        self._model_request(projection.messages, summary_round)
-                    )
-                except ModelContextLengthError:
-                    recovered = await self.context.projector.project_async(
-                        self.history_sources,
-                        self.context,
-                        self.model_client,
-                        force_semantic=True,
-                    )
-                    if recovered.digest == projection.digest:
-                        raise ContextBudgetError(
-                            "Context compaction did not produce a smaller request"
-                        ) from None
-                    self.metrics.record_projection(
-                        chars=recovered.projected_chars,
-                        messages=len(recovered.messages),
-                        compressed_steps=recovered.compressed_steps,
-                        compressed_tool_results=recovered.compressed_messages,
-                        semantic_calls=self.context.projector.semantic_calls,
-                        semantic_fallback=recovered.semantic_fallback,
-                        generation=recovered.generation,
-                    )
-                    yield self._context_compacted_event(step, recovered)
-                    self.metrics.model_calls += 1
-                    try:
-                        response = await self.model_client.complete(
-                            self._model_request(recovered.messages, summary_round)
+                async for signal in self._model_step.execute(
+                    history_sources=self.history_sources,
+                    summary_round=summary_round,
+                ):
+                    if isinstance(signal, ProjectionSignal):
+                        if signal.compacted:
+                            yield self._context_compacted_event(step, signal.projection)
+                        else:
+                            yield self._context_projected_event(step, signal.projection)
+                    elif isinstance(signal, RequestStartedSignal):
+                        self.state = transition(self.state, RunState.REQUESTING_MODEL)
+                    elif isinstance(signal, ProtocolRepairSignal):
+                        self.state = transition(self.state, RunState.PREPARING)
+                        yield self._event(
+                            "assistant.progress",
+                            step=step,
+                            summary=signal.repair.public_summary,
                         )
-                    except ModelContextLengthError as exc:
-                        raise ContextBudgetError(
-                            "Model context window remained exceeded after one recovery"
-                        ) from exc
-                self.state = transition(self.state, RunState.INTERPRETING)
+                        yield self._event("step.completed", step=step)
+                        protocol_repaired = True
+                    elif isinstance(signal, ResponseSignal):
+                        response = signal.response
+                        self.state = transition(self.state, RunState.INTERPRETING)
+                if protocol_repaired:
+                    continue
+                if response is None:
+                    raise RuntimeError(
+                        "Model step ended without a response or protocol repair"
+                    )
             except asyncio.CancelledError:
                 self.state = transition(self.state, RunState.CANCELLED)
                 yield self._event(
@@ -277,17 +264,6 @@ class CodingAgent:
                 )
                 return
             except ModelProtocolError:
-                repair = self._protocol_recovery.request(self.language)
-                if repair is not None:
-                    self.context.append(repair.message)
-                    self.state = transition(self.state, RunState.PREPARING)
-                    yield self._event(
-                        "assistant.progress",
-                        step=step,
-                        summary=repair.public_summary,
-                    )
-                    yield self._event("step.completed", step=step)
-                    continue
                 self.state = transition(self.state, RunState.FAILED)
                 yield self._event(
                     "run.failed",
