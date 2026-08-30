@@ -25,10 +25,12 @@ import {
 } from "./api/model";
 import {
   resolveRunApproval,
+  resolveRunInput,
   streamRun,
   type ApprovalResolver,
   type RunEvent,
   type RunStreamer,
+  type UserInputResolver,
 } from "./api/run";
 import {
   createSession,
@@ -76,6 +78,7 @@ interface AppProps {
   modelStatusLoader?: ModelStatusLoader;
   runStreamer?: RunStreamer;
   approvalResolver?: ApprovalResolver;
+  userInputResolver?: UserInputResolver;
   sessionClient?: SessionClient;
   workspaceClient?: WorkspaceClient;
 }
@@ -127,11 +130,19 @@ interface PendingApproval {
   preview?: string;
 }
 
+interface PendingQuestion {
+  id: string;
+  runId: string;
+  question: string;
+  options: Array<{ label: string; description: string }>;
+}
+
 function App({
   healthLoader = fetchHealth,
   modelStatusLoader = fetchModelStatus,
   runStreamer: providedRunStreamer,
   approvalResolver = resolveRunApproval,
+  userInputResolver = resolveRunInput,
   sessionClient = defaultSessionClient,
   workspaceClient = { select: selectWorkspace, create: createWorkspace },
 }: AppProps) {
@@ -149,6 +160,8 @@ function App({
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [approvalSubmitting, setApprovalSubmitting] = useState(false);
+  const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
+  const [questionSubmitting, setQuestionSubmitting] = useState(false);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -361,6 +374,24 @@ function App({
             } else if (event.type === "approval.resolved") {
               setPendingApproval(null);
               setApprovalSubmitting(false);
+            } else if (event.type === "input.required") {
+              const metadata = event.metadata ?? {};
+              const options = Array.isArray(metadata.options)
+                ? metadata.options.filter(isRecord).map((option) => ({
+                    label: String(option.label ?? ""),
+                    description: String(option.description ?? ""),
+                  }))
+                : [];
+              setPendingQuestion({
+                id: String(metadata.input_id),
+                runId: event.run_id,
+                question: String(metadata.question ?? "Agent 需要补充信息"),
+                options,
+              });
+              setProcessVisibility(event.run_id, true);
+            } else if (event.type === "input.resolved") {
+              setPendingQuestion(null);
+              setQuestionSubmitting(false);
             } else if (event.type === "run.completed") {
               appendMessage("assistant", event.answer, "complete", event.run_id);
               setProcessVisibility(event.run_id, false);
@@ -391,6 +422,8 @@ function App({
       if (activeRequest.current === controller) activeRequest.current = null;
       setPendingApproval(null);
       setApprovalSubmitting(false);
+      setPendingQuestion(null);
+      setQuestionSubmitting(false);
       setIsStreaming(false);
       await refreshSessionList(resolvedSessionId);
     }
@@ -456,6 +489,7 @@ function App({
       setOpenProcesses({});
       setActiveRunId(null);
       setPendingApproval(null);
+      setPendingQuestion(null);
       window.localStorage.setItem(projectSessionKey(projectId), id);
       setSessionError(null);
     } catch (error: unknown) {
@@ -611,6 +645,17 @@ function App({
     } catch (error: unknown) {
       setSessionError(errorMessage(error));
       setApprovalSubmitting(false);
+    }
+  }
+
+  async function answerQuestion(answer: string) {
+    if (!pendingQuestion || questionSubmitting) return;
+    setQuestionSubmitting(true);
+    try {
+      await userInputResolver(pendingQuestion.runId, pendingQuestion.id, answer);
+    } catch (error: unknown) {
+      setSessionError(errorMessage(error));
+      setQuestionSubmitting(false);
     }
   }
 
@@ -799,7 +844,7 @@ function App({
                 </article>
                 </div>
               ))}
-              {isStreaming && activeRunId && trace.some((event) => event.run_id === activeRunId && (event.type === "assistant.progress" || event.type.startsWith("tool.") || event.type.startsWith("approval."))) && (
+              {isStreaming && activeRunId && trace.some((event) => event.run_id === activeRunId && (event.type === "assistant.progress" || event.type.startsWith("tool.") || event.type.startsWith("approval.") || event.type.startsWith("input."))) && (
                 <RunProcess
                   trace={trace.filter((event) => event.run_id === activeRunId)}
                   open={openProcesses[activeRunId] ?? true}
@@ -819,6 +864,24 @@ function App({
               <div className="approval-actions">
                 <button type="button" disabled={approvalSubmitting} onClick={() => void decideApproval("reject")}>拒绝</button>
                 <button type="button" className="approve-button" disabled={approvalSubmitting} onClick={() => void decideApproval("approve")}>批准一次</button>
+              </div>
+            </div>
+          )}
+          {pendingQuestion && (
+            <div className="question-panel" role="group" aria-label="Agent 提问">
+              <strong>{pendingQuestion.question}</strong>
+              <div className="question-options">
+                {pendingQuestion.options.map((option) => (
+                  <button
+                    type="button"
+                    key={option.label}
+                    disabled={questionSubmitting}
+                    onClick={() => void answerQuestion(option.label)}
+                  >
+                    <span>{option.label}</span>
+                    <small>{option.description}</small>
+                  </button>
+                ))}
               </div>
             </div>
           )}

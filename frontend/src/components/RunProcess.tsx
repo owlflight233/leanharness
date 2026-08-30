@@ -95,7 +95,7 @@ export function aggregateActions(trace: RunTraceItem[]): SemanticAction[] {
       progress.set(groupKeyFor(event), event);
       continue;
     }
-    if (!event.type.startsWith("tool.") && !event.type.startsWith("approval.")) continue;
+    if (!event.type.startsWith("tool.") && !event.type.startsWith("approval.") && !event.type.startsWith("input.")) continue;
     const callId = event.metadata?.tool_call_id;
     let key = typeof callId === "string" ? callId : "";
     if (!key && event.type === "tool.requested") key = `legacy-${fallbackIndex++}`;
@@ -108,8 +108,15 @@ export function aggregateActions(trace: RunTraceItem[]): SemanticAction[] {
     const first = events[0]!;
     const terminal = [...events].reverse().find((event) => event.type === "tool.completed");
     const approval = [...events].reverse().find((event) => event.type === "approval.required");
+    const input = [...events].reverse().find((event) => event.type === "input.required");
     const ok = terminal?.metadata?.ok;
-    const status = terminal ? (ok === false ? "失败" : "完成") : approval ? "等待批准" : "执行中";
+    const status = terminal
+      ? (ok === false ? "失败" : "完成")
+      : approval
+        ? "等待批准"
+        : input
+          ? "等待回答"
+          : "执行中";
     toolActions.push({
       id,
       sequence: first.sequence,

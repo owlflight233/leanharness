@@ -176,6 +176,78 @@ def test_run_cli_separates_trace_and_final_answer(
     assert "workspace_list" in captured.err
 
 
+def test_run_cli_answers_model_requested_question(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeRuntime:
+        def __init__(self, coordinator, run_id: str, session_id: str) -> None:
+            self.coordinator = coordinator
+            self.run_id = run_id
+            self.session_id = session_id
+
+        async def run(self, _task: str):
+            request = self.coordinator.request(
+                run_id=self.run_id,
+                session_id=self.session_id,
+                tool_call_id="call-1",
+                question="选择目标",
+                options=(),
+            )
+            yield RuntimeEvent(
+                type="input.required",
+                sequence=0,
+                run_id=self.run_id,
+                tool="request_user_input",
+                metadata={
+                    "input_id": request.id,
+                    "question": "选择目标",
+                    "options": [
+                        {"label": "API", "description": "修改后端"},
+                        {"label": "Web", "description": "修改前端"},
+                    ],
+                },
+            )
+            answer = await self.coordinator.wait(request)
+            yield RuntimeEvent(
+                type="input.resolved",
+                sequence=1,
+                run_id=self.run_id,
+                tool="request_user_input",
+            )
+            yield RuntimeEvent(
+                type="run.completed",
+                sequence=2,
+                run_id=self.run_id,
+                answer=f"选择了 {answer}。",
+            )
+
+    def create_runtime(*_args, **kwargs):
+        return FakeRuntime(
+            kwargs["user_inputs"],
+            kwargs["run_id"],
+            kwargs["session_id"],
+        )
+
+    monkeypatch.setattr("leanharness.cli.main.create_coding_run", create_runtime)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "API")
+
+    args = [
+        "run",
+        "choose",
+        "--workspace",
+        str(tmp_path),
+        "--data-dir",
+        str(tmp_path / "data"),
+    ]
+    assert main(args) == 0
+    output = capsys.readouterr()
+    assert "选择了 API。" in output.out
+    assert "选择目标" in output.err
+    assert "API: 修改后端" in output.err
+
+
 @pytest.mark.parametrize(
     ("terminal_type", "error_code", "expected"),
     [

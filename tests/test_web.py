@@ -139,6 +139,7 @@ def test_health_contract_is_exact(tmp_path: Path) -> None:
             "tool.command",
             "tool.git.read",
             "approval.interactive",
+            "input.interactive",
         ],
     }
 
@@ -343,6 +344,45 @@ def test_model_check_contract_does_not_expose_credentials(
     assert check.json()["model"] == "example-model"
     assert "must-not-leak" not in check.text
     assert post(app, "/api/v1/chat", json_body={"message": "hi"}).status_code == 405
+
+
+def test_user_input_answer_api_resolves_once_and_validates_answer(tmp_path: Path) -> None:
+    app = create_app(build_config(workspace=tmp_path, data_dir=tmp_path / "data"))
+
+    async def scenario():
+        coordinator = app.state.user_inputs
+        request = coordinator.request(
+            run_id="run-1",
+            session_id="session-1",
+            tool_call_id="call-1",
+            question="Which target?",
+            options=(),
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            invalid = await client.post(
+                f"/api/v1/runs/run-1/questions/{request.id}", json={"answer": ""}
+            )
+            resolved = await client.post(
+                f"/api/v1/runs/run-1/questions/{request.id}", json={"answer": "API"}
+            )
+            duplicate = await client.post(
+                f"/api/v1/runs/run-1/questions/{request.id}", json={"answer": "Web"}
+            )
+        return request, invalid, resolved, duplicate, await coordinator.wait(request)
+
+    request, invalid, resolved, duplicate, answer = asyncio.run(scenario())
+
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"]["code"] == "INPUT_INVALID_ANSWER"
+    assert resolved.json() == {
+        "input_id": request.id,
+        "run_id": "run-1",
+        "status": "resolved",
+    }
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"]["code"] == "INPUT_ALREADY_RESOLVED"
+    assert answer == "API"
 
 
 def test_coding_runs_replay_bounded_public_history_with_same_session(

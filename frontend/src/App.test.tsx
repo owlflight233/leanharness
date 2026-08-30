@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import App, { type SessionClient } from "./App";
 import type { HealthLoader, HealthResponse } from "./api/health";
 import type { ModelStatusLoader } from "./api/model";
-import type { ApprovalResolver, RunStreamer } from "./api/run";
+import type { ApprovalResolver, RunStreamer, UserInputResolver } from "./api/run";
 import type { WorkspaceClient } from "./api/workspace";
 import type { PermissionMode, SessionDetail, SessionSummary } from "./api/sessions";
 
@@ -617,5 +617,63 @@ describe("application shell", () => {
     );
     expect(await screen.findByText("修改已完成。")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "批准一次" })).not.toBeInTheDocument();
+  });
+
+  it("answers a model-requested question and resumes the run", async () => {
+    const user = userEvent.setup();
+    let resume: (() => void) | undefined;
+    const inputResolved = new Promise<void>((resolve) => { resume = resolve; });
+    const userInputResolver = vi.fn<UserInputResolver>(async () => { resume?.(); });
+    const questioningRun: RunStreamer = async (_task, onEvent) => {
+      onEvent({ type: "run.started", sequence: 0, run_id: "question-run" });
+      onEvent({
+        type: "input.required",
+        sequence: 1,
+        run_id: "question-run",
+        tool: "request_user_input",
+        metadata: {
+          input_id: "input-1",
+          question: "选择目标",
+          options: [
+            { label: "API", description: "修改后端" },
+            { label: "Web", description: "修改前端" },
+          ],
+        },
+      });
+      await inputResolved;
+      onEvent({
+        type: "input.resolved",
+        sequence: 2,
+        run_id: "question-run",
+        tool: "request_user_input",
+        metadata: { input_id: "input-1" },
+      });
+      onEvent({
+        type: "run.completed",
+        sequence: 3,
+        run_id: "question-run",
+        answer: "已选择 API。",
+      });
+    };
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        runStreamer={questioningRun}
+        userInputResolver={userInputResolver}
+      />,
+    );
+
+    await user.type(await screen.findByLabelText("任务输入"), "选择修改目标");
+    await user.click(screen.getByRole("button", { name: "发送任务" }));
+    expect(await screen.findByText("选择目标")).toBeInTheDocument();
+    expect(screen.getByText("修改后端")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /API/ }));
+
+    await waitFor(() =>
+      expect(userInputResolver).toHaveBeenCalledWith("question-run", "input-1", "API"),
+    );
+    expect(await screen.findByText("已选择 API。")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Agent 提问")).not.toBeInTheDocument();
   });
 });

@@ -57,7 +57,8 @@ from leanharness.permissions import (
 )
 from leanharness.planning import Plan, PlanController, PlanState, PlanStep, render_plan_markdown
 from leanharness.planning.generator import GeneratedPlan
-from leanharness.runtime import RuntimeEvent
+from leanharness.runtime import RuntimeEvent, UserInputCoordinator, UserInputProtocolError
+from leanharness.runtime.user_input import UserInputExpiredError
 from leanharness.storage import LocalStore
 
 
@@ -97,6 +98,10 @@ class SessionUpdateRequest(BaseModel):
 
 class ApprovalDecisionRequest(BaseModel):
     decision: Literal["approve", "reject"]
+
+
+class UserInputAnswerRequest(BaseModel):
+    answer: str
 
 
 class WorkspaceSelectRequest(BaseModel):
@@ -151,6 +156,7 @@ def create_app(
         on_resolve=lambda request, decision: store.resolve_approval(request.id, decision),
         on_expire=lambda request: store.expire_approval(request.id),
     )
+    user_inputs = UserInputCoordinator()
     active_runs = ActiveRunRegistry()
     plan_cancellations: dict[str, asyncio.Event] = {}
 
@@ -173,6 +179,7 @@ def create_app(
     app.state.model_client_factory = model_client_factory
     app.state.store = store
     app.state.approvals = approvals
+    app.state.user_inputs = user_inputs
     app.state.active_runs = active_runs
 
     @app.exception_handler(LeanHarnessError)
@@ -341,6 +348,7 @@ def create_app(
             permission_mode=session.permission_mode,
             session_id=session.id,
             approvals=approvals,
+            user_inputs=user_inputs,
             history_sources=history,
             context_sanitizer=store.redactor.text,
         )
@@ -374,6 +382,7 @@ def create_app(
                 raise
             finally:
                 approvals.cancel_run(run_record.id)
+                user_inputs.cancel_run(run_record.id)
                 active_runs.release(session.id, run_record.id)
 
         return StreamingResponse(
@@ -754,6 +763,31 @@ def create_app(
             "approval_id": request.id,
             "run_id": request.run_id,
             "decision": payload.decision,
+            "status": "resolved",
+        }
+
+    @app.post("/api/v1/runs/{run_id}/questions/{input_id}")
+    async def resolve_user_input(
+        run_id: str, input_id: str, payload: UserInputAnswerRequest
+    ) -> dict[str, object]:
+        try:
+            request = user_inputs.resolve(run_id, input_id, payload.answer)
+        except UserInputExpiredError as exc:
+            raise HTTPException(
+                status_code=410,
+                detail={"code": "INPUT_EXPIRED", "message": str(exc)},
+            ) from exc
+        except UserInputProtocolError as exc:
+            status_code = 422 if exc.code == "INPUT_INVALID_ANSWER" else 404
+            if exc.code == "INPUT_ALREADY_RESOLVED":
+                status_code = 409
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": exc.code, "message": exc.message},
+            ) from exc
+        return {
+            "input_id": request.id,
+            "run_id": request.run_id,
             "status": "resolved",
         }
 

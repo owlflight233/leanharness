@@ -31,6 +31,7 @@ from leanharness.logging import configure_logging
 from leanharness.models import OpenAICompatibleClient, load_model_config
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.planning import PlanController, PlanState
+from leanharness.runtime import UserInputCoordinator
 from leanharness.runtime.loop import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, MIN_MAX_STEPS
 from leanharness.storage import LocalStore
 
@@ -305,6 +306,7 @@ async def _inspect(
         on_resolve=lambda request, decision: store.resolve_approval(request.id, decision),
         on_expire=lambda request: store.expire_approval(request.id),
     )
+    user_inputs = UserInputCoordinator()
     runtime = create_coding_run(
         task,
         workspace,
@@ -314,6 +316,7 @@ async def _inspect(
         permission_mode=selected_permission,
         session_id=session.id,
         approvals=approvals,
+        user_inputs=user_inputs,
         history_sources=history,
         context_sanitizer=store.redactor.text,
     )
@@ -337,6 +340,29 @@ async def _inspect(
             )
         elif event.type == "approval.resolved" and event.metadata:
             print(f"[approval {event.metadata.get('decision')}] {event.tool}", file=sys.stderr)
+        elif event.type == "input.required" and event.metadata:
+            question = str(event.metadata.get("question", "Input required"))
+            options = event.metadata.get("options", [])
+            print(f"[question] {question}", file=sys.stderr)
+            if isinstance(options, list):
+                for index, option in enumerate(options, 1):
+                    if isinstance(option, dict):
+                        print(
+                            f"  {index}. {option.get('label')}: "
+                            f"{option.get('description')}",
+                            file=sys.stderr,
+                        )
+            answer = await asyncio.to_thread(input, "Answer (blank cancels the run): ")
+            if not answer.strip():
+                user_inputs.cancel_run(run.id)
+            else:
+                user_inputs.resolve(
+                    run.id,
+                    str(event.metadata["input_id"]),
+                    answer,
+                )
+        elif event.type == "input.resolved":
+            print("[question answered]", file=sys.stderr)
         elif event.type == "tool.completed":
             status = "ok" if event.metadata and event.metadata.get("ok") else "error"
             print(f"[tool {status}] {event.tool}", file=sys.stderr)

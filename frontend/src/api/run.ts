@@ -32,6 +32,11 @@ export type RunEvent =
       summary?: string;
       metadata?: Record<string, unknown>;
     })
+  | (RunEventBase & {
+      type: "input.required" | "input.resolved";
+      tool: string;
+      metadata?: Record<string, unknown>;
+    })
   | (RunEventBase & { type: "usage.reported"; usage: Usage })
   | (RunEventBase & {
       type: "context.projected" | "context.compacted" | "context.compaction.failed";
@@ -57,6 +62,12 @@ export type ApprovalResolver = (
   decision: "approve" | "reject",
 ) => Promise<void>;
 
+export type UserInputResolver = (
+  runId: string,
+  inputId: string,
+  answer: string,
+) => Promise<void>;
+
 export async function resolveRunApproval(
   runId: string,
   approvalId: string,
@@ -68,6 +79,22 @@ export async function resolveRunApproval(
       method: "POST",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
       body: JSON.stringify({ decision }),
+    },
+  );
+  if (!response.ok) throw new Error(await readApiError(response));
+}
+
+export async function resolveRunInput(
+  runId: string,
+  inputId: string,
+  answer: string,
+): Promise<void> {
+  const response = await fetch(
+    `/api/v1/runs/${encodeURIComponent(runId)}/questions/${encodeURIComponent(inputId)}`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ answer }),
     },
   );
   if (!response.ok) throw new Error(await readApiError(response));
@@ -141,7 +168,7 @@ function isRunEvent(value: unknown): value is RunEvent {
     return false;
   }
   if (value.type === "assistant.progress") return typeof value.summary === "string";
-  if (["tool.requested", "tool.started", "tool.completed", "approval.required", "approval.resolved"].includes(value.type)) {
+  if (["tool.requested", "tool.started", "tool.completed", "approval.required", "approval.resolved", "input.required", "input.resolved"].includes(value.type)) {
     return typeof value.tool === "string";
   }
   if (value.type === "usage.reported") return isRecord(value.usage);
@@ -178,8 +205,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 async function readApiError(response: Response): Promise<string> {
   try {
-    const payload = (await response.json()) as { error?: { message?: string } };
-    return payload.error?.message || `请求失败 (${response.status})`;
+    const payload = (await response.json()) as {
+      error?: { message?: string };
+      detail?: { message?: string } | string;
+    };
+    const detail = typeof payload.detail === "string" ? payload.detail : payload.detail?.message;
+    return payload.error?.message || detail || `请求失败 (${response.status})`;
   } catch {
     return `请求失败 (${response.status})`;
   }

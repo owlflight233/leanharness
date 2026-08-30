@@ -528,6 +528,13 @@ textarea:focus-visible {
 .approval-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .approval-actions button { padding: 5px 9px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); font-size: 11px; }
 .approval-actions .approve-button { border-color: var(--accent); color: #fff; background: var(--accent); }
+.question-panel { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); }
+.question-panel > strong { font-size: 12px; }
+.question-options { display: grid; gap: 6px; }
+.question-options button { display: grid; gap: 2px; width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 5px; background: #fff; text-align: left; }
+.question-options button:hover:not(:disabled) { border-color: var(--accent); }
+.question-options span { font-size: 12px; font-weight: 650; }
+.question-options small { color: var(--muted); font-size: 11px; }
 
 .composer textarea::placeholder {
   color: #8a9391;

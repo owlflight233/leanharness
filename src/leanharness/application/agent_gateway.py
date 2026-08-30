@@ -13,6 +13,7 @@ from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.runtime import (
     CodingAgent,
     RunControlError,
+    UserInputCoordinator,
     validate_run_task,
 )
 from leanharness.runtime.loop import MAX_MAX_STEPS, MIN_MAX_STEPS
@@ -29,6 +30,7 @@ def create_coding_run(
     permission_mode: str = "inspect",
     session_id: str = "ephemeral",
     approvals: ApprovalCoordinator | None = None,
+    user_inputs: UserInputCoordinator | None = None,
     history: tuple[ModelMessage, ...] = (),
     history_sources: tuple[ContextSource, ...] = (),
     context_sanitizer: Callable[[str], str] | None = None,
@@ -55,6 +57,7 @@ def create_coding_run(
         permission_mode=mode,
         session_id=session_id,
         approvals=approvals,
+        user_inputs=user_inputs,
         history=history,
         history_sources=history_sources,
         context_sanitizer=context_sanitizer,
