@@ -457,7 +457,37 @@ class CodingAgent:
                 except OutcomeProtocolError as exc:
                     result = _runtime_tool_error(call, exc.code, exc.message)
                 else:
+                    # A control tool call is still an assistant tool call. Close
+                    # it with a matching tool result before changing run state so
+                    # every projected context remains provider-protocol legal.
+                    result = ToolResult(
+                        tool_call_id=call.id,
+                        tool=call.name,
+                        ok=True,
+                        data={
+                            "status": outcome.status.value,
+                            "answer": outcome.answer,
+                        },
+                        public_metadata={"status": outcome.status.value},
+                    )
                     if outcome.status is OutcomeStatus.INCOMPLETE:
+                        self.context.append(
+                            ModelMessage(
+                                role="tool",
+                                content=result.to_model_content(),
+                                tool_call_id=call.id,
+                            )
+                        )
+                        yield self._event(
+                            "tool.completed",
+                            step=step,
+                            tool=call.name,
+                            metadata={
+                                **result.public_metadata,
+                                "tool_call_id": call.id,
+                                "ok": True,
+                            },
+                        )
                         self.state = transition(self.state, RunState.EXHAUSTED)
                         yield self._event(
                             "run.incomplete",
@@ -471,12 +501,23 @@ class CodingAgent:
                         return
                     decision = self.evidence.validate_completed()
                     if decision.accepted:
+                        self.context.append(
+                            ModelMessage(
+                                role="tool",
+                                content=result.to_model_content(),
+                                tool_call_id=call.id,
+                            )
+                        )
                         self.state = transition(self.state, RunState.COMPLETED)
                         yield self._event(
                             "tool.completed",
                             step=step,
                             tool=call.name,
-                            metadata={"tool_call_id": call.id, "ok": True},
+                            metadata={
+                                **result.public_metadata,
+                                "tool_call_id": call.id,
+                                "ok": True,
+                            },
                         )
                         yield self._event(
                             "run.completed",

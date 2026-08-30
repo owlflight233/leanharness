@@ -542,6 +542,76 @@ def test_model_owns_completion_decision_after_observation(tmp_path: Path) -> Non
     assert model.requests[-1].tools[-1].name == OUTCOME_TOOL_NAME
 
 
+def test_completed_outcome_closes_control_tool_call_before_terminal_event(
+    tmp_path: Path,
+) -> None:
+    model = ScriptedModel(
+        [
+            tool_response("observe-1", "workspace_list", {"path": "."}),
+            outcome_response("completed", "The workspace was inspected."),
+        ]
+    )
+
+    agent = ReadOnlyAgent(tmp_path, model)
+    events = collect(agent)
+
+    outcome_call = model.responses[1].tool_calls[0]  # type: ignore[union-attr]
+    assert outcome_call.name == OUTCOME_TOOL_NAME
+    # A provider must receive a matching tool result for every assistant call.
+    # The terminal call is not followed by another request, so inspect the live
+    # journal directly to verify it was closed before the terminal event.
+    outcome_result = next(
+        message
+        for message in agent.context.messages
+        if message.role == "tool" and message.tool_call_id == outcome_call.id
+    )
+    assert json.loads(outcome_result.content)["result"]["status"] == "completed"
+    requested_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.type == "tool.requested" and event.tool == OUTCOME_TOOL_NAME
+    )
+    completed_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.type == "tool.completed" and event.tool == OUTCOME_TOOL_NAME
+    )
+    terminal_index = next(
+        index for index, event in enumerate(events) if event.type == "run.completed"
+    )
+    assert requested_index < completed_index < terminal_index
+
+
+def test_incomplete_outcome_closes_control_tool_call_before_terminal_event(
+    tmp_path: Path,
+) -> None:
+    model = ScriptedModel([outcome_response("incomplete", "The requested work is blocked.")])
+    agent = ReadOnlyAgent(tmp_path, model)
+    events = collect(agent)
+
+    outcome_call = model.responses[0].tool_calls[0]  # type: ignore[union-attr]
+    outcome_result = next(
+        message
+        for message in agent.context.messages
+        if message.role == "tool" and message.tool_call_id == outcome_call.id
+    )
+    assert json.loads(outcome_result.content)["result"]["status"] == "incomplete"
+    requested_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.type == "tool.requested" and event.tool == OUTCOME_TOOL_NAME
+    )
+    completed_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.type == "tool.completed" and event.tool == OUTCOME_TOOL_NAME
+    )
+    terminal_index = next(
+        index for index, event in enumerate(events) if event.type == "run.incomplete"
+    )
+    assert requested_index < completed_index < terminal_index
+
+
 def test_model_can_report_incomplete_without_keyword_inference(tmp_path: Path) -> None:
     model = ScriptedModel([outcome_response("incomplete", "The requested change is blocked.")])
 
