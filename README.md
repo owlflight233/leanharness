@@ -163,8 +163,9 @@ pnpm build
 - Inspectable execution traces without storing credentials.
 - Persistent Plan Mode built on the same evidence and permission runtime.
 
-See [SPEC.md](SPEC.md), [ARCHITECTURE.md](ARCHITECTURE.md), and
-[CLEAN_ROOM.md](CLEAN_ROOM.md) before contributing.
+See [SPEC.md](SPEC.md), [ARCHITECTURE.md](ARCHITECTURE.md),
+[CONTEXT.md](CONTEXT.md), and [CLEAN_ROOM.md](CLEAN_ROOM.md) before
+contributing.
 
 ## License
 

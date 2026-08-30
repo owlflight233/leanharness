@@ -18,7 +18,7 @@ Application services
         |
 Agent runtime
   - state machine
-  - context assembler
+  - context journal and projector
   - action dispatcher
   - permission engine
   - plan controller
@@ -92,7 +92,9 @@ Runtime responsibilities are separated by purpose:
 - `runtime/completion.py` owns observed evidence and terminal-outcome checks.
 - `runtime/prompting.py` owns model-facing public constraints.
 - `runtime/metrics.py` collects provider-neutral efficiency counters.
-- `context/store.py` performs local evidence-preserving compaction.
+- `context/projection.py` projects public history and live messages into a
+  bounded provider-neutral request.
+- `context/store.py` preserves the compatibility facade for the live journal.
 
 ## Data strategy
 
@@ -101,14 +103,23 @@ runs, and ordered run events. A separate append-only JSONL trace is written for
 each run under the application data directory. Both sinks receive the same
 `TraceRedactor` output: credentials, hidden reasoning, and raw tool/file
 content are excluded. Replaying traces can render what happened but does not
-replace relational recovery. New runs in a session receive a bounded history of
-recent public `user` and `assistant` messages, including plan messages (at most
-24 messages and 32,000 characters). Tool results, progress events and hidden
-reasoning are excluded. The current user message is appended after that
-history. References
-such as "continue" are resolved by the model from ordinary conversation
-context, not by phrase allow-lists or an application-side task rewrite. The
-model must still re-read the workspace before making claims.
+replace relational recovery.
+
+New runs receive a 64,000-character history seed containing public conversation
+messages and bounded evidence from completed runs. The live `ContextJournal`
+adds the current system contract, current user task, model calls, and tool
+results. Before every model request, `ContextProjector` produces a disposable
+view with a 128,000-character soft threshold and 160,000-character hard limit.
+Old tool results first become deterministic evidence capsules. If protected
+context still cannot fit, an independently budgeted, tool-free model request
+may produce a validated semantic JSON capsule. Projection and compaction traces
+contain only counts and hashes. Full request bodies are never persisted.
+
+References such as "continue" are resolved by the model from ordinary
+conversation context and historical run evidence, not by phrase allow-lists or
+an application-side task rewrite. The model must still re-read the workspace
+before making claims. See `CONTEXT.md` for the full lifecycle and recovery
+boundary.
 
 Storage code separates immutable records, forward-only migrations, the shared
 redaction policy, and SQLite operations into `storage/records.py`,

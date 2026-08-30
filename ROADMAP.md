@@ -21,7 +21,7 @@
 
 - Per-run token, cost, and request budgets
 - Context deduplication and diff-first file updates
-- Tool-output compaction and evidence-preserving summaries
+- Cost-aware selection between deterministic and semantic context compaction
 - Adaptive model escalation
 - Delegation benefit estimation
 - Standard-versus-budget evaluation reports
