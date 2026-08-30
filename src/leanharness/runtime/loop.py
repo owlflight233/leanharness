@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -35,6 +34,7 @@ from leanharness.runtime.outcome import (
     parse_outcome,
 )
 from leanharness.runtime.prompting import system_prompt
+from leanharness.runtime.recovery import ModelProtocolRecovery, ToolFailureTracker
 from leanharness.runtime.state import RunState, transition
 from leanharness.tools import ToolErrorInfo, ToolExecutionError, ToolRegistry, ToolResult
 
@@ -107,17 +107,11 @@ class CodingAgent:
         self._sequence = initial_sequence
         self.evidence = CompletionLedger()
         self.metrics = RunMetrics()
-        self._repeat_key: tuple[str, str] | None = None
-        self._repeat_count = 0
-        self._failure_counts: dict[tuple[str, str, str], int] = {}
-        # A malformed provider response is recoverable once.  Keeping this
-        # bounded prevents an upstream model that emits invalid tool JSON from
-        # consuming the entire run budget while still giving it one explicit
-        # correction opportunity.
-        self._protocol_recovery_used = False
+        self._protocol_recovery = ModelProtocolRecovery()
+        self._failure_tracker = ToolFailureTracker()
 
     async def run(self, task: str) -> AsyncIterator[RuntimeEvent]:
-        self._protocol_recovery_used = False
+        self._protocol_recovery.reset()
         async for event in self._run_task(task, initialize_context=True):
             yield event
 
@@ -134,10 +128,8 @@ class CodingAgent:
             raise RunControlError("RUN_NOT_TERMINAL", "Previous task is still active")
         self.state = RunState.CREATED
         self.evidence = CompletionLedger()
-        self._repeat_key = None
-        self._repeat_count = 0
-        self._failure_counts.clear()
-        self._protocol_recovery_used = False
+        self._failure_tracker.reset()
+        self._protocol_recovery.reset()
         async for event in self._run_task(task, initialize_context=False):
             yield event
 
@@ -283,19 +275,14 @@ class CodingAgent:
                 )
                 return
             except ModelProtocolError:
-                if not self._protocol_recovery_used:
-                    self._protocol_recovery_used = True
-                    self.context.append(
-                        ModelMessage(
-                            role="user",
-                            content=_protocol_repair_prompt(self.language),
-                        )
-                    )
+                repair = self._protocol_recovery.request(self.language)
+                if repair is not None:
+                    self.context.append(repair.message)
                     self.state = transition(self.state, RunState.PREPARING)
                     yield self._event(
                         "assistant.progress",
                         step=step,
-                        summary=_protocol_repair_summary(self.language),
+                        summary=repair.public_summary,
                     )
                     yield self._event("step.completed", step=step)
                     continue
@@ -461,20 +448,23 @@ class CodingAgent:
                             "request remaining work in the next step",
                         )
                     else:
-                        repetition = self._record_repetition(call)
-                        if repetition >= 4:
+                        repetition = self._failure_tracker.record_call(call)
+                        if repetition.terminal_error_code:
                             self.state = transition(self.state, RunState.FAILED)
                             yield self._event(
                                 "run.failed",
                                 step=step,
-                                error_code="RUN_STALLED",
-                                error_message="Repeated identical tool calls",
+                                error_code=repetition.terminal_error_code,
+                                error_message=repetition.terminal_message,
                                 metadata=self._terminal_metadata(
-                                    incomplete_reason="REPEATED_TOOL_CALL"
+                                    incomplete_reason=(
+                                        repetition.incomplete_reason
+                                        or repetition.terminal_error_code
+                                    )
                                 ),
                             )
                             return
-                        if repetition == 3:
+                        if repetition.reject:
                             result = _runtime_tool_error(
                                 call,
                                 "TOOL_REPEATED",
@@ -618,9 +608,9 @@ class CodingAgent:
                         content_bytes = len(content.encode("utf-8"))
                     step_result_bytes += content_bytes
                     self.evidence.record(call.name, result)
-                    guidance = self._failure_guidance(call, result)
-                    if guidance:
-                        recovery_guidance.append(guidance)
+                    failure = self._failure_tracker.record_result(call, result)
+                    if failure.guidance:
+                        recovery_guidance.append(failure.guidance)
                     self.context.append(
                         ModelMessage(role="tool", content=content, tool_call_id=call.id)
                     )
@@ -642,39 +632,21 @@ class CodingAgent:
                             "ok": result.ok,
                         },
                     )
-                    if result.error and _should_stall_on_tool_error(result.error.code):
-                        failure_key = _failure_key(call, result.error.code)
-                        if self._failure_counts.get(failure_key, 0) >= 3:
-                            self.state = transition(self.state, RunState.FAILED)
-                            yield self._event(
-                                "run.failed",
-                                step=step,
-                                error_code="RUN_STALLED",
-                                error_message=(
-                                    "The same tool failure recurred for the same target"
-                                ),
-                                metadata=self._terminal_metadata(
-                                    incomplete_reason="REPEATED_TOOL_FAILURE"
-                                ),
-                            )
-                            return
-                    if result.error and result.error.code == "GIT_NOT_REPOSITORY":
-                        failure_key = _failure_key(call, result.error.code)
-                        if self._failure_counts.get(failure_key, 0) >= 2:
-                            self.state = transition(self.state, RunState.FAILED)
-                            yield self._event(
-                                "run.failed",
-                                step=step,
-                                error_code="GIT_NOT_REPOSITORY",
-                                error_message=(
-                                    "The workspace is not a Git repository; repeated Git "
-                                    "inspection was stopped."
-                                ),
-                                metadata=self._terminal_metadata(
-                                    incomplete_reason="GIT_NOT_REPOSITORY"
-                                ),
-                            )
-                            return
+                    if failure.terminal_error_code:
+                        self.state = transition(self.state, RunState.FAILED)
+                        yield self._event(
+                            "run.failed",
+                            step=step,
+                            error_code=failure.terminal_error_code,
+                            error_message=failure.terminal_message,
+                            metadata=self._terminal_metadata(
+                                incomplete_reason=(
+                                    failure.incomplete_reason
+                                    or failure.terminal_error_code
+                                )
+                            ),
+                        )
+                        return
                 if recovery_guidance:
                     self.context.append(
                         ModelMessage(role="user", content="\n".join(recovery_guidance))
@@ -741,33 +713,6 @@ class CodingAgent:
             metadata=self._terminal_metadata(
                 incomplete_reason="STEP_BUDGET_EXHAUSTED",
             ),
-        )
-
-    def _record_repetition(self, call: ToolCall) -> int:
-        key = (call.name, _stable_arguments(call))
-        if key == self._repeat_key:
-            self._repeat_count += 1
-        else:
-            self._repeat_key, self._repeat_count = key, 1
-        return self._repeat_count
-
-    def _failure_guidance(self, call: ToolCall, result: ToolResult) -> str | None:
-        if result.ok or result.error is None:
-            return None
-        key = _failure_key(call, result.error.code)
-        count = self._failure_counts.get(key, 0) + 1
-        self._failure_counts[key] = count
-        if result.error.code == "GIT_NOT_REPOSITORY":
-            return (
-                "This workspace is not a Git repository. Do not call git_inspect again; "
-                "continue with workspace tools."
-            )
-        if count != 2:
-            return None
-        return (
-            f"The {call.name} tool has failed twice with {result.error.code}. "
-            "Do not repeat the same approach. Re-read the relevant state, correct the "
-            "arguments, or explain the blocker in the final incomplete summary."
         )
 
     def _terminal_metadata(
@@ -1039,69 +984,8 @@ def _outcome_retry_summary(language: str) -> str:
     )
 
 
-def _protocol_repair_prompt(language: str) -> str:
-    if language == "zh":
-        return (
-            "上一轮模型响应无法按协议解析。请重新选择下一步: 工具调用必须是严格 JSON "
-            "对象并完全符合工具参数定义; 如果无法安全调用工具, 请使用 "
-            "report_run_outcome 报告 incomplete。不要重复输出解释性文本代替工具参数。"
-        )
-    return (
-        "The previous model response could not be parsed by the tool protocol. Choose the "
-        "next action again: tool arguments must be a strict JSON object matching the "
-        "tool schema. If no safe tool call is possible, use report_run_outcome with "
-        "status=incomplete. Do not emit explanatory text in place of tool arguments."
-    )
-
-
-def _protocol_repair_summary(language: str) -> str:
-    return (
-        "模型响应格式无效, 已请求一次协议修正"
-        if language == "zh"
-        else "Model response format was invalid; one protocol correction was requested"
-    )
-
-
 # Backward-compatible name for integrations created before coding tools were enabled.
 ReadOnlyAgent = CodingAgent
-
-
-def _stable_arguments(call: ToolCall) -> str:
-    return json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _failure_key(call: ToolCall, error_code: str) -> tuple[str, str, str]:
-    """Group retries by operation and public target, not full model arguments."""
-
-    if error_code == "GIT_NOT_REPOSITORY":
-        return call.name, error_code, "<workspace>"
-    resource_parts: list[str] = []
-    for name in ("path", "profile", "operation", "query"):
-        value = call.arguments.get(name)
-        if isinstance(value, str):
-            resource_parts.append(f"{name}={value[:160]}")
-    resource = "|".join(resource_parts) or "<operation>"
-    return call.name, error_code, resource
-
-
-def _should_stall_on_tool_error(error_code: str) -> bool:
-    if error_code in {
-        "APPROVAL_REJECTED",
-        "APPROVAL_TIMEOUT",
-        "APPROVAL_UNAVAILABLE",
-        "TOOL_RESULT_BUDGET",
-        "TOOL_CALL_LIMIT",
-    }:
-        return False
-    return error_code.startswith(
-        (
-            "PATCH_",
-            "WRITE_",
-            "EDIT_",
-            "DIRECTORY_",
-            "PATH_",
-        )
-    ) or error_code == "TOOL_INVALID_ARGUMENTS"
 
 
 def _runtime_tool_error(

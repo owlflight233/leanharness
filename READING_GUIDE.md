@@ -38,6 +38,7 @@
 - `runtime/outcome.py`：模型可调用的显式完成/未完成控制契约。
 - `runtime/metrics.py`：模型次数、工具次数和 token 用量。
 - `runtime/prompting.py`：语言和能力约束，不含隐藏思维提示。
+- `runtime/recovery.py`：协议纠正、相同调用和等价工具失败的有界恢复。
 - `context/store.py`：活跃上下文超限时将旧工具结果替换为证据胶囊。
 
 关键原则是：模型只能提出“完成候选”。是否完成由本地证据决定。
