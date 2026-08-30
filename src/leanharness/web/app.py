@@ -18,6 +18,10 @@ from leanharness import __version__
 from leanharness.application.agent_gateway import create_coding_run
 from leanharness.application.health import get_health
 from leanharness.application.model_gateway import ModelClientFactory, check_model
+from leanharness.application.model_settings import (
+    get_effective_model_status,
+    load_effective_model_config,
+)
 from leanharness.application.plan_gateway import create_plan_generator, plan_to_dict
 from leanharness.application.session_gateway import (
     apply_first_task_title,
@@ -44,11 +48,7 @@ from leanharness.errors import (
     StorageError,
     WorkspaceError,
 )
-from leanharness.models import (
-    OpenAICompatibleClient,
-    get_model_config_status,
-    load_model_config,
-)
+from leanharness.models import OpenAICompatibleClient
 from leanharness.permissions import (
     ActiveRunRegistry,
     ApprovalCoordinator,
@@ -252,7 +252,7 @@ def create_app(
 
     @app.get("/api/v1/model/status")
     async def model_status() -> dict[str, object]:
-        status = get_model_config_status()
+        status = get_effective_model_status(app.state.config.data_dir)
         return {
             "configured": status.configured,
             "protocol": status.protocol,
@@ -320,7 +320,10 @@ def create_app(
 
     @app.post("/api/v1/model/check")
     async def model_check() -> dict[str, object]:
-        result = await check_model(client_factory=app.state.model_client_factory)
+        result = await check_model(
+            data_dir=str(app.state.config.data_dir),
+            client_factory=app.state.model_client_factory,
+        )
         return result.to_dict()
 
     @app.post("/api/v1/runs")
@@ -351,6 +354,7 @@ def create_app(
             user_inputs=user_inputs,
             history_sources=history,
             context_sanitizer=store.redactor.text,
+            data_dir=app.state.config.data_dir,
         )
         store.add_message(session.id, "user", payload.task, run_id=run_record.id)
 
@@ -410,6 +414,7 @@ def create_app(
             client_factory=app.state.model_client_factory,
             history_sources=history,
             context_sanitizer=store.redactor.text,
+            data_dir=app.state.config.data_dir,
         )
         generated: GeneratedPlan | None = None
         generation_events: list[RuntimeEvent] = []
@@ -471,6 +476,7 @@ def create_app(
             client_factory=app.state.model_client_factory,
             history_sources=history,
             context_sanitizer=store.redactor.text,
+            data_dir=app.state.config.data_dir,
         )
         active_runs.acquire(session.id, run.id)
 
@@ -629,7 +635,9 @@ def create_app(
             store.attach_plan_run(plan.id, run.id)
         plan = store.get_plan(plan.id)
         active_runs.acquire(session.id, run.id)
-        model = app.state.model_client_factory(load_model_config())
+        model = app.state.model_client_factory(
+            load_effective_model_config(app.state.config.data_dir)
+        )
         existing_events = store.list_events(run.id)
         initial_sequence = (
             int(existing_events[-1].get("sequence", -1)) + 1 if existing_events else 0

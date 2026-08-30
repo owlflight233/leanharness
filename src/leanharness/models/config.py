@@ -43,12 +43,21 @@ class ModelConfigStatus:
     model: str | None = None
 
 
-def load_model_config(environ: Mapping[str, str] | None = None) -> ModelConfig:
+def load_model_config(
+    environ: Mapping[str, str] | None = None,
+    *,
+    defaults: Mapping[str, str] | None = None,
+) -> ModelConfig:
     """Load and validate model settings without retaining the environment mapping."""
 
     values = os.environ if environ is None else environ
-    base_url = values.get(MODEL_BASE_URL_ENV, "").strip()
-    model = values.get(MODEL_NAME_ENV, "").strip()
+    fallback = defaults or {}
+
+    def setting(name: str, default: str = "") -> str:
+        return values.get(name, "").strip() or fallback.get(name, default).strip()
+
+    base_url = setting(MODEL_BASE_URL_ENV)
+    model = setting(MODEL_NAME_ENV)
     api_key = next(
         (
             values.get(name, "").strip()
@@ -57,13 +66,13 @@ def load_model_config(environ: Mapping[str, str] | None = None) -> ModelConfig:
         ),
         None,
     )
-    thinking_value = values.get(MODEL_THINKING_ENV, "enabled").strip().lower()
+    thinking_value = setting(MODEL_THINKING_ENV, "enabled").lower()
     if thinking_value not in {"enabled", "disabled", "true", "false", "1", "0"}:
         raise ModelNotConfiguredError(
             f"{MODEL_THINKING_ENV} must be enabled or disabled"
         )
     thinking = thinking_value in {"enabled", "true", "1"}
-    reasoning_effort = values.get(MODEL_REASONING_EFFORT_ENV, "high").strip() or None
+    reasoning_effort = setting(MODEL_REASONING_EFFORT_ENV, "high") or None
 
     missing = [
         name
@@ -84,13 +93,21 @@ def load_model_config(environ: Mapping[str, str] | None = None) -> ModelConfig:
     )
 
 
-def get_model_config_status(environ: Mapping[str, str] | None = None) -> ModelConfigStatus:
+def get_model_config_status(
+    environ: Mapping[str, str] | None = None,
+    *,
+    defaults: Mapping[str, str] | None = None,
+) -> ModelConfigStatus:
     """Return a safe status projection without exposing credentials or endpoint details."""
 
     values = os.environ if environ is None else environ
-    model = values.get(MODEL_NAME_ENV, "").strip() or None
+    model = (
+        values.get(MODEL_NAME_ENV, "").strip()
+        or (defaults or {}).get(MODEL_NAME_ENV, "").strip()
+        or None
+    )
     try:
-        config = load_model_config(values)
+        config = load_model_config(values, defaults=defaults)
     except ModelNotConfiguredError:
         return ModelConfigStatus(configured=False, model=model)
     return ModelConfigStatus(configured=True, model=config.model)

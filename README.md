@@ -64,8 +64,40 @@ uv run leanharness serve --workspace /path/to/project
 ## Configure a model
 
 LeanHarness currently targets the OpenAI-compatible chat completions protocol.
-For DeepSeek, set process environment variables before running the CLI or
-server. Never place a real key in `.env.example` or another tracked file.
+Non-secret settings can be saved once in the local application data directory;
+CLI commands and the Web server then reuse them after restart. Credentials
+remain process environment variables and are never written to `model.json`.
+
+PowerShell:
+
+```powershell
+uv run leanharness model configure `
+  --base-url "https://api.deepseek.com" `
+  --name "deepseek-v4-flash-vision-exp" `
+  --thinking enabled `
+  --reasoning-effort high
+$env:DEEPSEEK_API_KEY = "your-api-key"
+uv run leanharness model status
+uv run leanharness model check
+uv run leanharness serve
+```
+
+macOS or Linux:
+
+```sh
+uv run leanharness model configure \
+  --base-url "https://api.deepseek.com" \
+  --name "deepseek-v4-flash-vision-exp" \
+  --thinking enabled \
+  --reasoning-effort high
+export DEEPSEEK_API_KEY="your-api-key"
+uv run leanharness model status
+uv run leanharness model check
+uv run leanharness serve
+```
+
+Environment variables can override the saved non-secret settings for one
+process. Never place a real key in `.env.example` or another tracked file.
 
 PowerShell:
 

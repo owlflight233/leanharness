@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from leanharness.application.model_settings import get_effective_model_status
 from leanharness.storage import LocalStore
 
 
@@ -97,4 +98,12 @@ def collect_diagnostics(
         )
     except Exception:
         checks.append(DiagnosticCheck("data-storage", False, "SQLite data directory unavailable"))
+    model_status = get_effective_model_status(target)
+    checks.append(
+        DiagnosticCheck(
+            "model-config",
+            model_status.configured,
+            model_status.model or "non-secret model settings are not configured",
+        )
+    )
     return tuple(checks)

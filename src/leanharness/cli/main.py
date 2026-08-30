@@ -11,6 +11,12 @@ from pathlib import Path
 from leanharness import __version__
 from leanharness.application.agent_gateway import create_coding_run
 from leanharness.application.model_gateway import check_model
+from leanharness.application.model_settings import (
+    LocalModelSettings,
+    LocalModelSettingsStore,
+    get_effective_model_status,
+    load_effective_model_config,
+)
 from leanharness.application.plan_gateway import create_plan_generator
 from leanharness.application.session_gateway import (
     apply_first_task_title,
@@ -28,7 +34,7 @@ from leanharness.config import (
 )
 from leanharness.errors import LeanHarnessError, ModelError, ModelNotConfiguredError
 from leanharness.logging import configure_logging
-from leanharness.models import OpenAICompatibleClient, load_model_config
+from leanharness.models import OpenAICompatibleClient
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.planning import PlanController, PlanState
 from leanharness.runtime import UserInputCoordinator
@@ -80,7 +86,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     model_parser = subparsers.add_parser("model", help="Inspect the configured model gateway.")
     model_subparsers = model_parser.add_subparsers(dest="model_command", required=True)
-    model_subparsers.add_parser("check", help="Send a small model connectivity check.")
+    model_check_parser = model_subparsers.add_parser(
+        "check", help="Send a small model connectivity check."
+    )
+    model_check_parser.add_argument("--data-dir", help="Local application data directory.")
+    model_status_parser = model_subparsers.add_parser(
+        "status", help="Show credential-free effective model settings."
+    )
+    model_status_parser.add_argument("--data-dir", help="Local application data directory.")
+    model_configure_parser = model_subparsers.add_parser(
+        "configure", help="Save non-secret model settings for future CLI and Web runs."
+    )
+    model_configure_parser.add_argument("--base-url", required=True)
+    model_configure_parser.add_argument("--name", required=True, help="Model identifier.")
+    model_configure_parser.add_argument(
+        "--thinking", choices=("enabled", "disabled"), default="enabled"
+    )
+    model_configure_parser.add_argument("--reasoning-effort", default="high")
+    model_configure_parser.add_argument("--data-dir", help="Local application data directory.")
 
     run_parser = subparsers.add_parser(
         "run", help="Analyze or modify a workspace with the controlled coding agent."
@@ -176,8 +199,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return _serve(config)
 
-        if args.command == "model" and args.model_command == "check":
-            return asyncio.run(_check_model())
+        if args.command == "model":
+            if args.model_command == "check":
+                return asyncio.run(_check_model(args.data_dir))
+            if args.model_command == "status":
+                status = get_effective_model_status(args.data_dir)
+                print(
+                    f"configured={str(status.configured).lower()} "
+                    f"protocol={status.protocol} model={status.model or '-'}"
+                )
+                return 0 if status.configured else 2
+            if args.model_command == "configure":
+                path = LocalModelSettingsStore(args.data_dir).save(
+                    LocalModelSettings(
+                        base_url=args.base_url,
+                        model=args.name,
+                        thinking=args.thinking == "enabled",
+                        reasoning_effort=args.reasoning_effort,
+                    )
+                )
+                print(path)
+                return 0
 
         if args.command == "run":
             workspace = resolve_workspace(args.workspace)
@@ -254,9 +296,9 @@ def _serve(config: AppConfig) -> int:
     return 0
 
 
-async def _check_model() -> int:
+async def _check_model(data_dir: str | None = None) -> int:
     try:
-        result = await check_model()
+        result = await check_model() if data_dir is None else await check_model(data_dir=data_dir)
     except ModelNotConfiguredError:
         raise
     except ModelError as exc:
@@ -319,6 +361,7 @@ async def _inspect(
         user_inputs=user_inputs,
         history_sources=history,
         context_sanitizer=store.redactor.text,
+        data_dir=data_dir,
     )
     exit_code = 0
     async for event in runtime.run(task):
@@ -427,6 +470,7 @@ async def _plan_generate(
         session_id=session.id,
         history_sources=history,
         context_sanitizer=store.redactor.text,
+        data_dir=data_dir,
     )
     generated = None
     try:
@@ -480,7 +524,7 @@ async def _plan_lifecycle(
     controller = PlanController(
         store.get_plan(plan.id),
         workspace=workspace,
-        model_client=OpenAICompatibleClient(load_model_config()),
+        model_client=OpenAICompatibleClient(load_effective_model_config(data_dir)),
         permission_mode=PermissionMode(session.permission_mode),
         language=session.language or "same",
         approvals=approvals,

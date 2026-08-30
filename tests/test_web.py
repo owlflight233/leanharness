@@ -6,6 +6,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from leanharness.application.model_settings import LocalModelSettings, LocalModelSettingsStore
 from leanharness.config import build_config
 from leanharness.models import ModelResponse, ToolCall
 from leanharness.permissions import PermissionMode
@@ -324,6 +325,32 @@ def test_model_status_is_safe_when_unconfigured(
     assert check.status_code == 503
     assert check.json()["error"]["code"] == "MODEL_NOT_CONFIGURED"
     assert "must-not-leak" not in check.text
+
+
+def test_model_status_uses_persistent_non_secret_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.delenv("LEANHARNESS_MODEL_BASE_URL", raising=False)
+    monkeypatch.delenv("LEANHARNESS_MODEL_NAME", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "must-not-leak")
+    LocalModelSettingsStore(data_dir).save(
+        LocalModelSettings(
+            base_url="https://api.deepseek.com",
+            model="deepseek-v4-flash-vision-exp",
+        )
+    )
+    app = create_app(build_config(workspace=tmp_path, data_dir=data_dir))
+
+    response = get(app, "/api/v1/model/status")
+
+    assert response.json() == {
+        "configured": True,
+        "protocol": "openai-compatible",
+        "model": "deepseek-v4-flash-vision-exp",
+    }
+    assert "must-not-leak" not in response.text
 
 
 def test_model_check_contract_does_not_expose_credentials(

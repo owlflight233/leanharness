@@ -6,9 +6,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 from leanharness.application.model_gateway import ModelClientFactory
+from leanharness.application.model_settings import load_effective_model_config
 from leanharness.context import ContextSource
 from leanharness.errors import RunInputError
-from leanharness.models import ModelMessage, OpenAICompatibleClient, load_model_config
+from leanharness.models import ModelConfig, ModelMessage, OpenAICompatibleClient, load_model_config
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.runtime import (
     CodingAgent,
@@ -34,6 +35,8 @@ def create_coding_run(
     history: tuple[ModelMessage, ...] = (),
     history_sources: tuple[ContextSource, ...] = (),
     context_sanitizer: Callable[[str], str] | None = None,
+    model_config: ModelConfig | None = None,
+    data_dir: str | Path | None = None,
 ) -> CodingAgent:
     """Validate public input and create a bounded coding runtime."""
 
@@ -43,7 +46,14 @@ def create_coding_run(
         raise RunInputError(exc.message) from exc
     if not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
         raise RunInputError(f"max_steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}")
-    model = client_factory(load_model_config())
+    effective_config = model_config
+    if effective_config is None:
+        effective_config = (
+            load_effective_model_config(data_dir)
+            if data_dir is not None
+            else load_model_config()
+        )
+    model = client_factory(effective_config)
     try:
         mode = PermissionMode(permission_mode)
     except ValueError as exc:

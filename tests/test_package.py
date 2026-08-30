@@ -107,6 +107,39 @@ def test_model_check_cli_maps_remote_failure_to_exit_three(
     assert "MODEL_AUTH_FAILED" in capsys.readouterr().err
 
 
+def test_model_configure_and_status_share_local_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_dir = tmp_path / "data"
+    monkeypatch.delenv("LEANHARNESS_MODEL_BASE_URL", raising=False)
+    monkeypatch.delenv("LEANHARNESS_MODEL_NAME", raising=False)
+
+    assert (
+        main(
+            [
+                "model",
+                "configure",
+                "--base-url",
+                "https://api.deepseek.com",
+                "--name",
+                "deepseek-v4-flash-vision-exp",
+                "--data-dir",
+                str(data_dir),
+            ]
+        )
+        == 0
+    )
+    assert (data_dir / "model.json").is_file()
+    capsys.readouterr()
+
+    assert main(["model", "status", "--data-dir", str(data_dir)]) == 0
+    output = capsys.readouterr().out
+    assert "configured=true" in output
+    assert "deepseek-v4-flash-vision-exp" in output
+
+
 def test_run_parser_applies_read_only_defaults() -> None:
     args = build_parser().parse_args(["run", "inspect"])
 

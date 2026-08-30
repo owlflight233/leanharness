@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import Protocol
 
+from leanharness.application.model_settings import load_effective_model_config
 from leanharness.errors import ModelProtocolError
 from leanharness.models import (
     ModelConfig,
@@ -40,11 +41,17 @@ class ModelCheckResult:
 async def check_model(
     *,
     environ: Mapping[str, str] | None = None,
+    model_config: ModelConfig | None = None,
+    data_dir: str | None = None,
     client_factory: ModelClientFactory = OpenAICompatibleClient,
 ) -> ModelCheckResult:
     """Verify a complete configuration with one deliberately small model request."""
 
-    config = load_model_config(environ)
+    config = model_config or (
+        load_model_config(environ)
+        if environ is not None
+        else load_effective_model_config(data_dir)
+    )
     client = client_factory(config)
     started = perf_counter()
     response = await client.complete(
