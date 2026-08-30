@@ -187,6 +187,9 @@ class CodingAgent:
                     "run.cancelled",
                     step=step,
                     summary=_cancelled_summary(self.language),
+                    metadata=self._terminal_metadata(
+                        incomplete_reason="RUN_CANCELLED"
+                    ),
                 )
                 return
             yield self._event(
@@ -252,7 +255,14 @@ class CodingAgent:
                 self.state = transition(self.state, RunState.INTERPRETING)
             except asyncio.CancelledError:
                 self.state = transition(self.state, RunState.CANCELLED)
-                yield self._event("run.cancelled", step=step, summary="Run cancelled")
+                yield self._event(
+                    "run.cancelled",
+                    step=step,
+                    summary=_cancelled_summary(self.language),
+                    metadata=self._terminal_metadata(
+                        incomplete_reason="RUN_CANCELLED"
+                    ),
+                )
                 return
             except ContextBudgetError as exc:
                 self.state = transition(self.state, RunState.FAILED)
@@ -267,6 +277,9 @@ class CodingAgent:
                     step=step,
                     error_code="CONTEXT_BUDGET_EXCEEDED",
                     error_message=str(exc),
+                    metadata=self._terminal_metadata(
+                        incomplete_reason="CONTEXT_BUDGET_EXCEEDED"
+                    ),
                 )
                 return
             except ModelProtocolError:
@@ -292,12 +305,19 @@ class CodingAgent:
                     step=step,
                     error_code="MODEL_PROTOCOL_ERROR",
                     error_message="Model returned an invalid response twice",
+                    metadata=self._terminal_metadata(
+                        incomplete_reason="MODEL_PROTOCOL_ERROR"
+                    ),
                 )
                 return
             except ModelError as exc:
                 self.state = transition(self.state, RunState.FAILED)
                 yield self._event(
-                    "run.failed", step=step, error_code=exc.code, error_message=exc.message
+                    "run.failed",
+                    step=step,
+                    error_code=exc.code,
+                    error_message=exc.message,
+                    metadata=self._terminal_metadata(incomplete_reason=exc.code),
                 )
                 return
             except Exception:
@@ -307,6 +327,9 @@ class CodingAgent:
                     step=step,
                     error_code="RUN_MODEL_FAILED",
                     error_message="Model request failed safely",
+                    metadata=self._terminal_metadata(
+                        incomplete_reason="RUN_MODEL_FAILED"
+                    ),
                 )
                 return
 
@@ -446,6 +469,9 @@ class CodingAgent:
                                 step=step,
                                 error_code="RUN_STALLED",
                                 error_message="Repeated identical tool calls",
+                                metadata=self._terminal_metadata(
+                                    incomplete_reason="REPEATED_TOOL_CALL"
+                                ),
                             )
                             return
                         if repetition == 3:
@@ -529,6 +555,9 @@ class CodingAgent:
                                                 "run.cancelled",
                                                 step=step,
                                                 summary=_cancelled_summary(self.language),
+                                                metadata=self._terminal_metadata(
+                                                    incomplete_reason="RUN_CANCELLED"
+                                                ),
                                             )
                                             return
                                         yield self._event(
@@ -640,6 +669,9 @@ class CodingAgent:
                                 error_message=(
                                     "The workspace is not a Git repository; repeated Git "
                                     "inspection was stopped."
+                                ),
+                                metadata=self._terminal_metadata(
+                                    incomplete_reason="GIT_NOT_REPOSITORY"
                                 ),
                             )
                             return

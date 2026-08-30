@@ -286,6 +286,8 @@ def test_repeated_git_inspection_stops_in_non_repository_workspace(tmp_path: Pat
 
     assert events[-1].type == "run.failed"
     assert events[-1].error_code == "GIT_NOT_REPOSITORY"
+    assert events[-1].metadata["incomplete_reason"] == "GIT_NOT_REPOSITORY"
+    assert events[-1].metadata["evidence"]["observations"] == 0
     completed = [event for event in events if event.type == "tool.completed"]
     assert [event.metadata["error_code"] for event in completed] == [
         "GIT_NOT_REPOSITORY",
@@ -334,6 +336,8 @@ def test_runtime_maps_model_failure_and_cancellation(tmp_path: Path) -> None:
     )
     assert failed[-1].type == "run.failed"
     assert failed[-1].error_code == "MODEL_UNAVAILABLE"
+    assert failed[-1].metadata["incomplete_reason"] == "MODEL_UNAVAILABLE"
+    assert failed[-1].metadata["metrics"]["model_calls"] == 1
 
     cancel_event = asyncio.Event()
     cancel_event.set()
@@ -345,6 +349,8 @@ def test_runtime_maps_model_failure_and_cancellation(tmp_path: Path) -> None:
         )
     )
     assert cancelled[-1].type == "run.cancelled"
+    assert cancelled[-1].metadata["incomplete_reason"] == "RUN_CANCELLED"
+    assert cancelled[-1].metadata["evidence"]["changed_files"] == []
 
 
 def test_runtime_requests_one_protocol_correction_then_recovers(tmp_path: Path) -> None:
@@ -379,6 +385,8 @@ def test_runtime_fails_after_second_protocol_error(tmp_path: Path) -> None:
     assert events[-1].type == "run.failed"
     assert events[-1].error_code == "MODEL_PROTOCOL_ERROR"
     assert events[-1].error_message == "Model returned an invalid response twice"
+    assert events[-1].metadata["incomplete_reason"] == "MODEL_PROTOCOL_ERROR"
+    assert events[-1].metadata["metrics"]["model_calls"] == 2
     serialized = json.dumps([event.to_dict() for event in events])
     assert "first malformed response" not in serialized
     assert "second malformed response" not in serialized
