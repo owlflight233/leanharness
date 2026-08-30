@@ -33,6 +33,11 @@ export type RunEvent =
       metadata?: Record<string, unknown>;
     })
   | (RunEventBase & { type: "usage.reported"; usage: Usage })
+  | (RunEventBase & {
+      type: "context.projected" | "context.compacted" | "context.compaction.failed";
+      summary?: string;
+      error?: TurnError;
+    })
   | (RunEventBase & { type: "run.completed"; answer: string; summary?: string })
   | (RunEventBase & { type: "run.incomplete"; answer?: string; summary?: string })
   | (RunEventBase & { type: "run.failed"; error: TurnError })
@@ -140,6 +145,16 @@ function isRunEvent(value: unknown): value is RunEvent {
     return typeof value.tool === "string";
   }
   if (value.type === "usage.reported") return isRecord(value.usage);
+  if (["context.projected", "context.compacted"].includes(value.type)) {
+    return value.metadata === undefined || isRecord(value.metadata);
+  }
+  if (value.type === "context.compaction.failed") {
+    return (
+      isRecord(value.error) &&
+      typeof value.error.code === "string" &&
+      typeof value.error.message === "string"
+    );
+  }
   if (value.type === "run.completed") return typeof value.answer === "string";
   if (value.type === "run.failed") {
     return (

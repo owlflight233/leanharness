@@ -7,8 +7,9 @@ describe("agent run stream", () => {
     const encoder = new TextEncoder();
     const payload = encoder.encode(
       '{"type":"run.started","sequence":0,"run_id":"r1"}\n' +
-        '{"type":"assistant.progress","sequence":1,"run_id":"r1","summary":"检查代码"}\n' +
-        '{"type":"run.completed","sequence":2,"run_id":"r1","answer":"完成"}\n',
+        '{"type":"context.projected","sequence":1,"run_id":"r1","metadata":{"projected_chars":1200}}\n' +
+        '{"type":"assistant.progress","sequence":2,"run_id":"r1","summary":"检查代码"}\n' +
+        '{"type":"run.completed","sequence":3,"run_id":"r1","answer":"完成"}\n',
     );
     const unicodeStart = payload.indexOf(0xe6);
     const stream = new ReadableStream<Uint8Array>({
@@ -24,6 +25,7 @@ describe("agent run stream", () => {
 
     expect(events.map((event) => event.type)).toEqual([
       "run.started",
+      "context.projected",
       "assistant.progress",
       "run.completed",
     ]);

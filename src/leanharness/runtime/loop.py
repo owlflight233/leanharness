@@ -10,8 +10,13 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Protocol
 
-from leanharness.context import ContextBudgetError, ContextStore
-from leanharness.errors import ApprovalExpiredError, ModelError
+from leanharness.context import (
+    ContextBudgetError,
+    ContextProjection,
+    ContextSource,
+    ContextStore,
+)
+from leanharness.errors import ApprovalExpiredError, ModelContextLengthError, ModelError
 from leanharness.models import ModelMessage, ModelRequest, ModelResponse, ToolCall
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.runtime.completion import CompletionLedger
@@ -66,9 +71,11 @@ class CodingAgent:
         session_id: str = "ephemeral",
         approvals: ApprovalCoordinator | None = None,
         history: tuple[ModelMessage, ...] = (),
+        history_sources: tuple[ContextSource, ...] = (),
         initial_sequence: int = 0,
         reserve_summary_round: bool = True,
         include_outcome_tool: bool = True,
+        context_sanitizer: Callable[[str], str] | None = None,
     ) -> None:
         if not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
             raise ValueError(f"max_steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}")
@@ -78,13 +85,18 @@ class CodingAgent:
         self.run_id = run_id or uuid.uuid4().hex
         self.cancel_event = cancel_event or asyncio.Event()
         self.tools = tool_registry_factory(self.workspace, mode=permission_mode)
-        self.context = ContextStore(max_chars=context_chars)
+        self.context = ContextStore(
+            max_chars=context_chars, summary_sanitizer=context_sanitizer
+        )
         self.state = RunState.CREATED
         self.language = language
         self.permission_mode = permission_mode
         self.session_id = session_id
         self.approvals = approvals
-        self.history = history
+        self.history_sources = history_sources or tuple(
+            ContextSource(f"history:{index}", message)
+            for index, message in enumerate(history)
+        )
         self.reserve_summary_round = reserve_summary_round
         self.include_outcome_tool = include_outcome_tool
         self._sequence = initial_sequence
@@ -130,6 +142,7 @@ class CodingAgent:
         self.context.replace(
             (*system_messages, ModelMessage(role="user", content=summary))
         )
+        self.history_sources = ()
 
     async def _run_task(
         self,
@@ -146,9 +159,6 @@ class CodingAgent:
                     content=system_prompt(self.language, self.permission_mode),
                 )
             )
-        if initialize_context:
-            for message in self.history:
-                self.context.append(message)
         self.context.append(
             ModelMessage(role="user", content=validated_task)
         )
@@ -174,25 +184,59 @@ class CodingAgent:
             )
             summary_round = self.reserve_summary_round and step == self.max_steps
             try:
-                self.context.compact()
+                projection = await self.context.projector.project_async(
+                    self.history_sources,
+                    self.context,
+                    self.model_client,
+                )
+                self.metrics.record_projection(
+                    chars=projection.projected_chars,
+                    messages=len(projection.messages),
+                    compressed_steps=projection.compressed_steps,
+                    compressed_tool_results=projection.compressed_messages,
+                    semantic_calls=self.context.projector.semantic_calls,
+                    semantic_fallback=projection.semantic_fallback,
+                    generation=projection.generation,
+                )
+                yield self._context_projected_event(step, projection)
+                if projection.changed or projection.semantic_fallback:
+                    yield self._context_compacted_event(step, projection)
                 self.state = transition(self.state, RunState.REQUESTING_MODEL)
                 self.metrics.model_calls += 1
-                response = await self.model_client.complete(
-                    ModelRequest(
-                        messages=self.context.messages,
-                        max_tokens=2_048,
-                        tools=(
-                            ()
-                            if summary_round
-                            else (
-                                (*self.tools.definitions, OUTCOME_TOOL)
-                                if self.include_outcome_tool
-                                else self.tools.definitions
-                            )
-                        ),
-                        tool_choice="none" if summary_round else "auto",
+                try:
+                    response = await self.model_client.complete(
+                        self._model_request(projection.messages, summary_round)
                     )
-                )
+                except ModelContextLengthError:
+                    recovered = await self.context.projector.project_async(
+                        self.history_sources,
+                        self.context,
+                        self.model_client,
+                        force_semantic=True,
+                    )
+                    if recovered.digest == projection.digest:
+                        raise ContextBudgetError(
+                            "Context compaction did not produce a smaller request"
+                        ) from None
+                    self.metrics.record_projection(
+                        chars=recovered.projected_chars,
+                        messages=len(recovered.messages),
+                        compressed_steps=recovered.compressed_steps,
+                        compressed_tool_results=recovered.compressed_messages,
+                        semantic_calls=self.context.projector.semantic_calls,
+                        semantic_fallback=recovered.semantic_fallback,
+                        generation=recovered.generation,
+                    )
+                    yield self._context_compacted_event(step, recovered)
+                    self.metrics.model_calls += 1
+                    try:
+                        response = await self.model_client.complete(
+                            self._model_request(recovered.messages, summary_round)
+                        )
+                    except ModelContextLengthError as exc:
+                        raise ContextBudgetError(
+                            "Model context window remained exceeded after one recovery"
+                        ) from exc
                 self.state = transition(self.state, RunState.INTERPRETING)
             except asyncio.CancelledError:
                 self.state = transition(self.state, RunState.CANCELLED)
@@ -200,6 +244,12 @@ class CodingAgent:
                 return
             except ContextBudgetError as exc:
                 self.state = transition(self.state, RunState.FAILED)
+                yield self._event(
+                    "context.compaction.failed",
+                    step=step,
+                    error_code="CONTEXT_BUDGET_EXCEEDED",
+                    error_message=str(exc),
+                )
                 yield self._event(
                     "run.failed",
                     step=step,
@@ -643,8 +693,65 @@ class CodingAgent:
         return {
             "evidence": self.evidence.public_summary(),
             "metrics": self.metrics.to_dict(),
+            "context": self.metrics.context_dict(),
             **({"incomplete_reason": incomplete_reason} if incomplete_reason else {}),
         }
+
+    def _model_request(
+        self, messages: tuple[ModelMessage, ...], summary_round: bool
+    ) -> ModelRequest:
+        return ModelRequest(
+            messages=messages,
+            max_tokens=2_048,
+            tools=(
+                ()
+                if summary_round
+                else (
+                    (*self.tools.definitions, OUTCOME_TOOL)
+                    if self.include_outcome_tool
+                    else self.tools.definitions
+                )
+            ),
+            tool_choice="none" if summary_round else "auto",
+        )
+
+    def _context_projected_event(
+        self, step: int, projection: ContextProjection
+    ) -> RuntimeEvent:
+        return self._event(
+            "context.projected",
+            step=step,
+            summary=(
+                "已生成本轮模型上下文" if self.language == "zh" else "Model context projected"
+            ),
+            metadata={
+                "projected_chars": projection.projected_chars,
+                "projected_messages": len(projection.messages),
+                "source_count": len(projection.source_ids),
+                "context_generation": projection.generation,
+                "projection_hash": projection.digest,
+            },
+        )
+
+    def _context_compacted_event(
+        self, step: int, projection: ContextProjection
+    ) -> RuntimeEvent:
+        return self._event(
+            "context.compacted",
+            step=step,
+            summary=(
+                "已压缩本轮模型上下文" if self.language == "zh" else "Model context compacted"
+            ),
+            metadata={
+                "projected_chars": projection.projected_chars,
+                "compressed_steps": projection.compressed_steps,
+                "compressed_tool_results": projection.compressed_messages,
+                "semantic_compacted": projection.semantic_compacted,
+                "semantic_fallback": projection.semantic_fallback,
+                "context_generation": projection.generation,
+                "projection_hash": projection.digest,
+            },
+        )
 
     async def _execute_tool(
         self,
