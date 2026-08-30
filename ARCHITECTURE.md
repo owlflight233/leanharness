@@ -62,9 +62,10 @@ hidden side effects inside state objects.
 The runtime does not classify user language or infer task requirements. The
 model receives the bounded public conversation and current tool definitions,
 then chooses observations, mutations, verification, or the explicit
-`report_run_outcome` control action. The fixed core only checks that a reported
-completed outcome does not contradict observed tool facts; failed edits and
-failed commands therefore cannot be presented as successful operations.
+`report_run_outcome` control action. The fixed core requires at least one
+successful workspace observation before accepting a completed outcome, and
+checks that the outcome does not contradict observed tool facts. Failed edits
+and failed commands therefore cannot be presented as successful operations.
 
 This is the central decision boundary: application services never rewrite a
 user task, select a continuation target, or decide which kind of work the task

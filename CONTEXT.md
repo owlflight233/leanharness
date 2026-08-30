@@ -4,6 +4,9 @@ LeanHarness keeps task decisions inside the Agent Loop. Context management does
 not classify intent, rewrite a user message, choose a tool, or decide whether a
 run is complete. It only builds a bounded, protocol-valid factual view for one
 model request.
+Completion remains an evidence boundary: the runtime accepts a completed
+outcome only after at least one successful workspace observation and after
+mutation or verification failures have been resolved.
 
 ## Data flow
 
