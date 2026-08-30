@@ -22,6 +22,8 @@ class CompletionLedger:
     successful_verifications: int = 0
     changed_files: set[str] = field(default_factory=set)
     unresolved_errors: list[str] = field(default_factory=list)
+    verification_argument_denials: int = 0
+    verification_recoveries: int = 0
 
     @property
     def primary_error_code(self) -> str | None:
@@ -60,10 +62,18 @@ class CompletionLedger:
                 self._clear_tool_errors("DIRECTORY_")
             elif tool == "workspace_command":
                 self.successful_verifications += 1
+                if self.verification_argument_denials > self.verification_recoveries:
+                    self.verification_recoveries += 1
                 self._clear_tool_errors("COMMAND_")
             return
         if result.error and result.error.code not in self.unresolved_errors:
             self.unresolved_errors.append(result.error.code)
+        if (
+            tool == "workspace_command"
+            and result.error is not None
+            and result.error.code == "COMMAND_ARGUMENT_DENIED"
+        ):
+            self.verification_argument_denials += 1
 
     def validate_completed(self, *, language: str = "same") -> CompletionDecision:
         """Reject completion only when observed tool facts contradict it."""
@@ -112,6 +122,8 @@ class CompletionLedger:
             "verifications": self.successful_verifications,
             "changed_files": sorted(self.changed_files),
             "unresolved_errors": list(self.unresolved_errors),
+            "verification_argument_denials": self.verification_argument_denials,
+            "verification_recoveries": self.verification_recoveries,
         }
 
     def _clear_tool_errors(self, prefix: str) -> None:

@@ -58,6 +58,7 @@ from leanharness.permissions import (
 from leanharness.planning import Plan, PlanController, PlanState, PlanStep, render_plan_markdown
 from leanharness.planning.generator import GeneratedPlan
 from leanharness.runtime import RuntimeEvent, UserInputCoordinator, UserInputProtocolError
+from leanharness.runtime.metrics import RunMetrics
 from leanharness.runtime.user_input import UserInputExpiredError
 from leanharness.storage import LocalStore
 
@@ -677,6 +678,7 @@ def create_app(
             history_sources=context_history_for_session(
                 store, session, exclude_run_id=run.id
             ),
+            initial_metrics=RunMetrics.from_events(existing_events) if resume else None,
         )
 
         async def events() -> AsyncIterator[bytes]:

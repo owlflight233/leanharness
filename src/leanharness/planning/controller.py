@@ -13,6 +13,7 @@ from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.planning.contracts import Plan, PlanStep, PlanStepState
 from leanharness.runtime import CodingAgent, RuntimeEvent
 from leanharness.runtime.loop import RuntimeModelClient
+from leanharness.runtime.metrics import RunMetrics
 from leanharness.tools import ToolRegistry
 
 PlanEventType = str
@@ -71,6 +72,7 @@ class PlanController:
         on_step: StepUpdater | None = None,
         cancel_event: asyncio.Event | None = None,
         history_sources: tuple[ContextSource, ...] = (),
+        initial_metrics: RunMetrics | None = None,
     ) -> None:
         if not plan.run_id:
             raise ValueError("Confirmed plan must be attached to a run")
@@ -101,6 +103,7 @@ class PlanController:
             cancel_event=cancel_event,
             reserve_summary_round=False,
             history_sources=history_sources,
+            metrics=initial_metrics,
         )
 
     async def run(self) -> AsyncIterator[RuntimeEvent | PlanEvent]:
@@ -211,6 +214,7 @@ class PlanController:
                     metadata={
                         "step_id": step.id,
                         "evidence": evidence,
+                        **_verification_metadata(evidence),
                         **({"answer": answer} if answer else {}),
                     },
                 )
@@ -369,6 +373,16 @@ def _aggregate_evidence(items: list[dict[str, object]]) -> dict[str, object]:
         )
         for key in count_keys
     }
+    verification_argument_denials = sum(
+        value
+        for item in items
+        if isinstance((value := item.get("verification_argument_denials")), int)
+    )
+    verification_recoveries = sum(
+        value
+        for item in items
+        if isinstance((value := item.get("verification_recoveries")), int)
+    )
     changed_files = sorted(
         {
             str(path)
@@ -389,4 +403,19 @@ def _aggregate_evidence(items: list[dict[str, object]]) -> dict[str, object]:
         **counts,
         "changed_files": changed_files,
         "unresolved_errors": unresolved_errors,
+        "verification_argument_denials": verification_argument_denials,
+        "verification_recoveries": verification_recoveries,
+    }
+
+
+def _verification_metadata(evidence: dict[str, object]) -> dict[str, object]:
+    denials = evidence.get("verification_argument_denials")
+    recoveries = evidence.get("verification_recoveries")
+    if not isinstance(denials, int) or denials < 1:
+        return {}
+    return {
+        "verification_note": (
+            "The requested command arguments were denied; a permitted verification "
+            f"command later succeeded ({recoveries or 0} recovery)."
+        )
     }

@@ -94,6 +94,7 @@ class CodingAgent:
         reserve_summary_round: bool = True,
         include_outcome_tool: bool = True,
         context_sanitizer: Callable[[str], str] | None = None,
+        metrics: RunMetrics | None = None,
     ) -> None:
         if not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
             raise ValueError(f"max_steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}")
@@ -121,7 +122,7 @@ class CodingAgent:
         self.include_outcome_tool = include_outcome_tool
         self._sequence = initial_sequence
         self.evidence = CompletionLedger()
-        self.metrics = RunMetrics()
+        self.metrics = metrics or RunMetrics()
         self._protocol_recovery = ModelProtocolRecovery()
         self._failure_tracker = ToolFailureTracker(self.language)
         # Tools can become unavailable after a deterministic environment fact

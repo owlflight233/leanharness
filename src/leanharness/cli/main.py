@@ -39,6 +39,7 @@ from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.planning import PlanController, PlanState
 from leanharness.runtime import UserInputCoordinator
 from leanharness.runtime.loop import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, MIN_MAX_STEPS
+from leanharness.runtime.metrics import RunMetrics
 from leanharness.storage import LocalStore
 
 
@@ -521,6 +522,7 @@ async def _plan_lifecycle(
         )
         store.attach_plan_run(plan.id, run.id)
     approvals = ApprovalCoordinator()
+    existing_events = store.list_events(run.id) if command == "resume" else []
     controller = PlanController(
         store.get_plan(plan.id),
         workspace=workspace,
@@ -529,6 +531,7 @@ async def _plan_lifecycle(
         language=session.language or "same",
         approvals=approvals,
         history_sources=context_history_for_session(store, session, exclude_run_id=run.id),
+        initial_metrics=RunMetrics.from_events(existing_events) if existing_events else None,
     )
     answer = None
     async for event in controller.run():

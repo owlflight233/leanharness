@@ -119,6 +119,60 @@ def test_completion_guidance_uses_session_language() -> None:
     assert decision.guidance == "在报告完成前\uFF0C至少获取一次成功的工作区观察。"
 
 
+def test_resumed_metrics_rehydrate_from_public_events() -> None:
+    from leanharness.runtime.metrics import RunMetrics
+
+    metrics = RunMetrics.from_events(
+        [
+            {
+                "type": "usage.reported",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+            },
+            {"type": "tool.requested"},
+            {
+                "type": "context.projected",
+                "metadata": {"projected_chars": 120, "projected_messages": 3},
+            },
+        ]
+    )
+
+    assert metrics.to_dict() == {
+        "model_calls": 1,
+        "tool_calls": 1,
+        "prompt_tokens": 10,
+        "completion_tokens": 4,
+        "total_tokens": 14,
+    }
+    assert metrics.context_dict()["projected_chars"] == 120
+
+
+def test_verification_argument_denial_is_audited_when_fallback_succeeds() -> None:
+    from leanharness.runtime.completion import CompletionLedger
+    from leanharness.tools import ToolErrorInfo, ToolResult
+
+    ledger = CompletionLedger()
+    denied = ToolResult(
+        "command-1",
+        "workspace_command",
+        False,
+        error=ToolErrorInfo("COMMAND_ARGUMENT_DENIED", "denied"),
+    )
+    ledger.record("workspace_command", denied)
+    ledger.record(
+        "workspace_command",
+        ToolResult(
+            "command-2",
+            "workspace_command",
+            True,
+            public_metadata={"profile": "python-test", "exit_code": 0},
+        ),
+    )
+
+    summary = ledger.public_summary()
+    assert summary["verification_argument_denials"] == 1
+    assert summary["verification_recoveries"] == 1
+
+
 def test_mutation_task_without_successful_patch_is_not_completed(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("# Example\n", encoding="utf-8")
     model = ScriptedModel(

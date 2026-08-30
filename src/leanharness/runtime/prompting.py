@@ -26,6 +26,8 @@ def system_prompt(language: str, mode: PermissionMode) -> str:
         "Use the preceding public conversation messages to resolve references such as "
         "'what did we do before', but verify repository state with tools when needed. "
         "If a requested edit cannot be applied, report it as incomplete rather than complete. "
+        "Do not leave temporary verification files or generated cache artifacts in the workspace; "
+        "remove any temporary files you create before reporting completion. "
         "When the task is finished or cannot be completed, call report_run_outcome alone. "
         "Choose completed only if the requested result was achieved; otherwise choose "
         "incomplete and explain the blocker in the answer. A plain-text final answer is "
