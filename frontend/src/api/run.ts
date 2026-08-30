@@ -1,4 +1,13 @@
-import type { TurnError, Usage } from "./chat";
+export interface Usage {
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+}
+
+export interface TurnError {
+  code: string;
+  message: string;
+}
 
 interface RunEventBase {
   sequence: number;

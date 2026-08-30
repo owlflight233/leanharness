@@ -4,21 +4,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import inspect
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from leanharness import __version__
 from leanharness.application.agent_gateway import create_coding_run
-from leanharness.application.model_gateway import check_model, stream_chat
+from leanharness.application.model_gateway import check_model
 from leanharness.application.plan_gateway import create_plan_generator
-from leanharness.application.run_intent import resolve_run_intent
 from leanharness.application.session_gateway import (
     apply_first_task_title,
     ensure_session,
     history_for_session,
-    persist_model_event,
     persist_runtime_event,
 )
 from leanharness.cli.doctor import collect_diagnostics
@@ -31,7 +28,7 @@ from leanharness.config import (
 )
 from leanharness.errors import LeanHarnessError, ModelError, ModelNotConfiguredError
 from leanharness.logging import configure_logging
-from leanharness.models import ModelConfig, OpenAICompatibleClient, load_model_config
+from leanharness.models import OpenAICompatibleClient, load_model_config
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.planning import PlanController, PlanState
 from leanharness.runtime.loop import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, MIN_MAX_STEPS
@@ -84,10 +81,6 @@ def build_parser() -> argparse.ArgumentParser:
     model_subparsers = model_parser.add_subparsers(dest="model_command", required=True)
     model_subparsers.add_parser("check", help="Send a small model connectivity check.")
 
-    chat_parser = subparsers.add_parser("chat", help="Run one ephemeral streaming model turn.")
-    chat_parser.add_argument("message", help="User message (1 to 32000 characters).")
-    chat_parser.add_argument("--session", dest="session_id", help="Existing session ID.")
-    chat_parser.add_argument("--data-dir", help="Local application data directory.")
     run_parser = subparsers.add_parser(
         "run", help="Analyze or modify a workspace with the controlled coding agent."
     )
@@ -185,12 +178,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "model" and args.model_command == "check":
             return asyncio.run(_check_model())
 
-        if args.command == "chat":
-            model_config = load_model_config()
-            workspace = resolve_workspace(None)
-            return asyncio.run(
-                _chat(args.message, model_config, workspace, args.session_id, args.data_dir)
-            )
         if args.command == "run":
             workspace = resolve_workspace(args.workspace)
             return asyncio.run(
@@ -278,53 +265,6 @@ async def _check_model() -> int:
     return 0
 
 
-async def _chat(
-    message: str, config: ModelConfig, workspace: Path, session_id: str | None, data_dir: str | None
-) -> int:
-    store = LocalStore(Path(data_dir).expanduser() if data_dir else None)
-    _, session = ensure_session(store, workspace, session_id)
-    session = apply_first_task_title(store, session, message)
-    history = history_for_session(store, session)
-    run = store.create_run(session.id, "chat", message, 1)
-    store.add_message(session.id, "user", message, run_id=run.id)
-    print(f"[session] {session.id}", file=sys.stderr)
-    print(f"[run] {run.id}", file=sys.stderr)
-    wrote_content = False
-    failed = False
-    content: list[str] = []
-    chat_kwargs: dict[str, object] = {
-        "config": config,
-        "language": session.language or "same",
-    }
-    if "history" in inspect.signature(stream_chat).parameters:
-        chat_kwargs["history"] = history
-    async for event in stream_chat(message, **chat_kwargs):  # type: ignore[arg-type]
-        persist_model_event(store, session, run, event)
-        if event.type == "content.delta" and event.content:
-            print(event.content, end="", flush=True)
-            content.append(event.content)
-            wrote_content = True
-        elif event.type == "usage.reported" and event.usage:
-            total = event.usage.total_tokens
-            if total is not None:
-                print(f"usage: {total} tokens", file=sys.stderr)
-        elif event.type == "turn.failed":
-            if wrote_content:
-                print()
-            error_code = event.error_code or "MODEL_ERROR"
-            error_message = event.error_message or "Model request failed"
-            print(f"error [{error_code}]: {error_message}", file=sys.stderr)
-            failed = True
-    if wrote_content and not failed:
-        store.add_message(
-            session.id, "assistant", "".join(content), "complete", run_id=run.id
-        )
-        store.update_run(run.id, state="COMPLETED", answer="".join(content))
-    if wrote_content and not failed:
-        print()
-    return 3 if failed else 0
-
-
 async def _inspect(
     task: str,
     workspace: Path,
@@ -339,7 +279,6 @@ async def _inspect(
     )
     session = apply_first_task_title(store, session, task)
     selected_permission = permission or session.permission_mode
-    intent = resolve_run_intent(store, session, task, permission_mode=selected_permission)
     history = history_for_session(store, session)
     run = store.create_run(
         session.id,
@@ -367,7 +306,7 @@ async def _inspect(
         on_expire=lambda request: store.expire_approval(request.id),
     )
     runtime = create_coding_run(
-        intent.effective_task,
+        task,
         workspace,
         max_steps=max_steps,
         run_id=run.id,
@@ -375,14 +314,10 @@ async def _inspect(
         permission_mode=selected_permission,
         session_id=session.id,
         approvals=approvals,
-        continuation=intent.continuation,
         history=history,
-        task_requirements=intent.requirements,
-        original_message=intent.original_message,
-        run_metadata=intent.metadata(),
     )
     exit_code = 0
-    async for event in runtime.run(intent.effective_task):
+    async for event in runtime.run(task):
         persist_runtime_event(store, session, run, event)
         if event.type == "assistant.progress":
             print(f"[step {event.step}] {event.summary}", file=sys.stderr)

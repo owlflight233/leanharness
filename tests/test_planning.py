@@ -101,7 +101,7 @@ def test_plan_migration_is_version_three(tmp_path: Path) -> None:
     assert [row["version"] for row in versions] == [1, 2, 3, 4]
 
 
-def test_plan_message_is_persisted_but_not_injected_into_chat_history(tmp_path: Path) -> None:
+def test_plan_message_is_persisted_and_injected_into_chat_history(tmp_path: Path) -> None:
     from leanharness.application.session_gateway import history_for_session
 
     store = LocalStore(tmp_path / "data")
@@ -130,5 +130,6 @@ def test_plan_message_is_persisted_but_not_injected_into_chat_history(tmp_path: 
     assert messages[1].plan_id == plan.id
     assert [message.content for message in history_for_session(store, session)] == [
         "Inspect the project",
+        "# Demo\n1. inspect - inspect the project",
         "The project is ready.",
     ]

@@ -11,13 +11,12 @@ from leanharness.models import ModelRequest, ModelResponse, ModelUsage, ToolCall
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.runtime import (
     CodingAgent,
-    ContinuationContext,
     ReadOnlyAgent,
     RunControlError,
     RunState,
     validate_run_task,
 )
-from leanharness.runtime.completion import TaskRequirements
+from leanharness.runtime.outcome import OUTCOME_TOOL_NAME
 from leanharness.runtime.state import InvalidTransition, transition
 
 
@@ -91,7 +90,7 @@ def test_runtime_executes_tool_observes_result_and_accepts_final_answer(tmp_path
     assert "# Example" not in json.dumps([event.to_dict() for event in events])
 
 
-def test_runtime_rejects_early_completion_until_workspace_is_observed(tmp_path: Path) -> None:
+def test_runtime_accepts_model_completion_without_application_intent_rules(tmp_path: Path) -> None:
     model = ScriptedModel(
         [
             ModelResponse(content="Done without inspection."),
@@ -104,8 +103,7 @@ def test_runtime_rejects_early_completion_until_workspace_is_observed(tmp_path: 
     events = collect(agent)
 
     assert events[-1].type == "run.completed"
-    assert len(model.requests) == 3
-    assert "verifiable evidence" in model.requests[1].messages[-1].content
+    assert len(model.requests) == 1
 
 
 def test_mutation_task_without_successful_patch_is_not_completed(tmp_path: Path) -> None:
@@ -143,38 +141,6 @@ def test_mutation_task_without_successful_patch_is_not_completed(tmp_path: Path)
     assert failed_patch.metadata["error_code"] == "PATCH_INVALID"
 
 
-def test_mutation_task_fails_before_model_when_permission_has_no_mutation_tools(
-    tmp_path: Path,
-) -> None:
-    model = ScriptedModel([])
-
-    events = collect(
-        CodingAgent(tmp_path, model, permission_mode=PermissionMode.INSPECT),
-        "Create a new app.py file",
-    )
-
-    assert events[-1].type == "run.failed"
-    assert events[-1].error_code == "PERMISSION_INSUFFICIENT"
-    assert events[-1].metadata == {
-        "missing_capabilities": ["workspace_mutation"],
-        "permission_mode": "inspect",
-    }
-    assert model.requests == []
-
-
-def test_verification_task_fails_before_model_when_command_tool_is_unavailable(
-    tmp_path: Path,
-) -> None:
-    model = ScriptedModel([])
-
-    events = collect(ReadOnlyAgent(tmp_path, model), "Run the tests")
-
-    assert events[-1].type == "run.failed"
-    assert events[-1].error_code == "PERMISSION_INSUFFICIENT"
-    assert events[-1].metadata["missing_capabilities"] == ["workspace_verification"]
-    assert model.requests == []
-
-
 def test_approval_preview_preserves_safe_patch_error(tmp_path: Path) -> None:
     model = ScriptedModel(
         [
@@ -206,34 +172,6 @@ def test_approval_preview_preserves_safe_patch_error(tmp_path: Path) -> None:
     assert json.loads(tool_message.content)["error"]["code"] == "PATCH_INVALID"
 
 
-def test_runtime_injects_bounded_continuation_capsule(tmp_path: Path) -> None:
-    model = ScriptedModel(
-        [
-            tool_response("call-1", "workspace_list", {"path": "."}),
-            ModelResponse(content="Permission is now unrestricted."),
-        ]
-    )
-    continuation = ContinuationContext(
-        previous_task="Create a small example file",
-        previous_state="EXHAUSTED",
-        changed_files=("example.py",),
-        incomplete_reason="PATCH_INVALID",
-        permission_mode="unrestricted",
-    )
-
-    events = collect(
-        CodingAgent(tmp_path, model, continuation=continuation),
-        "I changed the permission. What about now?",
-    )
-
-    assert events[-1].type == "run.completed"
-    capsule = model.requests[0].messages[1].content
-    assert "Create a small example file" in capsule
-    assert "EXHAUSTED" in capsule
-    assert "example.py" in capsule
-    assert len(capsule.encode("utf-8")) <= 4096
-
-
 def test_runtime_reserves_last_step_for_incomplete_summary(tmp_path: Path) -> None:
     model = ScriptedModel(
         [
@@ -250,17 +188,6 @@ def test_runtime_reserves_last_step_for_incomplete_summary(tmp_path: Path) -> No
     assert events[-1].answer == "Observed the workspace, but analysis is incomplete."
     assert model.requests[-1].tools == ()
     assert model.requests[-1].tool_choice == "none"
-
-
-def test_explicit_verification_task_requires_successful_command(tmp_path: Path) -> None:
-    model = ScriptedModel([])
-
-    events = collect(ReadOnlyAgent(tmp_path, model, max_steps=3), "Run the tests")
-
-    assert events[-1].type == "run.failed"
-    assert events[-1].error_code == "PERMISSION_INSUFFICIENT"
-    assert events[-1].metadata["missing_capabilities"] == ["workspace_verification"]
-    assert model.requests == []
 
 
 def test_terminal_event_reports_efficiency_metrics(tmp_path: Path) -> None:
@@ -427,20 +354,56 @@ def test_progress_summary_falls_back_when_model_uses_wrong_language(tmp_path: Pa
     assert progress.summary == "读取 README.md 以核对实现细节。"
 
 
-@pytest.mark.parametrize(
-    "task",
-    [
-        "先评估能力, 不要修改任何文件, 先别写代码",
-        "Review the repository without modifying files",
-    ],
-)
-def test_negative_edit_request_does_not_require_or_authorize_mutation(task: str) -> None:
-    requirements = TaskRequirements.infer(task)
+def outcome_response(status: str, answer: str) -> ModelResponse:
+    return ModelResponse(
+        content="",
+        tool_calls=(
+            ToolCall(
+                id="outcome-1",
+                name=OUTCOME_TOOL_NAME,
+                arguments={"status": status, "answer": answer},
+            ),
+        ),
+    )
 
-    assert requirements.mutation_required is False
+
+def test_model_owns_completion_decision_after_observation(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response("call-1", "workspace_list", {"path": "."}),
+            outcome_response("completed", "The workspace was inspected."),
+        ]
+    )
+
+    events = collect(ReadOnlyAgent(tmp_path, model))
+
+    assert events[-1].type == "run.completed"
+    assert events[-1].answer == "The workspace was inspected."
+    assert model.requests[-1].tools[-1].name == OUTCOME_TOOL_NAME
 
 
-def test_runtime_blocks_mutation_when_task_explicitly_forbids_edits(tmp_path: Path) -> None:
+def test_model_can_report_incomplete_without_keyword_inference(tmp_path: Path) -> None:
+    model = ScriptedModel([outcome_response("incomplete", "The requested change is blocked.")])
+
+    events = collect(
+        CodingAgent(tmp_path, model, permission_mode=PermissionMode.INSPECT),
+        "Please handle the repository as needed.",
+    )
+
+    assert events[-1].type == "run.incomplete"
+    assert events[-1].answer == "The requested change is blocked."
+
+
+def test_plain_text_is_a_model_completion_decision(tmp_path: Path) -> None:
+    model = ScriptedModel([ModelResponse(content="The task is complete.")])
+
+    events = collect(ReadOnlyAgent(tmp_path, model))
+
+    assert events[-1].type == "run.completed"
+    assert events[-1].answer == "The task is complete."
+
+
+def test_inspect_permission_does_not_classify_task_before_model_request(tmp_path: Path) -> None:
     model = ScriptedModel(
         [
             tool_response(
@@ -448,23 +411,49 @@ def test_runtime_blocks_mutation_when_task_explicitly_forbids_edits(tmp_path: Pa
                 "workspace_patch",
                 {"patch": "*** Begin Patch\n*** End Patch"},
             ),
-            ModelResponse(content="No files were changed."),
+            outcome_response("incomplete", "The requested edit is not available in inspect mode."),
         ]
     )
 
     events = collect(
-        CodingAgent(
-            tmp_path,
-            model,
-            permission_mode=PermissionMode.UNRESTRICTED,
-        ),
-        "Inspect the repository and do not modify any files",
+        CodingAgent(tmp_path, model, permission_mode=PermissionMode.INSPECT),
+        "Update the repository.",
     )
 
-    completed = next(event for event in events if event.type == "tool.completed")
-    assert completed.metadata["error_code"] == "MUTATION_NOT_REQUESTED"
-    assert not list(tmp_path.iterdir())
+    assert model.requests
+    assert events[0].type == "run.started"
+    assert any(
+        event.type == "tool.requested" and event.tool == "workspace_patch"
+        for event in events
+    )
+    assert not any(event.error_code == "PERMISSION_INSUFFICIENT" for event in events)
 
+
+def test_failed_mutation_contradicts_completed_outcome(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response(
+                "patch-1",
+                "workspace_patch",
+                {"patch": "*** Begin Patch\n*** End Patch"},
+            ),
+            outcome_response("completed", "The file was updated."),
+            outcome_response("incomplete", "The update is blocked."),
+        ]
+    )
+
+    events = collect(
+        CodingAgent(tmp_path, model, permission_mode=PermissionMode.UNRESTRICTED),
+        "Handle the requested change.",
+    )
+
+    assert any(
+        event.type == "tool.completed"
+        and event.metadata
+        and event.metadata.get("error_code") == "PATCH_INVALID"
+        for event in events
+    )
+    assert events[-1].type == "run.incomplete"
 
 @pytest.mark.parametrize("task", ["", "   ", "x" * 32_001])
 def test_run_task_is_bounded(task: str) -> None:

@@ -17,7 +17,6 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { streamChat, type ChatStreamer, type TurnEvent } from "./api/chat";
 import { fetchHealth, type HealthLoader, type HealthResponse } from "./api/health";
 import {
   fetchModelStatus,
@@ -56,7 +55,7 @@ import {
 
 type InspectorTab = "trace";
 type RunMode = "agent" | "plan";
-type TraceEvent = TurnEvent | RunEvent;
+type TraceEvent = RunEvent;
 type LoadState<T> =
   | { status: "loading" }
   | { status: "ready"; data: T }
@@ -75,7 +74,6 @@ interface ConversationMessage {
 interface AppProps {
   healthLoader?: HealthLoader;
   modelStatusLoader?: ModelStatusLoader;
-  chatStreamer?: ChatStreamer;
   runStreamer?: RunStreamer;
   approvalResolver?: ApprovalResolver;
   sessionClient?: SessionClient;
@@ -132,17 +130,12 @@ interface PendingApproval {
 function App({
   healthLoader = fetchHealth,
   modelStatusLoader = fetchModelStatus,
-  chatStreamer: legacyChatStreamer,
   runStreamer: providedRunStreamer,
   approvalResolver = resolveRunApproval,
   sessionClient = defaultSessionClient,
   workspaceClient = { select: selectWorkspace, create: createWorkspace },
 }: AppProps) {
-  const chatStreamer = legacyChatStreamer ?? streamChat;
   const runStreamer = providedRunStreamer ?? streamRun;
-  // Keep the old single-turn transport injectable for existing integrations,
-  // while the product always presents the coding-agent runtime by default.
-  const useLegacyChatTransport = providedRunStreamer === undefined && legacyChatStreamer !== undefined;
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
   const [, setInspectorTab] = useState<InspectorTab>("trace");
@@ -289,7 +282,7 @@ function App({
         await streamPlanCreation(
           message.trim(),
           (event) => {
-            setTrace((current) => [...current, event as TraceEvent]);
+            setTrace((current) => [...current, event as unknown as TraceEvent]);
             if (typeof event.run_id === "string") {
               const runId = event.run_id;
               setActiveRunId(runId);
@@ -324,7 +317,6 @@ function App({
       }
       return;
     }
-    const assistantId = useLegacyChatTransport ? nextMessageId.current++ : null;
     const activeSessionId = sessionId;
     let resolvedSessionId = activeSessionId;
     const controller = new AbortController();
@@ -334,9 +326,6 @@ function App({
         ...current,
         { id: userId, role: "user", content: message, status: "complete" },
       ];
-      if (assistantId !== null) {
-        next.push({ id: assistantId, role: "assistant", content: "", status: "streaming" });
-      }
       return next;
     });
     setInput("");
@@ -345,41 +334,7 @@ function App({
     setIsStreaming(true);
 
     try {
-      if (useLegacyChatTransport && assistantId !== null) {
-        await chatStreamer(
-          message,
-          (event) => {
-            setTrace((current) => [...current, event]);
-            if (event.run_id) {
-              setActiveRunId(event.run_id);
-              updateMessage(userId, (current) => ({ ...current, runId: event.run_id }));
-              updateMessage(assistantId, (current) => ({ ...current, runId: event.run_id }));
-            }
-            if (event.session_id && event.session_id !== resolvedSessionId) {
-              resolvedSessionId = event.session_id;
-              setSessionId(event.session_id);
-              window.localStorage.setItem(projectSessionKey(currentProjectId()), event.session_id);
-            }
-            if (event.type === "content.delta") {
-              updateMessage(assistantId, (current) => ({
-                ...current,
-                content: current.content + event.content,
-              }));
-            } else if (event.type === "turn.completed") {
-              updateMessage(assistantId, (current) => ({ ...current, status: "complete" }));
-            } else if (event.type === "turn.failed") {
-              updateMessage(assistantId, (current) => ({
-                ...current,
-                content: current.content || event.error.message,
-                status: "error",
-              }));
-            }
-          },
-          controller.signal,
-          activeSessionId ?? undefined,
-        );
-      } else {
-        await runStreamer(
+      await runStreamer(
           message,
           (event) => {
             setTrace((current) => [...current, event]);
@@ -428,21 +383,10 @@ function App({
           controller.signal,
           24,
           activeSessionId ?? undefined,
-        );
-      }
+      );
     } catch (error: unknown) {
-      const content = isAbortError(error)
-        ? useLegacyChatTransport ? "已停止生成" : "已停止运行"
-        : errorMessage(error);
-      if (assistantId !== null) {
-        updateMessage(assistantId, (current) => ({
-          ...current,
-          content: current.content || content,
-          status: isAbortError(error) ? "cancelled" : "error",
-        }));
-      } else {
-        appendMessage("assistant", content, isAbortError(error) ? "cancelled" : "error");
-      }
+      const content = isAbortError(error) ? "已停止运行" : errorMessage(error);
+      appendMessage("assistant", content, isAbortError(error) ? "cancelled" : "error");
     } finally {
       if (activeRequest.current === controller) activeRequest.current = null;
       setPendingApproval(null);
@@ -681,7 +625,7 @@ function App({
     setInspectorTab("trace");
     try {
       for await (const event of streamPlanAction(targetPlan.id, action, controller.signal)) {
-        setTrace((current) => [...current, event as TraceEvent]);
+        setTrace((current) => [...current, event as unknown as TraceEvent]);
         if (typeof event.run_id === "string") {
           setActiveRunId(event.run_id);
           if (
@@ -907,7 +851,7 @@ function App({
             </div>
             <div className="composer-settings"><label htmlFor="permission-mode">权限</label><select id="permission-mode" value={permissionMode} onChange={(event) => void changePermission(event.target.value as PermissionMode)} disabled={isStreaming}><option value="inspect">只读检查</option><option value="approve">逐次批准</option><option value="unrestricted">受控直接执行</option></select></div><span className="composer-state">{isStreaming ? mode === "plan" ? "正在生成计划" : "Agent 正在执行" : modelStatus.status === "ready" && modelStatus.data.configured ? mode === "plan" ? "计划模式 · 本地保存" : "Agent · 本地保存" : `模型${modelCopy}`}</span>
             {isStreaming ? (
-              <button className="send-button stop-button" type="button" aria-label={useLegacyChatTransport ? "停止生成" : "停止运行"} title={useLegacyChatTransport ? "停止生成" : "停止运行"} onClick={() => activeRequest.current?.abort()}><Square size={14} fill="currentColor" /></button>
+              <button className="send-button stop-button" type="button" aria-label="停止运行" title="停止运行" onClick={() => activeRequest.current?.abort()}><Square size={14} fill="currentColor" /></button>
             ) : (
               <button className="send-button" type="submit" aria-label="发送任务" disabled={!canSubmit}><Send size={17} /></button>
             )}

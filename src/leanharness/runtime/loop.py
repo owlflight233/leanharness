@@ -14,14 +14,16 @@ from leanharness.context import ContextBudgetError, ContextStore
 from leanharness.errors import ApprovalExpiredError, ModelError
 from leanharness.models import ModelMessage, ModelRequest, ModelResponse, ToolCall
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
-from leanharness.runtime.completion import (
-    CompletionLedger,
-    TaskRequirements,
-    missing_capabilities,
-)
-from leanharness.runtime.continuation import ContinuationContext
+from leanharness.runtime.completion import CompletionLedger
 from leanharness.runtime.events import RuntimeEvent, RuntimeEventType
 from leanharness.runtime.metrics import RunMetrics
+from leanharness.runtime.outcome import (
+    OUTCOME_TOOL,
+    OUTCOME_TOOL_NAME,
+    OutcomeProtocolError,
+    OutcomeStatus,
+    parse_outcome,
+)
 from leanharness.runtime.prompting import system_prompt
 from leanharness.runtime.state import RunState, transition
 from leanharness.tools import ToolErrorInfo, ToolExecutionError, ToolRegistry, ToolResult
@@ -63,13 +65,10 @@ class CodingAgent:
         permission_mode: PermissionMode = PermissionMode.INSPECT,
         session_id: str = "ephemeral",
         approvals: ApprovalCoordinator | None = None,
-        continuation: ContinuationContext | None = None,
         history: tuple[ModelMessage, ...] = (),
-        task_requirements: TaskRequirements | None = None,
-        original_message: str | None = None,
-        run_metadata: dict[str, object] | None = None,
         initial_sequence: int = 0,
         reserve_summary_round: bool = True,
+        include_outcome_tool: bool = True,
     ) -> None:
         if not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
             raise ValueError(f"max_steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}")
@@ -85,12 +84,9 @@ class CodingAgent:
         self.permission_mode = permission_mode
         self.session_id = session_id
         self.approvals = approvals
-        self.continuation = continuation
         self.history = history
-        self.task_requirements = task_requirements
-        self.original_message = original_message
-        self.run_metadata = dict(run_metadata or {})
         self.reserve_summary_round = reserve_summary_round
+        self.include_outcome_tool = include_outcome_tool
         self._sequence = initial_sequence
         self.evidence = CompletionLedger()
         self.metrics = RunMetrics()
@@ -105,8 +101,6 @@ class CodingAgent:
     async def continue_task(
         self,
         task: str,
-        *,
-        requirements: TaskRequirements | None = None,
     ) -> AsyncIterator[RuntimeEvent]:
         if self.state not in {
             RunState.COMPLETED,
@@ -117,7 +111,6 @@ class CodingAgent:
             raise RunControlError("RUN_NOT_TERMINAL", "Previous task is still active")
         self.state = RunState.CREATED
         self.evidence = CompletionLedger()
-        self.task_requirements = requirements
         self._repeat_key = None
         self._repeat_count = 0
         self._failure_counts.clear()
@@ -145,7 +138,6 @@ class CodingAgent:
         initialize_context: bool,
     ) -> AsyncIterator[RuntimeEvent]:
         validated_task = validate_run_task(task)
-        requirements = self.task_requirements or TaskRequirements.infer(validated_task)
         self.state = transition(self.state, RunState.PREPARING)
         if initialize_context:
             self.context.append(
@@ -154,48 +146,17 @@ class CodingAgent:
                     content=system_prompt(self.language, self.permission_mode),
                 )
             )
-        if initialize_context and self.continuation is not None:
-            self.context.append(
-                ModelMessage(role="system", content=self.continuation.to_model_message())
-            )
         if initialize_context:
             for message in self.history:
                 self.context.append(message)
         self.context.append(
-            ModelMessage(
-                role="user",
-                content=(self.original_message if initialize_context else None)
-                or validated_task,
-            )
+            ModelMessage(role="user", content=validated_task)
         )
         yield self._event(
             "run.started",
             summary=_run_started_summary(self.language),
-            metadata={
-                "permission_mode": self.permission_mode.value,
-                "requirements": {
-                    "mutation_required": requirements.mutation_required,
-                    "verification_required": requirements.verification_required,
-                },
-                **self.run_metadata,
-            },
+            metadata={"permission_mode": self.permission_mode.value},
         )
-
-        missing = missing_capabilities(
-            requirements, {definition.name for definition in self.tools.definitions}
-        )
-        if missing:
-            self.state = transition(self.state, RunState.FAILED)
-            yield self._event(
-                "run.failed",
-                error_code="PERMISSION_INSUFFICIENT",
-                error_message=_capability_message(missing, self.language),
-                metadata={
-                    "missing_capabilities": list(missing),
-                    "permission_mode": self.permission_mode.value,
-                },
-            )
-            return
 
         for step in range(1, self.max_steps + 1):
             if self.cancel_event.is_set():
@@ -220,7 +181,15 @@ class CodingAgent:
                     ModelRequest(
                         messages=self.context.messages,
                         max_tokens=2_048,
-                        tools=() if summary_round else self.tools.definitions,
+                        tools=(
+                            ()
+                            if summary_round
+                            else (
+                                (*self.tools.definitions, OUTCOME_TOOL)
+                                if self.include_outcome_tool
+                                else self.tools.definitions
+                            )
+                        ),
                         tool_choice="none" if summary_round else "auto",
                     )
                 )
@@ -275,16 +244,85 @@ class CodingAgent:
                     answer=response.content.strip() or None,
                     summary=_incomplete_summary(self.language),
                     metadata=self._terminal_metadata(
-                        requirements,
-                        incomplete_reason=(
-                            self.evidence.completion_decision(requirements).reason
-                            or "STEP_BUDGET_EXHAUSTED"
-                        ),
+                        incomplete_reason="STEP_BUDGET_EXHAUSTED",
                     ),
                 )
                 return
 
             calls = response.tool_calls
+            if len(calls) == 1 and calls[0].name == OUTCOME_TOOL_NAME:
+                call = calls[0]
+                yield self._event(
+                    "tool.requested",
+                    step=step,
+                    tool=call.name,
+                    metadata={"tool_call_id": call.id},
+                )
+                try:
+                    outcome = parse_outcome(call)
+                except OutcomeProtocolError as exc:
+                    result = _runtime_tool_error(call, exc.code, exc.message)
+                else:
+                    if outcome.status is OutcomeStatus.INCOMPLETE:
+                        self.state = transition(self.state, RunState.EXHAUSTED)
+                        yield self._event(
+                            "run.incomplete",
+                            step=step,
+                            answer=outcome.answer,
+                            summary=_incomplete_summary(self.language),
+                            metadata=self._terminal_metadata(
+                                incomplete_reason="MODEL_REPORTED_INCOMPLETE"
+                            ),
+                        )
+                        return
+                    decision = self.evidence.validate_completed()
+                    if decision.accepted:
+                        self.state = transition(self.state, RunState.COMPLETED)
+                        yield self._event(
+                            "tool.completed",
+                            step=step,
+                            tool=call.name,
+                            metadata={"tool_call_id": call.id, "ok": True},
+                        )
+                        yield self._event(
+                            "run.completed",
+                            step=step,
+                            answer=outcome.answer,
+                            summary=_completed_summary(self.language),
+                            metadata=self._terminal_metadata(),
+                        )
+                        return
+                    result = _runtime_tool_error(
+                        call,
+                        decision.reason or "OUTCOME_CONTRADICTS_EVIDENCE",
+                        decision.guidance or "The reported outcome contradicts tool evidence",
+                    )
+                if result is not None:
+                    yield self._event(
+                        "tool.completed",
+                        step=step,
+                        tool=call.name,
+                        metadata={
+                            **result.public_metadata,
+                            "tool_call_id": call.id,
+                            "ok": result.ok,
+                        },
+                    )
+                self.context.append(
+                    ModelMessage(
+                        role="tool",
+                        content=result.to_model_content(),
+                        tool_call_id=call.id,
+                    )
+                )
+                yield self._event(
+                    "assistant.progress",
+                    step=step,
+                    summary=_outcome_retry_summary(self.language),
+                )
+                yield self._event("step.completed", step=step)
+                self.state = transition(self.state, RunState.PREPARING)
+                continue
             if calls:
                 yield self._event(
                     "assistant.progress",
@@ -331,15 +369,11 @@ class CodingAgent:
                             )
                         else:
                             result = None
-                            if (
-                                call.name in {"workspace_patch", "workspace_mkdir"}
-                                and not requirements.mutation_required
-                            ):
+                            if call.name == OUTCOME_TOOL_NAME:
                                 result = _runtime_tool_error(
                                     call,
-                                    "MUTATION_NOT_REQUESTED",
-                                    "The task does not request a workspace mutation; "
-                                    "no files were changed",
+                                    "OUTCOME_MUST_BE_ALONE",
+                                    "report_run_outcome must be the only call in a response",
                                 )
                             elif self.tools.approval_required(call):
                                 if self.approvals is None:
@@ -514,29 +548,51 @@ class CodingAgent:
                 yield self._event("step.completed", step=step)
                 continue
 
-            decision = self.evidence.completion_decision(requirements)
-            if response.content.strip() and decision.accepted:
-                self.state = transition(self.state, RunState.COMPLETED)
-                yield self._event(
-                    "run.completed",
-                    step=step,
-                    answer=response.content.strip(),
-                    summary=_completed_summary(self.language),
-                    metadata=self._terminal_metadata(requirements),
+            if response.content.strip():
+                decision = self.evidence.validate_completed()
+                if decision.accepted:
+                    self.state = transition(self.state, RunState.COMPLETED)
+                    yield self._event(
+                        "run.completed",
+                        step=step,
+                        answer=response.content.strip(),
+                        summary=_completed_summary(self.language),
+                        metadata=self._terminal_metadata(),
+                    )
+                    return
+                self.context.append(
+                    ModelMessage(
+                        role="user",
+                        content=(
+                            decision.guidance
+                            or "The reported answer conflicts with observed tool facts; "
+                            "continue or report incomplete."
+                        ),
+                    )
                 )
-                return
+                self.state = transition(self.state, RunState.PREPARING)
+                yield self._event(
+                    "assistant.progress",
+                    step=step,
+                    summary=_outcome_retry_summary(self.language),
+                )
+                yield self._event("step.completed", step=step)
+                continue
 
             self.context.append(
                 ModelMessage(
                     role="user",
-                    content=decision.guidance or "Continue until the task has concrete evidence.",
+                    content=(
+                        "Choose the next tool action, or call report_run_outcome alone to "
+                        "explicitly report completed or incomplete."
+                    ),
                 )
             )
             self.state = transition(self.state, RunState.PREPARING)
             yield self._event(
                 "assistant.progress",
                 step=step,
-                summary=_evidence_required_summary(decision.reason, self.language),
+                summary=_outcome_required_summary(self.language),
             )
             yield self._event("step.completed", step=step)
 
@@ -548,7 +604,6 @@ class CodingAgent:
             step=self.max_steps,
             summary=_incomplete_summary(self.language),
             metadata=self._terminal_metadata(
-                requirements,
                 incomplete_reason="STEP_BUDGET_EXHAUSTED",
             ),
         )
@@ -582,15 +637,10 @@ class CodingAgent:
 
     def _terminal_metadata(
         self,
-        requirements: TaskRequirements,
         *,
         incomplete_reason: str | None = None,
     ) -> dict[str, object]:
         return {
-            "requirements": {
-                "mutation_required": requirements.mutation_required,
-                "verification_required": requirements.verification_required,
-            },
             "evidence": self.evidence.public_summary(),
             "metrics": self.metrics.to_dict(),
             **({"incomplete_reason": incomplete_reason} if incomplete_reason else {}),
@@ -743,13 +793,6 @@ def _run_started_summary(language: str) -> str:
     return "编码任务已开始" if language == "zh" else "Coding run started"
 
 
-def _capability_message(missing: tuple[str, ...], language: str) -> str:
-    capabilities = ", ".join(missing)
-    if language == "zh":
-        return f"当前会话权限无法满足此任务: {capabilities}"
-    return f"The current permission mode cannot satisfy this task: {capabilities}"
-
-
 def _completed_summary(language: str) -> str:
     return "任务已完成" if language == "zh" else "Coding run completed"
 
@@ -774,21 +817,19 @@ def _incomplete_summary(language: str) -> str:
     )
 
 
-def _evidence_required_summary(reason: str | None, language: str) -> str:
-    if language == "zh":
-        if reason == "VERIFICATION_NOT_RUN":
-            return "需要成功运行项目验证后才能完成"
-        return (
-            "需要成功应用工作区改动后才能完成"
-            if reason == "MUTATION_NOT_APPLIED"
-            else "完成前需要工作区证据"
-        )
+def _outcome_required_summary(language: str) -> str:
     return (
-        "A workspace change must succeed before completion"
-        if reason == "MUTATION_NOT_APPLIED"
-        else "Project verification must succeed before completion"
-        if reason == "VERIFICATION_NOT_RUN"
-        else "Workspace evidence is required before completion"
+        "请通过完成控制动作明确报告任务结果"
+        if language == "zh"
+        else "Report the task result through the explicit outcome action"
+    )
+
+
+def _outcome_retry_summary(language: str) -> str:
+    return (
+        "完成控制动作与已观察到的工具事实不一致, 请继续处理或报告未完成"
+        if language == "zh"
+        else "The outcome conflicts with observed tool facts; continue or report incomplete"
     )
 
 

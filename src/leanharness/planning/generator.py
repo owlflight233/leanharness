@@ -13,7 +13,6 @@ from leanharness.permissions import PermissionMode
 from leanharness.planning.contracts import PlanStep
 from leanharness.planning.parser import parse_plan_markdown
 from leanharness.runtime import CodingAgent, RuntimeEvent
-from leanharness.runtime.completion import TaskRequirements
 
 PLAN_GENERATION_MAX_STEPS = 8
 
@@ -83,10 +82,7 @@ class PlanGenerator:
             permission_mode=PermissionMode.INSPECT,
             run_id=run_id,
             session_id=session_id,
-            task_requirements=TaskRequirements(
-                mutation_required=False,
-                verification_required=False,
-            ),
+            include_outcome_tool=False,
         )
 
     async def generate(self, task: str) -> AsyncIterator[RuntimeEvent | GeneratedPlan]:

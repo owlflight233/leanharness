@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from leanharness.application.language import detect_session_language
 from leanharness.application.plan_gateway import plan_to_dict
-from leanharness.application.run_intent import continuation_for_run, latest_substantive_run
-from leanharness.models import ModelEvent, ModelMessage
-from leanharness.runtime import ContinuationContext
+from leanharness.models import ModelMessage
 from leanharness.runtime.events import RuntimeEvent
 from leanharness.storage import LocalStore, MessageRecord, ProjectRecord, RunRecord, SessionRecord
 
@@ -131,16 +128,6 @@ def session_detail(store: LocalStore, session_id: str) -> dict[str, object]:
     }
 
 
-def continuation_for_session(
-    store: LocalStore,
-    session: SessionRecord,
-) -> ContinuationContext | None:
-    """Return a bounded capsule for the latest substantive terminal run."""
-
-    terminal = latest_substantive_run(store, session)
-    return continuation_for_run(store, session, terminal) if terminal else None
-
-
 def history_for_session(
     store: LocalStore,
     session: SessionRecord,
@@ -149,9 +136,9 @@ def history_for_session(
 ) -> tuple[ModelMessage, ...]:
     """Return bounded public conversation history for a new model request.
 
-    Persisted tool events and progress notes are intentionally excluded. The
-    current run is also excluded because its user message is appended by the
-    runtime itself.
+    Persisted tool events and progress notes are intentionally excluded. Public
+    user/assistant messages are the semantic continuity supplied to the model;
+    the current run is excluded because its user message is appended by Runtime.
     """
 
     candidates = [
@@ -159,7 +146,6 @@ def history_for_session(
         for message in store.list_messages(session.id)
         if (exclude_run_id is None or message.run_id != exclude_run_id)
         and message.role in {"user", "assistant"}
-        and message.kind == "chat"
         and message.content.strip()
     ]
     selected: list[MessageRecord] = []
@@ -216,54 +202,3 @@ def persist_runtime_event(
             answer=event.answer,
             error_code=event.error_code,
         )
-
-
-def persist_model_event(
-    store: LocalStore, session: SessionRecord, run: RunRecord, event: ModelEvent
-) -> None:
-    payload: dict[str, Any] = event.to_dict()
-    store.append_event(session.id, run.id, event.sequence, event.type, payload)
-    if event.type == "content.delta" and event.content:
-        # Chat content is assembled in the final message by the caller.
-        return
-    if event.type == "turn.failed":
-        store.add_message(
-            session.id,
-            "assistant",
-            event.error_message or "Model request failed",
-            "error",
-            run_id=run.id,
-        )
-        store.update_run(run.id, state="FAILED", error_code=event.error_code)
-    elif event.type == "turn.completed":
-        store.update_run(run.id, state="COMPLETED")
-
-
-def persist_stream_cancellation(
-    store: LocalStore,
-    session: SessionRecord,
-    run: RunRecord,
-    *,
-    sequence: int,
-    mode: str,
-    partial_answer: str | None = None,
-) -> None:
-    """Record cancellation when a stream consumer disconnects before a terminal event."""
-
-    event_type = "turn.cancelled" if mode == "chat" else "run.cancelled"
-    summary = "Generation cancelled" if mode == "chat" else "Run cancelled"
-    store.append_event(
-        session.id,
-        run.id,
-        sequence,
-        event_type,
-        {"type": event_type, "sequence": sequence, "run_id": run.id, "summary": summary},
-    )
-    store.add_message(
-        session.id,
-        "assistant",
-        partial_answer or summary,
-        "cancelled",
-        run_id=run.id,
-    )
-    store.update_run(run.id, state="CANCELLED", answer=partial_answer)

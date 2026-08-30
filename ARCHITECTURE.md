@@ -59,12 +59,19 @@ Every transition will be deterministic from the current run state and a typed
 input. Model calls and tools are effects requested by transitions rather than
 hidden side effects inside state objects.
 
-The runtime infers deterministic evidence requirements before the first model
-request. Inspection tasks need a successful workspace observation, mutation
-tasks need a successful `workspace_patch`, and explicit verification tasks
-need a successful command profile. A non-empty model answer is only a
-completion candidate; the fixed core accepts or rejects it from this evidence
-ledger. Failed edits therefore cannot be persisted as completed runs.
+The runtime does not classify user language or infer task requirements. The
+model receives the bounded public conversation and current tool definitions,
+then chooses observations, mutations, verification, or the explicit
+`report_run_outcome` control action. The fixed core only checks that a reported
+completed outcome does not contradict observed tool facts; failed edits and
+failed commands therefore cannot be presented as successful operations.
+
+This is the central decision boundary: application services never rewrite a
+user task, select a continuation target, or decide which kind of work the task
+means. They create a run and supply its public history. The Agent Loop is the
+only component that asks the model for the next action. Runtime policy remains
+authoritative for safety, permissions, budgets, cancellation, and protocol
+validity, but those controls do not infer the user's intent.
 
 `inspect` registers bounded workspace and read-only Git tools. `approve` and
 `unrestricted` additionally register guarded unified-diff patching and named
@@ -82,8 +89,7 @@ work.
 Runtime responsibilities are separated by purpose:
 
 - `runtime/loop.py` coordinates effects and state transitions.
-- `runtime/completion.py` owns task requirements and completion evidence.
-- `runtime/continuation.py` defines the bounded cross-run capsule.
+- `runtime/completion.py` owns observed evidence and terminal-outcome checks.
 - `runtime/prompting.py` owns model-facing public constraints.
 - `runtime/metrics.py` collects provider-neutral efficiency counters.
 - `context/store.py` performs local evidence-preserving compaction.
@@ -96,13 +102,13 @@ each run under the application data directory. Both sinks receive the same
 `TraceRedactor` output: credentials, hidden reasoning, and raw tool/file
 content are excluded. Replaying traces can render what happened but does not
 replace relational recovery. New runs in a session receive a bounded history of
-recent public `user` and `assistant` chat messages (at most 24 messages and
-32,000 characters). Tool results, progress events, hidden reasoning, and Plan
-Mode messages are excluded. Coding runs also receive at most one 4 KiB
-continuation capsule from the immediately preceding terminal run. It contains
-only the previous task, terminal state, changed file names, public
-incomplete/error reason, and current permission mode. The model must still
-re-read the workspace before making claims.
+recent public `user` and `assistant` messages, including plan messages (at most
+24 messages and 32,000 characters). Tool results, progress events and hidden
+reasoning are excluded. The current user message is appended after that
+history. References
+such as "continue" are resolved by the model from ordinary conversation
+context, not by phrase allow-lists or an application-side task rewrite. The
+model must still re-read the workspace before making claims.
 
 Storage code separates immutable records, forward-only migrations, the shared
 redaction policy, and SQLite operations into `storage/records.py`,

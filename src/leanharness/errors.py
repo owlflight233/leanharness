@@ -67,12 +67,6 @@ class ModelUnavailableError(ModelError):
     code = "MODEL_UNAVAILABLE"
 
 
-class ChatInputError(LeanHarnessError):
-    """Raised when a single-turn chat message violates the public contract."""
-
-    code = "INVALID_CHAT_INPUT"
-
-
 class RunInputError(LeanHarnessError):
     """Raised when an inspection-run request violates the public contract."""
 

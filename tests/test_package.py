@@ -8,7 +8,6 @@ from leanharness.application.model_gateway import ModelCheckResult
 from leanharness.cli.doctor import DiagnosticCheck
 from leanharness.cli.main import build_parser, main
 from leanharness.errors import ModelAuthError
-from leanharness.models import ModelConfig, ModelEvent, ModelUsage
 from leanharness.runtime import RuntimeEvent
 
 
@@ -106,34 +105,6 @@ def test_model_check_cli_maps_remote_failure_to_exit_three(
 
     assert main(["model", "check"]) == 3
     assert "MODEL_AUTH_FAILED" in capsys.readouterr().err
-
-
-def test_chat_cli_prints_content_and_usage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    async def fake_stream(message: str, *, config: ModelConfig, language: str):
-        assert message == "hello"
-        assert config.model == "example"
-        assert language == "en"
-        yield ModelEvent(type="turn.started", sequence=0)
-        yield ModelEvent(type="content.delta", sequence=1, content="world")
-        yield ModelEvent(
-            type="usage.reported",
-            sequence=2,
-            usage=ModelUsage(total_tokens=4),
-        )
-        yield ModelEvent(type="turn.completed", sequence=3, finish_reason="stop")
-
-    monkeypatch.setenv("LEANHARNESS_MODEL_BASE_URL", "https://example.test/v1")
-    monkeypatch.setenv("LEANHARNESS_MODEL_NAME", "example")
-    monkeypatch.setattr("leanharness.cli.main.stream_chat", fake_stream)
-
-    assert main(["chat", "hello", "--data-dir", str(tmp_path / "data")]) == 0
-    captured = capsys.readouterr()
-    assert captured.out == "world\n"
-    assert "usage: 4 tokens" in captured.err
 
 
 def test_run_parser_applies_read_only_defaults() -> None:

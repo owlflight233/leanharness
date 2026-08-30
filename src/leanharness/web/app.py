@@ -17,21 +17,13 @@ from pydantic import BaseModel
 from leanharness import __version__
 from leanharness.application.agent_gateway import create_coding_run
 from leanharness.application.health import get_health
-from leanharness.application.model_gateway import (
-    ModelClientFactory,
-    check_model,
-    stream_chat,
-    validate_chat_message,
-)
+from leanharness.application.model_gateway import ModelClientFactory, check_model
 from leanharness.application.plan_gateway import create_plan_generator, plan_to_dict
-from leanharness.application.run_intent import resolve_run_intent
 from leanharness.application.session_gateway import (
     apply_first_task_title,
     ensure_session,
     history_for_session,
-    persist_model_event,
     persist_runtime_event,
-    persist_stream_cancellation,
     session_detail,
     session_to_dict,
 )
@@ -40,7 +32,6 @@ from leanharness.errors import (
     ApprovalAlreadyResolvedError,
     ApprovalExpiredError,
     ApprovalNotFoundError,
-    ChatInputError,
     InvalidPermissionError,
     LeanHarnessError,
     ModelNotConfiguredError,
@@ -54,7 +45,6 @@ from leanharness.errors import (
     WorkspaceError,
 )
 from leanharness.models import (
-    ModelEvent,
     OpenAICompatibleClient,
     get_model_config_status,
     load_model_config,
@@ -69,11 +59,6 @@ from leanharness.planning import Plan, PlanController, PlanState, PlanStep, rend
 from leanharness.planning.generator import GeneratedPlan
 from leanharness.runtime import RuntimeEvent
 from leanharness.storage import LocalStore
-
-
-class ChatRequest(BaseModel):
-    message: str
-    session_id: str | None = None
 
 
 class RunRequest(BaseModel):
@@ -193,7 +178,7 @@ def create_app(
     @app.exception_handler(LeanHarnessError)
     async def application_error(_request: Request, exc: LeanHarnessError) -> JSONResponse:
         status_code = 503 if isinstance(exc, ModelNotConfiguredError) else 502
-        if isinstance(exc, ChatInputError | RunInputError):
+        if isinstance(exc, RunInputError):
             status_code = 422
         elif isinstance(exc, SessionNotFoundError):
             status_code = 404
@@ -215,18 +200,13 @@ def create_app(
         )
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(request: Request, _exc: RequestValidationError) -> JSONResponse:
-        is_run = request.url.path == "/api/v1/runs"
+    async def validation_error(_request: Request, _exc: RequestValidationError) -> JSONResponse:
         return JSONResponse(
             status_code=422,
             content={
                 "error": {
-                    "code": "INVALID_RUN_INPUT" if is_run else "INVALID_CHAT_INPUT",
-                    "message": (
-                        "Request body must contain a task"
-                        if is_run
-                        else "Request body must contain a text message"
-                    ),
+                    "code": "INVALID_RUN_INPUT",
+                    "message": "Request body must contain a task",
                 }
             },
         )
@@ -336,74 +316,12 @@ def create_app(
         result = await check_model(client_factory=app.state.model_client_factory)
         return result.to_dict()
 
-    @app.post("/api/v1/chat")
-    async def chat(payload: ChatRequest) -> StreamingResponse:
-        message = validate_chat_message(payload.message)
-        model_config = load_model_config()
-        store: LocalStore = app.state.store
-        _, session = ensure_session(store, app.state.workspace, payload.session_id)
-        session = apply_first_task_title(store, session, message)
-        history = history_for_session(store, session)
-        active_runs.assert_available(session.id)
-        run = store.create_run(session.id, "chat", message, 1)
-        active_runs.acquire(session.id, run.id)
-        store.add_message(session.id, "user", message, run_id=run.id)
-
-        async def ndjson_events() -> AsyncIterator[bytes]:
-            content: list[str] = []
-            last_sequence = -1
-            terminal_seen = False
-            try:
-                async for event in stream_chat(
-                    message,
-                    config=model_config,
-                    client_factory=app.state.model_client_factory,
-                    language=session.language or "same",
-                    history=history,
-                ):
-                    last_sequence = event.sequence
-                    persist_model_event(store, session, run, event)
-                    if event.type == "content.delta" and event.content:
-                        content.append(event.content)
-                    if event.type == "turn.completed":
-                        if content:
-                            store.add_message(
-                                session.id,
-                                "assistant",
-                                "".join(content),
-                                "complete",
-                                run_id=run.id,
-                            )
-                        store.update_run(run.id, state="COMPLETED", answer="".join(content))
-                    terminal_seen = event.type in {"turn.completed", "turn.failed"}
-                    yield _encode_event(event, session_id=session.id, run_id=run.id)
-            except (asyncio.CancelledError, GeneratorExit):
-                if not terminal_seen:
-                    persist_stream_cancellation(
-                        store,
-                        session,
-                        run,
-                        sequence=last_sequence + 1,
-                        mode="chat",
-                        partial_answer="".join(content) or None,
-                    )
-                raise
-            finally:
-                active_runs.release(session.id, run.id)
-
-        return StreamingResponse(
-            ndjson_events(),
-            media_type="application/x-ndjson",
-            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
-        )
-
     @app.post("/api/v1/runs")
     async def run(payload: RunRequest) -> StreamingResponse:
         store: LocalStore = app.state.store
         _, session = ensure_session(store, app.state.workspace, payload.session_id)
         session = apply_first_task_title(store, session, payload.task)
         active_runs.assert_available(session.id)
-        intent = resolve_run_intent(store, session, payload.task)
         history = history_for_session(store, session)
         run_record = store.create_run(
             session.id,
@@ -414,7 +332,7 @@ def create_app(
         )
         active_runs.acquire(session.id, run_record.id)
         runtime = create_coding_run(
-            intent.effective_task,
+            payload.task,
             app.state.workspace,
             max_steps=payload.max_steps,
             client_factory=app.state.model_client_factory,
@@ -423,11 +341,7 @@ def create_app(
             permission_mode=session.permission_mode,
             session_id=session.id,
             approvals=approvals,
-            continuation=intent.continuation,
             history=history,
-            task_requirements=intent.requirements,
-            original_message=intent.original_message,
-            run_metadata=intent.metadata(),
         )
         store.add_message(session.id, "user", payload.task, run_id=run_record.id)
 
@@ -435,7 +349,7 @@ def create_app(
             last_sequence = -1
             terminal_seen = False
             try:
-                async for event in runtime.run(intent.effective_task):
+                async for event in runtime.run(payload.task):
                     last_sequence = event.sequence
                     persist_runtime_event(store, session, run_record, event)
                     terminal_seen = event.type in {
@@ -860,12 +774,6 @@ def create_app(
         raise HTTPException(status_code=404, detail="Static asset not found")
 
     return app
-
-
-def _encode_event(
-    event: ModelEvent, *, session_id: str | None = None, run_id: str | None = None
-) -> bytes:
-    return _encode_payload(event.to_dict(), session_id=session_id, run_id=run_id)
 
 
 def _encode_payload(

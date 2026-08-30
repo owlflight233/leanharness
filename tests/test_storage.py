@@ -51,7 +51,7 @@ def test_projects_keep_creation_order_and_reads_do_not_touch_metadata(tmp_path: 
     ]
 
 
-def test_history_for_session_returns_public_chat_messages_only(tmp_path: Path) -> None:
+def test_history_for_session_returns_public_conversation_messages_only(tmp_path: Path) -> None:
     from leanharness.application.session_gateway import history_for_session
 
     store = LocalStore(tmp_path / "data")
@@ -205,43 +205,3 @@ def test_v1_database_migrates_without_losing_history(tmp_path: Path) -> None:
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
         assert [row["version"] for row in versions] == [1, 2, 3, 4]
-
-
-def test_continuation_capsule_uses_only_previous_public_run_summary(tmp_path: Path) -> None:
-    from leanharness.application.session_gateway import continuation_for_session
-
-    store = LocalStore(tmp_path / "data")
-    session = store.create_session(
-        store.ensure_project(tmp_path), permission_mode="unrestricted"
-    )
-    run = store.create_run(
-        session.id,
-        "coding",
-        "Create example.py",
-        4,
-        permission_mode="approve",
-    )
-    store.append_event(
-        session.id,
-        run.id,
-        0,
-        "run.incomplete",
-        {
-            "type": "run.incomplete",
-            "sequence": 0,
-            "metadata": {
-                "incomplete_reason": "PATCH_INVALID",
-                "evidence": {"changed_files": ["example.py"]},
-            },
-        },
-    )
-    store.update_run(run.id, state="EXHAUSTED")
-
-    capsule = continuation_for_session(store, store.get_session(session.id))
-
-    assert capsule is not None
-    assert capsule.previous_task == "Create example.py"
-    assert capsule.previous_state == "EXHAUSTED"
-    assert capsule.changed_files == ("example.py",)
-    assert capsule.incomplete_reason == "PATCH_INVALID"
-    assert capsule.permission_mode == "unrestricted"

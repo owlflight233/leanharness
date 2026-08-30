@@ -7,7 +7,7 @@ import pytest
 from fastapi import FastAPI
 
 from leanharness.config import build_config
-from leanharness.models import ModelEvent, ModelResponse, ModelUsage, ToolCall
+from leanharness.models import ModelResponse, ToolCall
 from leanharness.permissions import PermissionMode
 from leanharness.planning import PlanState, PlanStep
 from leanharness.web.app import create_app
@@ -52,16 +52,6 @@ def delete(app: FastAPI, path: str) -> httpx.Response:
 class FakeModelClient:
     async def complete(self, request):
         return ModelResponse(content="ready")
-
-    async def stream(self, request):
-        yield ModelEvent(type="turn.started", sequence=0)
-        yield ModelEvent(type="content.delta", sequence=1, content="hello 世界")
-        yield ModelEvent(
-            type="usage.reported",
-            sequence=2,
-            usage=ModelUsage(prompt_tokens=2, completion_tokens=2, total_tokens=4),
-        )
-        yield ModelEvent(type="turn.completed", sequence=3, finish_reason="stop")
 
 
 class PlanModelClient:
@@ -335,7 +325,7 @@ def test_model_status_is_safe_when_unconfigured(
     assert "must-not-leak" not in check.text
 
 
-def test_model_check_and_chat_contracts(
+def test_model_check_contract_does_not_expose_credentials(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -348,22 +338,11 @@ def test_model_check_and_chat_contracts(
     )
 
     check = post(app, "/api/v1/model/check")
-    chat = post(app, "/api/v1/chat", json_body={"message": "hi"})
-    events = [json.loads(line) for line in chat.text.splitlines()]
-
     assert check.status_code == 200
     assert check.json()["status"] == "ok"
     assert check.json()["model"] == "example-model"
     assert "must-not-leak" not in check.text
-    assert chat.status_code == 200
-    assert chat.headers["content-type"].startswith("application/x-ndjson")
-    assert [event["type"] for event in events] == [
-        "turn.started",
-        "content.delta",
-        "usage.reported",
-        "turn.completed",
-    ]
-    assert events[1]["content"] == "hello 世界"
+    assert post(app, "/api/v1/chat", json_body={"message": "hi"}).status_code == 405
 
 
 def test_coding_runs_replay_bounded_public_history_with_same_session(
@@ -394,18 +373,6 @@ def test_coding_runs_replay_bounded_public_history_with_same_session(
     assert "Inspect the workspace" in contents
     assert "The workspace was inspected." in contents
     assert "What did we do before?" in contents
-
-
-@pytest.mark.parametrize("body", [{}, {"message": "   "}, {"message": "x" * 32_001}])
-def test_chat_rejects_invalid_input_before_streaming(
-    tmp_path: Path, body: dict[str, object]
-) -> None:
-    app = create_app(build_config(workspace=tmp_path, data_dir=tmp_path / "data"))
-
-    response = post(app, "/api/v1/chat", json_body=body)
-
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "INVALID_CHAT_INPUT"
 
 
 def test_plan_stream_emits_research_events_and_persists_plan_message(

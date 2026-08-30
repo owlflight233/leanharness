@@ -122,7 +122,7 @@ def test_controller_pauses_when_step_is_incomplete(tmp_path: Path) -> None:
     assert not any(event.type == "plan.completed" for event in events)
 
 
-def test_controller_pauses_before_model_when_step_exceeds_session_permission(
+def test_controller_lets_model_choose_with_available_session_tools(
     tmp_path: Path,
 ) -> None:
     model = ScriptedModel([])
@@ -152,11 +152,16 @@ def test_controller_pauses_before_model_when_step_exceeds_session_permission(
 
     events = asyncio.run(collect_events())
 
-    assert [event.type for event in events] == ["plan.paused", "run.incomplete"]
-    assert events[0].error_code == "PERMISSION_INSUFFICIENT"
-    assert events[1].error_code == "PERMISSION_INSUFFICIENT"
-    assert events[0].metadata["missing_capabilities"] == ["workspace_mutation"]
-    assert model.requests == []
+    assert model.requests
+    assert [definition.name for definition in model.requests[0].tools] == [
+        "workspace_list",
+        "workspace_read",
+        "workspace_search",
+        "git_inspect",
+        "report_run_outcome",
+    ]
+    assert events[-1].type == "run.failed"
+    assert events[-1].error_code == "RUN_MODEL_FAILED"
 
 
 def test_controller_budget_is_shared_across_plan_steps(tmp_path: Path) -> None:

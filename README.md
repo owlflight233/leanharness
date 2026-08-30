@@ -12,8 +12,7 @@ To understand the implementation in request-flow order, see
 ## Current status
 
 The current milestone provides an installable Python package, environment
-diagnostics, a provider-independent model gateway, single-turn streaming chat,
-a bounded coding loop, persistent local sessions, guarded unified-diff edits,
+diagnostics, a provider-independent model gateway, a bounded coding loop, persistent local sessions, guarded unified-diff edits,
 verification command profiles, read-only Git inspection, and a persistent Plan
 Mode through both the CLI and responsive local web interface. Arbitrary shell
 execution, Git writes, and plugins remain intentionally out of scope.
@@ -77,7 +76,6 @@ $env:LEANHARNESS_MODEL_THINKING = "enabled"
 $env:LEANHARNESS_MODEL_REASONING_EFFORT = "high"
 $env:LEANHARNESS_MODEL_API_KEY = "your-api-key"
 uv run leanharness model check
-uv run leanharness chat "Reply with one short sentence."
 uv run leanharness run "Inspect this repository and explain its structure." --permission inspect
 uv run leanharness run "Fix the failing test." --permission approve
 uv run leanharness plan "Refactor the authentication module"
@@ -93,7 +91,6 @@ export LEANHARNESS_MODEL_THINKING="enabled"
 export LEANHARNESS_MODEL_REASONING_EFFORT="high"
 export LEANHARNESS_MODEL_API_KEY="your-api-key"
 uv run leanharness model check
-uv run leanharness chat "Reply with one short sentence."
 uv run leanharness run "Fix the failing test." --permission approve
 uv run leanharness plan "Refactor the authentication module"
 uv run leanharness serve
@@ -101,15 +98,12 @@ uv run leanharness serve
 
 `LEANHARNESS_MODEL_API_KEY` may be omitted for a local endpoint that does not
 require authentication. Plain HTTP is accepted only for `localhost`,
-`127.0.0.1`, or `::1`. Chat and coding runs persist public messages,
-summaries, and redacted event traces locally. A new run in the same session
-receives a bounded history of recent public user and assistant chat messages
-(up to 24 messages and 32,000 characters), so follow-ups such as "what did we
-do before" have conversational context. Tool results, progress events, hidden
-reasoning, and Plan Mode messages are excluded. Coding runs may also receive
-one bounded public capsule from the immediately preceding run so permission
-changes and incomplete work retain their task reference; the workspace is
-still re-read before making claims.
+`127.0.0.1`, or `::1`. Coding runs persist public messages, summaries, and
+redacted event traces locally. A new run in the same session receives a bounded
+history of recent public user, assistant, and plan messages (up to 24 messages
+and 32,000 characters). The current message is sent verbatim; the model uses
+the complete public history to resolve references. Tool results, progress
+events, and hidden reasoning are excluded.
 Workspace changes are disabled in
 `inspect`, require per-call confirmation in `approve`, and execute directly in
 `unrestricted` while still enforcing tool-level path, command, timeout, and

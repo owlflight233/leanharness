@@ -10,11 +10,9 @@ from leanharness.models import ModelMessage, OpenAICompatibleClient, load_model_
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.runtime import (
     CodingAgent,
-    ContinuationContext,
     RunControlError,
     validate_run_task,
 )
-from leanharness.runtime.completion import TaskRequirements
 from leanharness.runtime.loop import MAX_MAX_STEPS, MIN_MAX_STEPS
 
 
@@ -29,11 +27,7 @@ def create_coding_run(
     permission_mode: str = "inspect",
     session_id: str = "ephemeral",
     approvals: ApprovalCoordinator | None = None,
-    continuation: ContinuationContext | None = None,
     history: tuple[ModelMessage, ...] = (),
-    task_requirements: TaskRequirements | None = None,
-    original_message: str | None = None,
-    run_metadata: dict[str, object] | None = None,
 ) -> CodingAgent:
     """Validate public input and create a bounded coding runtime."""
 
@@ -57,11 +51,7 @@ def create_coding_run(
         permission_mode=mode,
         session_id=session_id,
         approvals=approvals,
-        continuation=continuation,
         history=history,
-        task_requirements=task_requirements,
-        original_message=original_message,
-        run_metadata=run_metadata,
     )
 
 

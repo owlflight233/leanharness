@@ -24,8 +24,7 @@
 
 ```text
 校验任务
-  -> 推断完成要求
-  -> 组装系统约束、续接胶囊和当前任务
+  -> 组装系统约束、公开会话历史和当前任务
   -> 请求模型
   -> 解析工具调用
   -> 权限/审批
@@ -35,8 +34,8 @@
 
 为了避免把所有判断堆在循环里，相关规则分别在：
 
-- `runtime/completion.py`：只读、变更、验证任务的完成证据。
-- `runtime/continuation.py`：跨运行最多 4 KiB 的公开续接信息。
+- `runtime/completion.py`：记录已发生的工具事实，并拒绝与事实冲突的完成声明。
+- `runtime/outcome.py`：模型可调用的显式完成/未完成控制契约。
 - `runtime/metrics.py`：模型次数、工具次数和 token 用量。
 - `runtime/prompting.py`：语言和能力约束，不含隐藏思维提示。
 - `context/store.py`：活跃上下文超限时将旧工具结果替换为证据胶囊。
@@ -59,7 +58,7 @@
 ## 4. 理解会话和审计
 
 `application/session_gateway.py` 把 Runtime 事件转换为公开会话记录，并为下次
-运行生成续接胶囊。持久化实现按职责拆分：
+运行提供有界的公开历史。持久化实现按职责拆分：
 
 - `storage/records.py`：不可变记录类型。
 - `storage/migrations.py`：只向前执行的 SQLite 迁移。
@@ -67,7 +66,8 @@
 - `storage/store.py`：事务、查询和 trace 文件写入。
 
 完整源码、diff、命令输出、密钥和隐藏思维都不进入公开 trace。会话历史用于
-界面恢复，不会整段注入下一次模型请求。
+界面恢复，也会以有界的公开 user/assistant/plan 消息注入下一次模型请求。
+当前消息始终原样追加，应用层不识别“继续”等短语，也不改写任务。
 
 ## 5. 理解两个界面
 
@@ -91,5 +91,4 @@ JSONL。三者应具有相同的公开事件顺序，但都不应包含原始工
 4. 检查新字段能否安全进入公开 trace。
 5. 运行 Ruff、pytest、前端类型检查、前端测试和生产构建。
 
-Plan Mode、插件、子 Agent 和 Budget Mode 仍是后续能力，不应把它们提前塞入
-当前 Coding Run 主循环。
+Plan Mode 已复用同一个 CodingAgent；插件、子 Agent 和 Budget Mode 仍是后续能力。

@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App, { type SessionClient } from "./App";
-import type { ChatStreamer } from "./api/chat";
 import type { HealthLoader, HealthResponse } from "./api/health";
 import type { ModelStatusLoader } from "./api/model";
 import type { ApprovalResolver, RunStreamer } from "./api/run";
@@ -259,18 +258,19 @@ describe("application shell", () => {
     expect(screen.getByText("模型未配置")).toBeInTheDocument();
   });
 
-  it("renders streamed content and trace events", async () => {
+  it("renders agent content and trace events", async () => {
     const user = userEvent.setup();
-    const successfulChat: ChatStreamer = async (_message, onEvent) => {
-      onEvent({ type: "turn.started", sequence: 0 });
-      onEvent({ type: "content.delta", sequence: 1, content: "流式回复" });
-      onEvent({ type: "turn.completed", sequence: 2, finish_reason: "stop" });
+    const successfulRun: RunStreamer = async (_task, onEvent) => {
+      onEvent({ type: "run.started", sequence: 0, run_id: "run-1" });
+      onEvent({ type: "assistant.progress", sequence: 1, run_id: "run-1", summary: "检查项目" });
+      onEvent({ type: "tool.completed", sequence: 2, run_id: "run-1", tool: "workspace_list", metadata: { ok: true } });
+      onEvent({ type: "run.completed", sequence: 3, run_id: "run-1", answer: "流式回复" });
     };
     render(
       <App
         healthLoader={successfulHealth}
         modelStatusLoader={configuredModel}
-        chatStreamer={successfulChat}
+        runStreamer={successfulRun}
       />,
     );
 
@@ -279,31 +279,31 @@ describe("application shell", () => {
     await user.click(screen.getByRole("button", { name: "发送任务" }));
 
     expect(await screen.findByText("流式回复")).toBeInTheDocument();
-    expect(screen.getByText("turn.started")).toBeInTheDocument();
-    expect(screen.getByText("turn.completed")).toBeInTheDocument();
+    expect(screen.getByText("run.started")).toBeInTheDocument();
+    expect(screen.getByText("run.completed")).toBeInTheDocument();
   });
 
   it("cancels the active stream", async () => {
     const user = userEvent.setup();
-    const blockingChat: ChatStreamer = (_message, onEvent, signal) =>
+    const blockingRun: RunStreamer = (_task, onEvent, signal) =>
       new Promise((_resolve, reject) => {
-        onEvent({ type: "turn.started", sequence: 0 });
+        onEvent({ type: "run.started", sequence: 0, run_id: "blocking-run" });
         signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
       });
     render(
       <App
         healthLoader={successfulHealth}
         modelStatusLoader={configuredModel}
-        chatStreamer={blockingChat}
+        runStreamer={blockingRun}
       />,
     );
 
     const input = await screen.findByLabelText("任务输入");
     await user.type(input, "停止测试");
     await user.click(screen.getByRole("button", { name: "发送任务" }));
-    await user.click(await screen.findByRole("button", { name: "停止生成" }));
+    await user.click(await screen.findByRole("button", { name: "停止运行" }));
 
-    expect(await screen.findByText("已停止生成")).toBeInTheDocument();
+    expect(await screen.findByText("已停止运行")).toBeInTheDocument();
   });
 
   it("runs a read-only inspection and separates progress from the final answer", async () => {
@@ -454,15 +454,15 @@ describe("application shell", () => {
   it("binds the active session to chat requests", async () => {
     const user = userEvent.setup();
     const client = mockSessionClient();
-    const chat = vi.fn<ChatStreamer>(async (_message, onEvent) => {
-      onEvent({ type: "turn.started", sequence: 0, session_id: baseSession.id, run_id: "run-2" });
-      onEvent({ type: "turn.completed", sequence: 1, session_id: baseSession.id, run_id: "run-2" });
+    const run = vi.fn<RunStreamer>(async (_task, onEvent) => {
+      onEvent({ type: "run.started", sequence: 0, session_id: baseSession.id, run_id: "run-2" });
+      onEvent({ type: "run.completed", sequence: 1, session_id: baseSession.id, run_id: "run-2", answer: "完成" });
     });
     render(
       <App
         healthLoader={successfulHealth}
         modelStatusLoader={configuredModel}
-        chatStreamer={chat}
+        runStreamer={run}
         sessionClient={client}
       />,
     );
@@ -470,27 +470,26 @@ describe("application shell", () => {
     await user.type(screen.getByLabelText("任务输入"), "继续分析");
     await user.click(screen.getByRole("button", { name: "发送任务" }));
 
-    await waitFor(() => expect(chat).toHaveBeenCalled());
-    expect(chat.mock.calls[0]?.[3]).toBe(baseSession.id);
+    await waitFor(() => expect(run).toHaveBeenCalled());
+    expect(run.mock.calls[0]?.[4]).toBe(baseSession.id);
   });
 
   it("renders safe Markdown without raw HTML or dangerous links", async () => {
     const user = userEvent.setup();
-    const markdownChat: ChatStreamer = async (_message, onEvent) => {
-      onEvent({ type: "turn.started", sequence: 0, run_id: "markdown-run" });
+    const markdownRun: RunStreamer = async (_task, onEvent) => {
+      onEvent({ type: "run.started", sequence: 0, run_id: "markdown-run" });
       onEvent({
-        type: "content.delta",
+        type: "run.completed",
         sequence: 1,
         run_id: "markdown-run",
-        content: "# 标题\n\n| 列 | 值 |\n|---|---|\n| A | 1 |\n\n```ts\nconst value = 1\n```\n\n[危险链接](javascript:alert(1))\n\n<strong>原始 HTML</strong>",
+        answer: "# 标题\n\n| 列 | 值 |\n|---|---|\n| A | 1 |\n\n```ts\nconst value = 1\n```\n\n[危险链接](javascript:alert(1))\n\n<strong>原始 HTML</strong>",
       });
-      onEvent({ type: "turn.completed", sequence: 2, run_id: "markdown-run" });
     };
     render(
       <App
         healthLoader={successfulHealth}
         modelStatusLoader={configuredModel}
-        chatStreamer={markdownChat}
+        runStreamer={markdownRun}
       />,
     );
 
