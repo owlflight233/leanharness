@@ -76,6 +76,12 @@ def apply_first_task_title(store: LocalStore, session: SessionRecord, task: str)
 
 def session_detail(store: LocalStore, session_id: str) -> dict[str, object]:
     session = store.get_session(session_id)
+    plans = []
+    for plan in store.list_plans(session_id):
+        permission = session.permission_mode
+        if plan.run_id:
+            permission = store.get_run(plan.run_id).permission_mode
+        plans.append(plan_to_dict(plan, execution_permission_mode=permission))
     runs = []
     for run in store.list_runs(session_id):
         summary = run_to_dict(run)
@@ -120,7 +126,7 @@ def session_detail(store: LocalStore, session_id: str) -> dict[str, object]:
             for message in store.list_messages(session_id)
         ],
         "runs": runs,
-        "plans": [plan_to_dict(plan) for plan in store.list_plans(session_id)],
+        "plans": plans,
     }
 
 

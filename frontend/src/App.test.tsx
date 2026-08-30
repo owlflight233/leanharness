@@ -69,6 +69,7 @@ function sessionDetail(session = baseSession): SessionDetail {
         task: "分析仓库结构",
         state: "COMPLETED",
         max_steps: 24,
+        permission_mode: "inspect",
         answer: "已保存的结论",
         error_code: null,
         started_at: session.created_at,

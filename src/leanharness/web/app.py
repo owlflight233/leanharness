@@ -59,8 +59,13 @@ from leanharness.models import (
     get_model_config_status,
     load_model_config,
 )
-from leanharness.permissions import ActiveRunRegistry, ApprovalCoordinator, ApprovalRequest
-from leanharness.planning import PlanController, PlanState, PlanStep, render_plan_markdown
+from leanharness.permissions import (
+    ActiveRunRegistry,
+    ApprovalCoordinator,
+    ApprovalRequest,
+    PermissionMode,
+)
+from leanharness.planning import Plan, PlanController, PlanState, PlanStep, render_plan_markdown
 from leanharness.planning.generator import GeneratedPlan
 from leanharness.runtime import RuntimeEvent
 from leanharness.storage import LocalStore
@@ -134,6 +139,14 @@ def create_app(
     store = LocalStore(config.data_dir)
     store.open()
     store.interrupt_active_runs()
+
+    def serialize_plan(plan: Plan) -> dict[str, object]:
+        """Expose the permission that will actually govern plan execution."""
+        session = store.get_session(plan.session_id)
+        permission = session.permission_mode
+        if plan.run_id:
+            permission = store.get_run(plan.run_id).permission_mode
+        return plan_to_dict(plan, execution_permission_mode=permission)
 
     def persist_approval_request(request: ApprovalRequest) -> None:
         store.create_approval(
@@ -501,7 +514,7 @@ def create_app(
             "plan.created",
             _plan_created_audit_payload(plan, created_sequence, run.id),
         )
-        result = plan_to_dict(plan)
+        result = serialize_plan(plan)
         result["generation_trace"] = [event.to_dict() for event in generation_events]
         return result
 
@@ -595,7 +608,7 @@ def create_app(
                         "type": "plan.created",
                         "sequence": created_sequence,
                         "run_id": run.id,
-                        "plan": plan_to_dict(plan),
+                        "plan": serialize_plan(plan),
                     },
                     session_id=session.id,
                     run_id=run.id,
@@ -619,7 +632,7 @@ def create_app(
         session = app.state.store.get_session(plan.session_id)
         if session.project_id != app.state.store.ensure_project(app.state.workspace).id:
             raise SessionNotFoundError("Plan does not belong to the current workspace")
-        return plan_to_dict(plan)
+        return serialize_plan(plan)
 
     @app.patch("/api/v1/plans/{plan_id}")
     async def update_plan(plan_id: str, payload: PlanUpdateRequest) -> dict[str, object]:
@@ -650,12 +663,12 @@ def create_app(
             source_markdown=render_plan_markdown(current, steps),
             steps=steps,
         )
-        return plan_to_dict(updated)
+        return serialize_plan(updated)
 
     @app.post("/api/v1/plans/{plan_id}/reject")
     async def reject_plan(plan_id: str) -> dict[str, object]:
         plan = app.state.store.update_plan_state(plan_id, PlanState.CANCELLED)
-        return plan_to_dict(plan)
+        return serialize_plan(plan)
 
     async def execute_plan(plan_id: str, *, resume: bool = False) -> StreamingResponse:
         store: LocalStore = app.state.store
@@ -669,7 +682,11 @@ def create_app(
         active_runs.assert_available(session.id)
         if resume and plan.run_id:
             run = store.get_run(plan.run_id)
+            previous_permission = run.permission_mode
+            run = store.resume_run(run.id, permission_mode=session.permission_mode)
+            store.update_plan_state(plan.id, PlanState.RUNNING)
         else:
+            previous_permission = None
             run = store.create_run(
                 session.id, "plan", plan.task, 24, permission_mode=session.permission_mode
             )
@@ -678,25 +695,50 @@ def create_app(
         active_runs.acquire(session.id, run.id)
         model = app.state.model_client_factory(load_model_config())
         existing_events = store.list_events(run.id)
+        initial_sequence = (
+            int(existing_events[-1].get("sequence", -1)) + 1 if existing_events else 0
+        )
+        permission_event: dict[str, object] | None = None
+        if resume and previous_permission != run.permission_mode:
+            permission_event = {
+                "type": "run.permission.updated",
+                "sequence": initial_sequence,
+                "run_id": run.id,
+                "summary": "Execution permission updated for resumed plan",
+                "metadata": {
+                    "previous_permission_mode": previous_permission,
+                    "permission_mode": run.permission_mode,
+                },
+            }
+            store.append_event(
+                session.id,
+                run.id,
+                initial_sequence,
+                "run.permission.updated",
+                permission_event,
+            )
+            initial_sequence += 1
         controller = PlanController(
             plan,
             app.state.workspace,
             model,
-            permission_mode=session.permission_mode,
+            permission_mode=PermissionMode(run.permission_mode),
             language=session.language or "same",
             approvals=approvals,
             on_step=lambda step_id, state, evidence, error: store.update_plan_step(
                 step_id, state, evidence=evidence, error_code=error
             ),
-            initial_sequence=(int(existing_events[-1].get("sequence", -1)) + 1)
-            if existing_events
-            else 0,
+            initial_sequence=initial_sequence,
             cancel_event=plan_cancellations.setdefault(run.id, asyncio.Event()),
         )
 
         async def events() -> AsyncIterator[bytes]:
             terminal = False
             try:
+                if permission_event is not None:
+                    yield _encode_payload(
+                        permission_event, session_id=session.id, run_id=run.id
+                    )
                 async for event in controller.run():
                     payload = event.to_dict()
                     store.append_event(
@@ -774,7 +816,7 @@ def create_app(
         if plan.run_id and plan.run_id in plan_cancellations:
             plan_cancellations[plan.run_id].set()
         plan = app.state.store.update_plan_state(plan_id, PlanState.CANCELLED)
-        return plan_to_dict(plan)
+        return serialize_plan(plan)
 
     @app.post("/api/v1/runs/{run_id}/approvals/{approval_id}")
     async def resolve_approval(

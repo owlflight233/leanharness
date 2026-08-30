@@ -587,6 +587,17 @@ function App({
 
   async function changePermission(next: PermissionMode) {
     setPermissionMode(next);
+    setPlan((current) => current?.state === "AWAITING_CONFIRMATION"
+      ? { ...current, execution_permission_mode: next }
+      : current);
+    setMessages((current) => current.map((message) => (
+      message.plan?.state === "AWAITING_CONFIRMATION"
+        ? {
+            ...message,
+            plan: { ...message.plan, execution_permission_mode: next },
+          }
+        : message
+    )));
     if (sessionId) {
       try {
         const updated = await sessionClient.update(sessionId, { permission_mode: next });
@@ -799,6 +810,7 @@ function App({
                           onResume={() => void runPlanAction("resume", message.plan)}
                           onReject={() => void rejectCurrentPlan(message.plan)}
                           onEdit={(stepId, field, value) => void editPlanStep(stepId, field, value, message.plan)}
+                          currentPermission={permissionMode}
                         />
                       ) : message.content ? (message.role === "assistant" ? <Markdown content={message.content} /> : message.content) : "正在生成..."}
                     </div>
@@ -876,7 +888,7 @@ function App({
         <div className="inspector-body" role="tabpanel">
           {trace.filter((event) => event.type !== "assistant.progress").length === 0 ? <div className="panel-empty"><Activity size={18} /><strong>没有运行轨迹</strong><span>0 条事件</span></div> : <ol className="trace-list">{trace.filter((event) => event.type !== "assistant.progress").map((event) => <li key={`${"run_id" in event ? event.run_id : "turn"}-${event.sequence}-${event.type}`}><span>{event.sequence}</span><strong title={traceLabel(event)}>{traceLabel(event)}</strong></li>)}</ol>}
         </div>
-        <div className="inspector-summary"><div><span>模型</span><strong title={modelName ?? undefined}>{modelCopy}</strong></div><div><span>权限</span><strong>{permissionMode === "inspect" ? "只读检查" : permissionMode === "approve" ? "逐次批准" : "受控直接执行"}</strong></div></div>
+        <div className="inspector-summary"><div><span>模型</span><strong title={modelName ?? undefined}>{modelCopy}</strong></div><div><span>会话默认权限</span><strong>{permissionMode === "inspect" ? "只读检查" : permissionMode === "approve" ? "逐次批准" : "受控直接执行"}</strong></div></div>
       </aside>
 
       <footer className="status-bar" aria-label="运行状态">

@@ -72,6 +72,13 @@ verification commands. Tool failures are returned to the model as structured
 results; repeated calls, repeated equivalent failures, context pressure, and
 step budgets are runtime decisions rather than model instructions.
 
+Permission is evaluated at the start of each execution segment. The session
+selector is a persistent default; an active segment keeps its captured mode.
+Plan generation is always inspect-only. Confirming a plan captures the current
+session permission, while resuming a paused plan explicitly captures the new
+selection and appends a permission-transition event before any model or tool
+work.
+
 Runtime responsibilities are separated by purpose:
 
 - `runtime/loop.py` coordinates effects and state transitions.

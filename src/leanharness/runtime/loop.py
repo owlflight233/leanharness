@@ -158,7 +158,11 @@ class CodingAgent:
             for message in self.history:
                 self.context.append(message)
         self.context.append(ModelMessage(role="user", content=validated_task))
-        yield self._event("run.started", summary=_run_started_summary(self.language))
+        yield self._event(
+            "run.started",
+            summary=_run_started_summary(self.language),
+            metadata={"permission_mode": self.permission_mode.value},
+        )
 
         missing = missing_capabilities(
             requirements, {definition.name for definition in self.tools.definitions}

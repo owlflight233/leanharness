@@ -125,8 +125,10 @@ location is `%LOCALAPPDATA%\\LeanHarness` on Windows,
 
 Plan Mode first generates a limited Markdown draft using only read-only tools.
 Review or edit the steps in the web client, then confirm execution. Confirmed
-plans run sequentially with the session permission and can be paused and
-explicitly resumed after a service restart:
+plans run sequentially with a permission snapshot taken at confirmation time.
+Changing the session selector does not affect an active execution segment. A
+paused plan can be explicitly resumed with the newly selected permission; the
+transition is recorded in its audit trace:
 
 ```sh
 uv run leanharness plan "Refactor the authentication module"

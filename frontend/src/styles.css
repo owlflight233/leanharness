@@ -853,6 +853,12 @@ textarea:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
+.plan-card-permission {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .plan-card-steps {
   margin: 10px 0;
   padding-left: 24px;

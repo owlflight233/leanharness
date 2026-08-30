@@ -27,7 +27,11 @@ def create_plan_generator(
     )
 
 
-def plan_to_dict(plan: Plan) -> dict[str, object]:
+def plan_to_dict(
+    plan: Plan,
+    *,
+    execution_permission_mode: str | None = None,
+) -> dict[str, object]:
     return {
         "id": plan.id,
         "session_id": plan.session_id,
@@ -37,6 +41,10 @@ def plan_to_dict(plan: Plan) -> dict[str, object]:
         "version": plan.version,
         "source_markdown": plan.source_markdown,
         "run_id": plan.run_id,
+        # Pending plans have no execution run yet. Callers may provide the
+        # current session preference; attached plans use the immutable run
+        # snapshot instead.
+        "execution_permission_mode": execution_permission_mode,
         "created_at": plan.created_at,
         "updated_at": plan.updated_at,
         "confirmed_at": plan.confirmed_at,

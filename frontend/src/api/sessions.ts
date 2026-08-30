@@ -32,6 +32,7 @@ export interface SessionDetail {
     task: string;
     state: string;
     max_steps: number;
+    permission_mode: PermissionMode;
     answer: string | null;
     error_code: string | null;
     started_at: string;

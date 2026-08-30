@@ -8,6 +8,8 @@ from fastapi import FastAPI
 
 from leanharness.config import build_config
 from leanharness.models import ModelEvent, ModelResponse, ModelUsage, ToolCall
+from leanharness.permissions import PermissionMode
+from leanharness.planning import PlanState, PlanStep
 from leanharness.web.app import create_app
 
 
@@ -80,6 +82,26 @@ class PlanModelClient:
                 ),
             )
         return ModelResponse(content="# Demo plan\n1. **Inspect** - Read the project")
+
+
+class PlanResumeModelClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, request):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                content="Creating the requested directory.",
+                tool_calls=(
+                    ToolCall(
+                        id="mkdir-1",
+                        name="workspace_mkdir",
+                        arguments={"path": "mini-app"},
+                    ),
+                ),
+            )
+        return ModelResponse(content="The directory was created.")
 
 
 class HistoryRuntimeClient:
@@ -378,6 +400,7 @@ def test_plan_stream_emits_research_events_and_persists_plan_message(
     assert any(event["type"] == "tool.completed" for event in events)
     created = next(event for event in events if event["type"] == "plan.created")
     assert created["plan"]["title"] == "Demo plan"
+    assert created["plan"]["execution_permission_mode"] == "inspect"
     session_id = created["session_id"]
     detail = get(app, f"/api/v1/sessions/{session_id}").json()
     assert any(message.get("kind") == "plan" for message in detail["messages"])
@@ -385,3 +408,48 @@ def test_plan_stream_emits_research_events_and_persists_plan_message(
     created_audit = next(event for event in audit_events if event["type"] == "plan.created")
     assert created_audit["step_count"] == 1
     assert "source_markdown" not in json.dumps(created_audit, ensure_ascii=False)
+
+
+def test_plan_resume_explicitly_uses_current_session_permission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LEANHARNESS_MODEL_BASE_URL", "https://models.example.test/v1")
+    monkeypatch.setenv("LEANHARNESS_MODEL_NAME", "example-model")
+    client = PlanResumeModelClient()
+    app = create_app(
+        build_config(workspace=tmp_path, data_dir=tmp_path / "data"),
+        model_client_factory=lambda _config: client,
+    )
+    store = app.state.store
+    project = store.ensure_project(tmp_path)
+    session = store.create_session(project, permission_mode="inspect")
+    plan = store.create_plan(
+        session.id,
+        title="Create project",
+        task="Create a project",
+        source_markdown="# Create project\n1. **Create files** - Create app.py",
+        steps=(PlanStep("step-1", 1, "Create files", "Create app.py"),),
+    )
+    run = store.create_run(
+        session.id, "plan", plan.task, 24, permission_mode=PermissionMode.INSPECT.value
+    )
+    store.attach_plan_run(plan.id, run.id)
+    store.update_plan_state(plan.id, PlanState.PAUSED)
+    store.update_session(session.id, permission_mode="unrestricted")
+
+    response = post(app, f"/api/v1/plans/{plan.id}/resume")
+    events = [json.loads(line) for line in response.text.splitlines()]
+
+    assert response.status_code == 200
+    assert events[0]["type"] == "run.permission.updated"
+    assert events[0]["metadata"] == {
+        "previous_permission_mode": "inspect",
+        "permission_mode": "unrestricted",
+    }
+    assert events[-1]["type"] == "run.completed"
+    assert client.calls == 2
+    assert (tmp_path / "mini-app").is_dir()
+    assert (
+        get(app, f"/api/v1/plans/{plan.id}").json()["execution_permission_mode"]
+        == "unrestricted"
+    )

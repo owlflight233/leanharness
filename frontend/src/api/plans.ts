@@ -17,6 +17,7 @@ export interface Plan {
   version: number;
   source_markdown: string;
   run_id?: string | null;
+  execution_permission_mode?: "inspect" | "approve" | "unrestricted" | null;
   steps: PlanStep[];
   generation_trace?: Array<Record<string, unknown>>;
 }

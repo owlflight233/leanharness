@@ -169,7 +169,11 @@ class PlanController:
                 "plan.step.started",
                 step=step.sequence,
                 summary=step.title,
-                metadata={"step_id": step.id, "instruction": step.instruction},
+                metadata={
+                    "step_id": step.id,
+                    "instruction": step.instruction,
+                    "permission_mode": self.agent.permission_mode.value,
+                },
             )
             task = _step_task(self.plan, step, completed_titles)
             self.agent.max_steps = self._remaining_budget

@@ -380,6 +380,17 @@ class LocalStore:
             )
         )
 
+    def resume_run(self, run_id: str, *, permission_mode: str) -> RunRecord:
+        """Start a new execution segment with an explicitly selected permission."""
+        _validate_permission(permission_mode)
+        self.get_run(run_id)
+        with self.connection:
+            self.connection.execute(
+                "UPDATE runs SET state=?, permission_mode=?, error_code=NULL, finished_at=NULL WHERE id=?",
+                ("CREATED", permission_mode, run_id),
+            )
+        return self.get_run(run_id)
+
     def append_event(
         self, session_id: str, run_id: str, sequence: int, event_type: str, payload: dict[str, Any]
     ) -> None:
