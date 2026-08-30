@@ -1,51 +1,53 @@
-"""Bounded model context with paired messages and structured evidence capsules."""
+"""Backward-compatible live context store."""
 
 from __future__ import annotations
 
-import hashlib
-import json
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
 
+from leanharness.context.projection import (
+    DEFAULT_CONTEXT_CHARS,
+    ContextBudgetError,
+    ContextCompression,
+    ContextJournal,
+    ContextProjection,
+    ContextProjector,
+    ContextSource,
+    _capsule,
+    _message_size,
+)
 from leanharness.models import ModelMessage
 
-DEFAULT_CONTEXT_CHARS = 160_000
 
+class ContextStore(ContextJournal):
+    """Live journal with the original deterministic ``compact`` API."""
 
-@dataclass(frozen=True, slots=True)
-class ContextCompression:
-    compressed_messages: int
-    saved_chars: int
-
-
-class ContextBudgetError(RuntimeError):
-    pass
-
-
-class ContextStore:
-    def __init__(self, *, max_chars: int = DEFAULT_CONTEXT_CHARS) -> None:
+    def __init__(
+        self,
+        *,
+        max_chars: int = DEFAULT_CONTEXT_CHARS,
+        soft_chars: int | None = None,
+        semantic_compaction: bool = True,
+        summary_sanitizer: Callable[[str], str] | None = None,
+    ) -> None:
         if max_chars < 4_096:
             raise ValueError("Context budget is too small")
+        super().__init__()
         self.max_chars = max_chars
-        self._messages: list[ModelMessage] = []
-
-    @property
-    def messages(self) -> tuple[ModelMessage, ...]:
-        return tuple(self._messages)
-
-    def append(self, message: ModelMessage) -> None:
-        self._messages.append(message)
-
-    def replace(self, messages: Iterable[ModelMessage]) -> None:
-        """Replace a completed context at a safe protocol boundary."""
-        self._messages = list(messages)
+        self.soft_chars = soft_chars if soft_chars is not None else min(128_000, max_chars)
+        self.projector = ContextProjector(
+            max_chars=max_chars,
+            soft_chars=self.soft_chars,
+            semantic_compaction=semantic_compaction,
+            summary_sanitizer=summary_sanitizer,
+        )
 
     def compact(self, *, preserve_recent_messages: int = 10) -> ContextCompression:
-        before = self._size()
+        """Replace old tool payloads with structured evidence capsules."""
+        before = _message_size(self._messages)
         compressed = 0
         protected_start = max(0, len(self._messages) - preserve_recent_messages)
         for index in range(protected_start):
-            if self._size() <= self.max_chars:
+            if _message_size(self._messages) <= self.max_chars:
                 break
             message = self._messages[index]
             if message.role == "tool" and len(message.content) > 160:
@@ -55,57 +57,17 @@ class ContextStore:
                     tool_call_id=message.tool_call_id,
                 )
                 compressed += 1
-        after = self._size()
+        after = _message_size(self._messages)
         if after > self.max_chars:
             raise ContextBudgetError("Context budget exceeded after structured compression")
+        if compressed:
+            self._generation += 1
         return ContextCompression(
             compressed_messages=compressed,
             saved_chars=max(0, before - after),
         )
 
-    def _size(self) -> int:
-        size = 0
-        for message in self._messages:
-            size += len(message.content) + 64
-            for call in message.tool_calls:
-                size += len(call.id) + len(call.name) + len(
-                    json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":"))
-                )
-        return size
-
-
-def _capsule(message: ModelMessage) -> str:
-    details: dict[str, object] = {
-        "sha256": hashlib.sha256(message.content.encode("utf-8")).hexdigest(),
-        "chars": len(message.content),
-        "re_read": True,
-    }
-    try:
-        value = json.loads(message.content)
-    except json.JSONDecodeError:
-        value = None
-    if isinstance(value, dict):
-        for key in ("ok", "tool"):
-            if key in value:
-                details[key] = value[key]
-        error = value.get("error")
-        if isinstance(error, dict) and "code" in error:
-            details["error_code"] = error["code"]
-        result = value.get("result")
-        if isinstance(result, dict):
-            for key in (
-                "path",
-                "start_line",
-                "line_count",
-                "query",
-                "matches",
-                "files_scanned",
-            ):
-                if key in result:
-                    item = result[key]
-                    details[key] = (
-                        len(item) if key == "matches" and isinstance(item, list) else item
-                    )
-    return json.dumps(
-        {"evidence_capsule": details}, ensure_ascii=False, separators=(",", ":")
-    )
+    def projection(
+        self, history: Iterable[ContextSource | ModelMessage] = ()
+    ) -> ContextProjection:
+        return self.projector.project(tuple(history), self)
