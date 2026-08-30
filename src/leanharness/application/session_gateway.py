@@ -202,7 +202,8 @@ def context_history_for_session(
         if run.id != exclude_run_id
         and run.state in {"COMPLETED", "EXHAUSTED", "FAILED", "CANCELLED"}
     }
-    candidates: list[ContextSource] = []
+    groups: list[list[ContextSource]] = []
+    groups_by_key: dict[str, list[ContextSource]] = {}
     emitted_evidence: set[str] = set()
     for message in store.list_messages(session.id):
         if message.run_id == exclude_run_id or message.role not in {"user", "assistant"}:
@@ -212,10 +213,20 @@ def context_history_for_session(
             continue
         if message.role == "assistant" and len(content) > MAX_HISTORY_ANSWER_CHARS:
             content = content[:MAX_HISTORY_ANSWER_CHARS]
+        group_key = (
+            f"run:{message.run_id}"
+            if message.run_id is not None
+            else f"message:{message.id}"
+        )
+        group = groups_by_key.get(group_key)
+        if group is None:
+            group = []
+            groups_by_key[group_key] = group
+            groups.append(group)
         if message.role == "assistant" and message.run_id in evidence_by_run:
-            candidates.append(evidence_by_run[message.run_id])
+            group.append(evidence_by_run[message.run_id])
             emitted_evidence.add(message.run_id)
-        candidates.append(
+        group.append(
             ContextSource(
                 source_id=f"message:{message.id}",
                 message=ModelMessage(role=message.role, content=content),
@@ -223,20 +234,18 @@ def context_history_for_session(
         )
     for run in store.list_runs(session.id):
         if run.id in evidence_by_run and run.id not in emitted_evidence:
-            candidates.append(evidence_by_run[run.id])
+            groups.append([evidence_by_run[run.id]])
 
-    selected: list[ContextSource] = []
+    selected_groups: list[list[ContextSource]] = []
     size = 0
-    for source in reversed(candidates):
-        cost = len(source.message.content) + 64
-        if selected and size + cost > MAX_PROJECTED_HISTORY_CHARS:
+    for group in reversed(groups):
+        cost = sum(len(source.message.content) + 64 for source in group)
+        if size + cost > MAX_PROJECTED_HISTORY_CHARS:
             break
-        if not selected and cost > MAX_PROJECTED_HISTORY_CHARS:
-            continue
-        selected.append(source)
+        selected_groups.append(group)
         size += cost
-    selected.reverse()
-    return tuple(selected)
+    selected_groups.reverse()
+    return tuple(source for group in selected_groups for source in group)
 
 
 def _run_evidence(store: LocalStore, run: RunRecord) -> ContextSource:

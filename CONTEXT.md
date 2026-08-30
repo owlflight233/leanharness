@@ -38,8 +38,13 @@ and hidden reasoning are never reconstructed from persistent storage.
 - Public session messages retain stable `message:<uuid>` source identifiers.
 - Completed runs contribute bounded evidence with stable
   `run:<uuid>:evidence` identifiers.
+- Persistent history is admitted as complete run groups: a user task, its
+  redacted run evidence, and its public answer are retained or evicted
+  together at the history budget boundary.
 - The current run is excluded from its history seed and appended once through
   the live journal.
+- The active user task remains verbatim in every projection and is never
+  replaced by a semantic summary.
 - Assistant tool calls and their tool results remain adjacent and paired.
 - The current task and the two most recent assistant/tool steps are protected.
 - A projection records only counts, generation, and a SHA-256 digest in traces;
@@ -61,8 +66,10 @@ unavailable summaries fall back to deterministic capsules. Protected context
 that still cannot fit fails with `CONTEXT_BUDGET_EXCEEDED`.
 
 A valid semantic summary is cached by the stable IDs and hashes of the replaced
-prefix. Repeated model requests reuse it. At most three semantic compactions can
-occur in one run.
+contiguous segment. Repeated model requests reuse it. If both historical turns
+and older live steps must be reduced, one model request may compact them as
+separate segments without crossing the active task boundary. At most three
+semantic compactions can occur in one run.
 
 ## Provider overflow recovery
 
@@ -78,4 +85,3 @@ The application adapter derives history only from records already processed by
 `TraceRedactor`. Semantic summary fields are validated, bounded, sanitized, and
 restricted to workspace-relative paths. Context trace events contain no source
 text, prompt, tool output, diff, command output, credential, or environment.
-

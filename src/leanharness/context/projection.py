@@ -83,6 +83,15 @@ class ContextSource:
     message: ModelMessage
 
 
+@dataclass(frozen=True, slots=True)
+class _CachedSummary:
+    """One semantic capsule and the contiguous raw sources it replaces."""
+
+    source_ids: tuple[str, ...]
+    source_digest: str
+    summary: ContextSource
+
+
 class ContextJournal:
     """Append-only live message journal for a single CodingAgent run."""
 
@@ -131,9 +140,7 @@ class ContextProjector:
         self.summary_sanitizer = summary_sanitizer
         self._semantic_calls = 0
         self._generation = 0
-        self._cached_prefix_ids: tuple[str, ...] = ()
-        self._cached_prefix_digest = ""
-        self._cached_summary: ContextSource | None = None
+        self._cached_summaries: list[_CachedSummary] = []
 
     @property
     def semantic_calls(self) -> int:
@@ -146,7 +153,7 @@ class ContextProjector:
     ) -> ContextProjection:
         """Project without network access, applying deterministic compaction."""
         raw_sources = _normalise_sources(history, journal.messages)
-        sources = self._apply_cached_summary(raw_sources)
+        sources = self._apply_cached_summaries(raw_sources)
         messages = [source.message for source in sources]
         compressed_messages, compressed_steps = _deterministic_compact(
             messages, self.soft_chars
@@ -173,16 +180,22 @@ class ContextProjector:
     ) -> ContextProjection:
         """Project and use a bounded model summary only when required."""
         projection = self.project(history, journal)
-        if (
-            projection.projected_chars <= self.max_chars
-            and not force_semantic
-        ):
+        if projection.projected_chars <= self.max_chars and not force_semantic:
             return projection
         if not self.semantic_compaction or model_client is None:
             raise ContextBudgetError("Context requires semantic compression")
-        if self._semantic_calls >= self.max_semantic_compactions:
-            raise ContextBudgetError("Semantic context compaction limit reached")
-        return await self._semantic_project(history, journal, model_client)
+        require_one_compaction = force_semantic
+        while projection.projected_chars > self.max_chars or require_one_compaction:
+            require_one_compaction = False
+            if self._semantic_calls >= self.max_semantic_compactions:
+                raise ContextBudgetError("Semantic context compaction limit reached")
+            previous_digest = projection.digest
+            projection = await self._semantic_project(history, journal, model_client)
+            if projection.semantic_fallback:
+                return projection
+            if projection.digest == previous_digest:
+                raise ContextBudgetError("Semantic context compaction made no progress")
+        return projection
 
     async def _semantic_project(
         self,
@@ -191,7 +204,7 @@ class ContextProjector:
         model_client: ContextModelClient,
     ) -> ContextProjection:
         raw_sources = _normalise_sources(history, journal.messages)
-        sources = self._apply_cached_summary(raw_sources)
+        sources = self._apply_cached_summaries(raw_sources)
         messages = [source.message for source in sources]
         _deterministic_compact(
             messages, min(self.soft_chars, MAX_SUMMARY_INPUT_CHARS)
@@ -200,11 +213,21 @@ class ContextProjector:
             ContextSource(source.source_id, message)
             for source, message in zip(sources, messages, strict=True)
         ]
-        protected_start = _protected_start(messages)
-        candidate_sources = _bounded_summary_sources(sources[1:protected_start])
+        candidate_range = _semantic_candidate_range(sources, messages)
+        candidate_sources = _bounded_summary_sources(candidate_range)
         candidate_messages = [source.message for source in candidate_sources]
         if not candidate_messages:
             raise ContextBudgetError("Context contains no compressible messages")
+        candidate_messages = [
+            ModelMessage(
+                role="tool",
+                content=_capsule(message),
+                tool_call_id=message.tool_call_id,
+            )
+            if message.role == "tool" and "evidence_capsule" not in message.content
+            else message
+            for message in candidate_messages
+        ]
         payload = _summary_input(candidate_messages)
         self._semantic_calls += 1
         try:
@@ -244,25 +267,21 @@ class ContextProjector:
         summary_source = ContextSource(
             f"semantic-summary:{self._generation + 1}", summary_message
         )
-        projected_sources = [sources[0], summary_source]
-        projected_sources.extend(sources[1 + len(candidate_sources) :])
+        candidate_start = _source_slice_start(sources, candidate_sources)
+        projected_sources = [
+            *sources[:candidate_start],
+            summary_source,
+            *sources[candidate_start + len(candidate_sources) :],
+        ]
         projected = tuple(source.message for source in projected_sources)
-        if _message_size(projected) > self.max_chars:
-            return self._fallback_projection(sources)
         _validate_tool_protocol(projected)
-        candidate_ids = tuple(
-            source.source_id
-            for source in candidate_sources
-            if not source.source_id.startswith("semantic-summary:")
-        )
-        combined_ids = (*self._cached_prefix_ids, *candidate_ids)
-        deduplicated_ids = tuple(dict.fromkeys(combined_ids))
-        raw_prefix = tuple(raw_sources[1 : 1 + len(deduplicated_ids)])
-        if tuple(source.source_id for source in raw_prefix) != deduplicated_ids:
+        candidate_ids = self._expanded_source_ids(candidate_sources)
+        raw_slice = _find_source_slice(raw_sources, candidate_ids)
+        if raw_slice is None:
             return self._fallback_projection(raw_sources)
-        self._cached_prefix_ids = deduplicated_ids
-        self._cached_prefix_digest = _sources_digest(raw_prefix)
-        self._cached_summary = summary_source
+        raw_start, raw_end = raw_slice
+        raw_segment = tuple(raw_sources[raw_start:raw_end])
+        self._cache_summary(candidate_ids, _sources_digest(raw_segment), summary_source)
         self._generation += 1
         return ContextProjection(
             messages=projected,
@@ -294,17 +313,61 @@ class ContextProjector:
             digest=_messages_digest(messages),
         )
 
-    def _apply_cached_summary(self, sources: list[ContextSource]) -> list[ContextSource]:
-        if not self._cached_prefix_ids or self._cached_summary is None or not sources:
+    def _apply_cached_summaries(self, sources: list[ContextSource]) -> list[ContextSource]:
+        if not self._cached_summaries or not sources:
             return sources
-        prefix_length = len(self._cached_prefix_ids)
-        candidate = tuple(sources[1 : 1 + prefix_length])
-        if (
-            tuple(source.source_id for source in candidate) != self._cached_prefix_ids
-            or _sources_digest(candidate) != self._cached_prefix_digest
+        projected: list[ContextSource] = []
+        index = 0
+        caches_by_first_id: dict[str, _CachedSummary] = {}
+        for cache in sorted(
+            self._cached_summaries,
+            key=lambda item: len(item.source_ids),
+            reverse=True,
         ):
-            return sources
-        return [sources[0], self._cached_summary, *sources[1 + prefix_length :]]
+            caches_by_first_id.setdefault(cache.source_ids[0], cache)
+        while index < len(sources):
+            cache = caches_by_first_id.get(sources[index].source_id)
+            if cache is not None:
+                candidate = tuple(sources[index : index + len(cache.source_ids)])
+                if (
+                    tuple(source.source_id for source in candidate) == cache.source_ids
+                    and _sources_digest(candidate) == cache.source_digest
+                ):
+                    projected.append(cache.summary)
+                    index += len(cache.source_ids)
+                    continue
+            projected.append(sources[index])
+            index += 1
+        return projected
+
+    def _expanded_source_ids(
+        self, sources: Sequence[ContextSource]
+    ) -> tuple[str, ...]:
+        caches = {cache.summary.source_id: cache for cache in self._cached_summaries}
+        expanded: list[str] = []
+        for source in sources:
+            cache = caches.get(source.source_id)
+            if cache is None:
+                expanded.append(source.source_id)
+            else:
+                expanded.extend(cache.source_ids)
+        return tuple(expanded)
+
+    def _cache_summary(
+        self,
+        source_ids: tuple[str, ...],
+        source_digest: str,
+        summary: ContextSource,
+    ) -> None:
+        replaced_ids = set(source_ids)
+        self._cached_summaries = [
+            cache
+            for cache in self._cached_summaries
+            if replaced_ids.isdisjoint(cache.source_ids)
+        ]
+        self._cached_summaries.append(
+            _CachedSummary(source_ids, source_digest, summary)
+        )
 
 
 def _normalise_sources(
@@ -340,6 +403,61 @@ def _protected_start(messages: Sequence[ModelMessage]) -> int:
                 protected = index
                 break
     return protected or max(1, len(messages) - 10)
+
+
+def _semantic_candidate_range(
+    sources: Sequence[ContextSource], messages: Sequence[ModelMessage]
+) -> Sequence[ContextSource]:
+    """Select old contiguous context without swallowing the active user task."""
+
+    if len(sources) != len(messages):
+        raise ContextProtocolError("Projected context sources are misaligned")
+    task_index = next(
+        (
+            index
+            for index, source in enumerate(sources)
+            if source.source_id.startswith("live:") and source.message.role == "user"
+        ),
+        None,
+    )
+    if task_index is None:
+        raise ContextBudgetError("Context does not contain an active user task")
+
+    protected_start = max(task_index + 1, _protected_start(messages))
+    ranges = (
+        sources[1:task_index],
+        sources[task_index + 1 : protected_start],
+    )
+    for candidate in ranges:
+        if any(not source.source_id.startswith("semantic-summary:") for source in candidate):
+            return candidate
+    return ()
+
+
+def _source_slice_start(
+    sources: Sequence[ContextSource], candidate: Sequence[ContextSource]
+) -> int:
+    if not candidate:
+        raise ContextBudgetError("Context contains no compressible messages")
+    first = candidate[0]
+    for index, source in enumerate(sources):
+        if source is first:
+            return index
+    raise ContextProtocolError("Semantic compaction candidate is not in the projection")
+
+
+def _find_source_slice(
+    sources: Sequence[ContextSource], source_ids: Sequence[str]
+) -> tuple[int, int] | None:
+    if not source_ids:
+        return None
+    width = len(source_ids)
+    expected = tuple(source_ids)
+    for start in range(0, len(sources) - width + 1):
+        candidate = tuple(source.source_id for source in sources[start : start + width])
+        if candidate == expected:
+            return start, start + width
+    return None
 
 
 def _deterministic_compact(messages: list[ModelMessage], target: int) -> tuple[int, int]:

@@ -206,6 +206,54 @@ def test_semantic_compaction_is_bounded_cached_and_tool_free() -> None:
     assert len(model.requests) == 2
 
 
+def test_semantic_compaction_never_replaces_the_active_user_task() -> None:
+    task = "CURRENT TASK: preserve this exact request"
+    journal = ContextJournal(
+        (ModelMessage(role="system", content="rules"), ModelMessage(role="user", content=task))
+    )
+    for index in range(4):
+        journal.append(
+            ModelMessage(role="assistant", content=f"old-step-{index} " + "x" * 900)
+        )
+        journal.append(ModelMessage(role="user", content=f"step-{index}-feedback"))
+
+    model = SummaryModel()
+    projection = run(
+        ContextProjector(max_chars=6_000, soft_chars=4_096).project_async(
+            history_sources(content_size=500), journal, model
+        )
+    )
+
+    assert sum(message.content == task for message in projection.messages) == 1
+    assert projection.projected_chars <= 6_000
+    assert model.requests
+    assert all(task not in request.messages[-1].content for request in model.requests)
+
+
+def test_semantic_compaction_can_reduce_history_and_old_live_steps_separately() -> None:
+    task = "CURRENT TASK: keep me outside every summary"
+    journal = ContextJournal(
+        (ModelMessage(role="system", content="rules"), ModelMessage(role="user", content=task))
+    )
+    for index in range(6):
+        journal.append(
+            ModelMessage(role="assistant", content=f"old-step-{index} " + "x" * 1_100)
+        )
+        journal.append(ModelMessage(role="user", content=f"step-{index}-feedback"))
+
+    model = SummaryModel()
+    projection = run(
+        ContextProjector(max_chars=5_000, soft_chars=4_096).project_async(
+            history_sources(content_size=500), journal, model
+        )
+    )
+
+    assert projection.projected_chars <= 5_000
+    assert sum(message.content == task for message in projection.messages) == 1
+    assert len(model.requests) == 2
+    assert all(task not in request.messages[-1].content for request in model.requests)
+
+
 def test_invalid_semantic_summary_falls_back_or_fails_closed() -> None:
     journal = ContextJournal(
         (ModelMessage(role="system", content="s" * 4_500), ModelMessage(role="user", content="now"))
@@ -304,6 +352,44 @@ def test_historical_run_evidence_is_projected_without_tool_content(tmp_path: Pat
     assert "README.md" in rendered
     assert "private source body" not in rendered
     assert history[-1].message.content == "README inspected"
+
+
+def test_persistent_history_budget_keeps_complete_run_turns(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path / "data")
+    session = store.create_session(store.ensure_project(tmp_path))
+    for index in range(3):
+        run_record = store.create_run(session.id, "coding", f"task-{index}", 4)
+        store.add_message(
+            session.id,
+            "user",
+            f"task-{index}:" + "u" * 15_000,
+            run_id=run_record.id,
+        )
+        store.update_run(run_record.id, state="COMPLETED", answer=f"answer-{index}")
+        store.add_message(
+            session.id,
+            "assistant",
+            f"answer-{index}:" + "a" * 8_000,
+            run_id=run_record.id,
+        )
+
+    history = context_history_for_session(store, session)
+    rendered = "\n".join(source.message.content for source in history)
+
+    assert "task-0:" not in rendered
+    assert "answer-0:" not in rendered
+    assert "task-1:" in rendered
+    assert "answer-1:" in rendered
+    assert "task-2:" in rendered
+    assert "answer-2:" in rendered
+    assert [source.message.role for source in history] == [
+        "user",
+        "system",
+        "assistant",
+        "user",
+        "system",
+        "assistant",
+    ]
 
 
 def test_runtime_recovers_one_provider_context_overflow(tmp_path: Path) -> None:
