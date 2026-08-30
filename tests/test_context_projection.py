@@ -392,6 +392,54 @@ def test_persistent_history_budget_keeps_complete_run_turns(tmp_path: Path) -> N
     ]
 
 
+def test_public_context_is_rebuilt_from_redacted_records_after_restart(
+    tmp_path: Path,
+) -> None:
+    data_dir = tmp_path / "data"
+    with LocalStore(data_dir) as store:
+        session = store.create_session(store.ensure_project(tmp_path))
+        run_record = store.create_run(session.id, "coding", "Inspect README", 4)
+        store.add_message(session.id, "user", "Inspect README", run_id=run_record.id)
+        store.append_event(
+            session.id,
+            run_record.id,
+            0,
+            "tool.completed",
+            {
+                "type": "tool.completed",
+                "tool": "workspace_read",
+                "content": "source that must not survive restart",
+                "metadata": {"path": "README.md", "ok": True},
+            },
+        )
+        store.update_run(run_record.id, state="COMPLETED", answer="README inspected")
+        store.add_message(
+            session.id,
+            "assistant",
+            "README inspected",
+            run_id=run_record.id,
+        )
+        session_id = session.id
+        run_id = run_record.id
+
+    with LocalStore(data_dir) as reopened:
+        history = context_history_for_session(
+            reopened,
+            reopened.get_session(session_id),
+        )
+
+    rendered = "\n".join(source.message.content for source in history)
+    assert [source.source_id for source in history] == [
+        next(source.source_id for source in history if source.source_id.startswith("message:")),
+        f"run:{run_id}:evidence",
+        history[-1].source_id,
+    ]
+    assert "Inspect README" in rendered
+    assert "README inspected" in rendered
+    assert "README.md" in rendered
+    assert "source that must not survive restart" not in rendered
+
+
 def test_runtime_recovers_one_provider_context_overflow(tmp_path: Path) -> None:
     class OverflowModel:
         def __init__(self) -> None:

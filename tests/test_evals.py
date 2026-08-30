@@ -45,6 +45,25 @@ def outcome(status: str, answer: str) -> ModelResponse:
     )
 
 
+def input_response() -> ModelResponse:
+    return ModelResponse(
+        content="",
+        tool_calls=(
+            ToolCall(
+                id="input-1",
+                name="request_user_input",
+                arguments={
+                    "question": "Which filename should I create?",
+                    "options": [
+                        {"label": "notes.txt", "description": "Create notes.txt."},
+                        {"label": "status.txt", "description": "Create status.txt."},
+                    ],
+                },
+            ),
+        ),
+    )
+
+
 def run_eval(
     scenario: EvaluationScenario,
     model: ScriptedModel,
@@ -156,6 +175,39 @@ def test_pre_cancelled_evaluation_never_calls_model(tmp_path: Path) -> None:
     assert result.passed is True
     assert result.model_calls == 0
     assert model.requests == []
+
+
+def test_evaluation_resolves_required_model_input_and_records_it(tmp_path: Path) -> None:
+    scenario = EvaluationScenario(
+        id="clarify",
+        task="Ask for a filename, then create it.",
+        permission_mode="unrestricted",
+        expected_files=(FileExpectation("notes.txt", exact="ready\n"),),
+        require_mutation=True,
+        require_user_input=True,
+        user_input_answers=("notes.txt",),
+    )
+    model = ScriptedModel(
+        [
+            input_response(),
+            tool_response(
+                "write-1",
+                "workspace_write",
+                {"path": "notes.txt", "content": "ready\n", "mode": "create"},
+            ),
+            outcome("completed", "Created notes.txt after clarification."),
+        ]
+    )
+
+    result = run_eval(scenario, model, tmp_path)
+
+    assert result.passed is True
+    assert result.user_inputs == 1
+    assert '"answer":"notes.txt"' in next(
+        message.content
+        for message in model.requests[1].messages
+        if message.role == "tool" and message.tool_call_id == "input-1"
+    )
 
 
 def test_report_aggregates_without_answer_or_source_text() -> None:

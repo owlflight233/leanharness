@@ -28,6 +28,7 @@ from leanharness.models import (
 )
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.runtime import CodingAgent, RuntimeEvent
+from leanharness.runtime.user_input import UserInputCoordinator
 
 
 class EvaluationModelClient(Protocol):
@@ -63,6 +64,11 @@ async def evaluate_scenario(
             if scenario.permission_mode == PermissionMode.APPROVE.value
             else None
         )
+        user_inputs = (
+            UserInputCoordinator(timeout_seconds=5)
+            if scenario.require_user_input or scenario.user_input_answers
+            else None
+        )
         agent = CodingAgent(
             workspace,
             model_client,
@@ -70,15 +76,28 @@ async def evaluate_scenario(
             cancel_event=cancel_event,
             permission_mode=PermissionMode(scenario.permission_mode),
             approvals=coordinator,
+            user_inputs=user_inputs,
             language="zh",
         )
         events: list[RuntimeEvent] = []
+        pending_answers = iter(scenario.user_input_answers)
         async for event in agent.run(scenario.task):
             events.append(event)
             if event.type == "approval.required" and coordinator is not None:
                 approval_id = str((event.metadata or {})["approval_id"])
                 decision = "approve" if scenario.approval_policy == "approve" else "reject"
                 coordinator.resolve(agent.run_id, approval_id, decision)
+            if event.type == "input.required" and user_inputs is not None:
+                try:
+                    answer = next(pending_answers)
+                except StopIteration:
+                    agent.cancel_event.set()
+                else:
+                    user_inputs.resolve(
+                        agent.run_id,
+                        str((event.metadata or {})["input_id"]),
+                        answer,
+                    )
         result = _assess(
             scenario,
             repetition,
@@ -125,6 +144,9 @@ def _assess(
         for event in events
     )
     approvals = sum(event.type == "approval.required" for event in events)
+    user_inputs = sum(event.type == "input.required" for event in events)
+    if scenario.require_user_input and user_inputs == 0:
+        failed_checks.append("user_input_missing")
     metrics = (terminal_event.metadata or {}).get("metrics", {}) if terminal_event else {}
     metrics = metrics if isinstance(metrics, dict) else {}
     answer = (terminal_event.answer or "") if terminal_event else ""
@@ -140,6 +162,7 @@ def _assess(
         tool_calls=_metric(metrics, "tool_calls"),
         tool_failures=tool_failures,
         approvals=approvals,
+        user_inputs=user_inputs,
         prompt_tokens=_metric(metrics, "prompt_tokens"),
         completion_tokens=_metric(metrics, "completion_tokens"),
         total_tokens=_metric(metrics, "total_tokens"),

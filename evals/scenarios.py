@@ -86,6 +86,20 @@ SCENARIOS: dict[str, EvaluationScenario] = {
         require_observation=True,
         max_steps=10,
     ),
+    "clarify_before_create": EvaluationScenario(
+        id="clarify_before_create",
+        description="Ask one necessary question, then use the answer to create the target.",
+        task=(
+            "创建一个只包含 `ready` 的文本文件, 但文件名由我决定。"
+            "在写入前必须先询问我选择哪个文件名。"
+        ),
+        permission_mode="unrestricted",
+        expected_files=(FileExpectation("notes.txt", exact="ready\n"),),
+        require_mutation=True,
+        require_user_input=True,
+        user_input_answers=("notes.txt",),
+        max_steps=12,
+    ),
     "cancel_before_model": EvaluationScenario(
         id="cancel_before_model",
         description="Cancellation must terminate without a model or tool call.",

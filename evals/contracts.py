@@ -30,6 +30,8 @@ class EvaluationScenario:
     require_observation: bool = False
     require_mutation: bool = False
     require_verification: bool = False
+    require_user_input: bool = False
+    user_input_answers: tuple[str, ...] = ()
     cancel_before_start: bool = False
     max_steps: int = 12
     description: str = ""
@@ -47,6 +49,7 @@ class EvaluationResult:
     tool_calls: int
     tool_failures: int
     approvals: int
+    user_inputs: int
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
@@ -84,6 +87,7 @@ class EvaluationReport:
                 "model_calls": sum(item.model_calls for item in self.results),
                 "tool_calls": sum(item.tool_calls for item in self.results),
                 "tool_failures": sum(item.tool_failures for item in self.results),
+                "user_inputs": sum(item.user_inputs for item in self.results),
                 "total_tokens": sum(item.total_tokens for item in self.results),
                 "duration_ms": sum(item.duration_ms for item in self.results),
             },
