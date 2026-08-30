@@ -60,7 +60,7 @@ class CompletionLedger:
         if result.error and result.error.code not in self.unresolved_errors:
             self.unresolved_errors.append(result.error.code)
 
-    def validate_completed(self) -> CompletionDecision:
+    def validate_completed(self, *, language: str = "same") -> CompletionDecision:
         """Reject completion only when observed tool facts contradict it."""
 
         if self.successful_observations < 1:
@@ -68,7 +68,9 @@ class CompletionLedger:
                 accepted=False,
                 reason="OBSERVATION_REQUIRED",
                 guidance=(
-                    "Before reporting completion, obtain at least one successful "
+                    "在报告完成前\uFF0C至少获取一次成功的工作区观察。"
+                    if language == "zh"
+                    else "Before reporting completion, obtain at least one successful "
                     "workspace observation."
                 ),
             )
@@ -77,8 +79,10 @@ class CompletionLedger:
                 accepted=False,
                 reason="MUTATION_NOT_APPLIED",
                 guidance=(
-                    "A workspace mutation was attempted, but none succeeded. Retry with "
-                    "corrected arguments or report the run as incomplete."
+                    "已尝试修改工作区\uFF0C但没有一次成功。请修正参数后重试\uFF0C或报告运行未完成。"
+                    if language == "zh"
+                    else "A workspace mutation was attempted, but none succeeded. Retry "
+                    "with corrected arguments or report the run as incomplete."
                 ),
             )
         if self.verification_attempts and not self.successful_verifications:
@@ -86,8 +90,10 @@ class CompletionLedger:
                 accepted=False,
                 reason="VERIFICATION_NOT_RUN",
                 guidance=(
-                    "Project verification was attempted, but no command succeeded. Retry "
-                    "with an allowed profile or report the run as incomplete."
+                    "已尝试验证项目\uFF0C但没有命令成功。请使用允许的配置重试\uFF0C或报告运行未完成。"
+                    if language == "zh"
+                    else "Project verification was attempted, but no command succeeded. "
+                    "Retry with an allowed profile or report the run as incomplete."
                 ),
             )
         return CompletionDecision(accepted=True)

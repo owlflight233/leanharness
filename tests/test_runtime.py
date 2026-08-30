@@ -110,6 +110,15 @@ def test_runtime_requires_observation_without_application_intent_rules(tmp_path:
     assert "workspace observation" in retry_message.content
 
 
+def test_completion_guidance_uses_session_language() -> None:
+    from leanharness.runtime.completion import CompletionLedger
+
+    decision = CompletionLedger().validate_completed(language="zh")
+
+    assert decision.reason == "OBSERVATION_REQUIRED"
+    assert decision.guidance == "在报告完成前\uFF0C至少获取一次成功的工作区观察。"
+
+
 def test_mutation_task_without_successful_patch_is_not_completed(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("# Example\n", encoding="utf-8")
     model = ScriptedModel(

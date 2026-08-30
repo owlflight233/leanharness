@@ -518,7 +518,7 @@ class CodingAgent:
                             ),
                         )
                         return
-                    decision = self.evidence.validate_completed()
+                    decision = self.evidence.validate_completed(language=self.language)
                     if decision.accepted:
                         self.context.append(
                             ModelMessage(
@@ -857,7 +857,7 @@ class CodingAgent:
                 continue
 
             if response.content.strip():
-                decision = self.evidence.validate_completed()
+                decision = self.evidence.validate_completed(language=self.language)
                 if decision.accepted:
                     self.state = transition(self.state, RunState.COMPLETED)
                     yield self._event(
