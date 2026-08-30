@@ -145,6 +145,37 @@ def test_rejected_tool_returns_recoverable_result_to_model(tmp_path: Path) -> No
     assert json.loads(tool_message.content)["error"]["code"] == "APPROVAL_REJECTED"
 
 
+def test_cancelling_pending_approval_closes_tool_protocol(tmp_path: Path) -> None:
+    source = tmp_path / "value.txt"
+    source.write_text("before\n", encoding="utf-8")
+
+    async def scenario():
+        coordinator = ApprovalCoordinator(timeout_seconds=30)
+        model = ScriptedModel([patch_response()])
+        agent = CodingAgent(
+            tmp_path,
+            model,
+            permission_mode=PermissionMode.APPROVE,
+            approvals=coordinator,
+        )
+        events = []
+        async for event in agent.run("Update value.txt"):
+            events.append(event)
+            if event.type == "approval.required":
+                coordinator.cancel_run(agent.run_id)
+        return agent, events
+
+    agent, events = asyncio.run(scenario())
+
+    assert events[-1].type == "run.cancelled"
+    completed = [event for event in events if event.type == "tool.completed"]
+    assert len(completed) == 1
+    assert completed[0].metadata["error_code"] == "TOOL_CANCELLED"
+    tool_messages = [message for message in agent.context.messages if message.role == "tool"]
+    assert [message.tool_call_id for message in tool_messages] == ["patch-1"]
+    assert source.read_text(encoding="utf-8") == "before\n"
+
+
 def test_approval_is_single_use_and_active_runs_are_per_session(tmp_path: Path) -> None:
     async def scenario():
         coordinator = ApprovalCoordinator()

@@ -36,7 +36,8 @@ from leanharness.runtime.outcome import (
 from leanharness.runtime.prompting import system_prompt
 from leanharness.runtime.recovery import ModelProtocolRecovery, ToolFailureTracker
 from leanharness.runtime.state import RunState, transition
-from leanharness.tools import ToolErrorInfo, ToolExecutionError, ToolRegistry, ToolResult
+from leanharness.runtime.tool_dispatch import ToolDispatcher, tool_error_result
+from leanharness.tools import ToolRegistry, ToolResult
 
 DEFAULT_MAX_STEPS = 24
 MIN_MAX_STEPS = 2
@@ -90,6 +91,7 @@ class CodingAgent:
         self.run_id = run_id or uuid.uuid4().hex
         self.cancel_event = cancel_event or asyncio.Event()
         self.tools = tool_registry_factory(self.workspace, mode=permission_mode)
+        self._tool_dispatcher = ToolDispatcher(self.tools, self.cancel_event)
         self.context = ContextStore(
             max_chars=context_chars, summary_sanitizer=context_sanitizer
         )
@@ -440,6 +442,21 @@ class CodingAgent:
                         tool=call.name,
                         metadata=requested_metadata,
                     )
+                    if self.cancel_event.is_set():
+                        self.state = transition(self.state, RunState.CANCELLED)
+                        for event in self._cancel_pending_tool_calls(
+                            calls, call_index, step, current_requested=True
+                        ):
+                            yield event
+                        yield self._event(
+                            "run.cancelled",
+                            step=step,
+                            summary=_cancelled_summary(self.language),
+                            metadata=self._terminal_metadata(
+                                incomplete_reason="RUN_CANCELLED"
+                            ),
+                        )
+                        return
                     if call_index >= MAX_TOOL_CALLS_PER_STEP:
                         result = _runtime_tool_error(
                             call,
@@ -486,32 +503,18 @@ class CodingAgent:
                                         "Interactive approval is unavailable",
                                     )
                                 else:
-                                    try:
-                                        preview_data = self.tools.preview(call)
-                                    except ToolExecutionError as exc:
-                                        result = _runtime_tool_error(
-                                            call,
-                                            exc.code,
-                                            exc.message,
-                                            recoverable=exc.recoverable,
-                                        )
-                                    except Exception:
-                                        result = _runtime_tool_error(
-                                            call,
-                                            "APPROVAL_PREVIEW_FAILED",
-                                            "A safe approval preview could not be created",
-                                        )
-                                    if result is None:
-                                        expected_hashes = preview_data.pop("target_hashes", None)
-                                        raw_preview = preview_data.pop("preview", None)
+                                    prepared = self._tool_dispatcher.prepare_approval(call)
+                                    if isinstance(prepared, ToolResult):
+                                        result = prepared
+                                    else:
                                         request = self.approvals.request(
                                             run_id=self.run_id,
                                             session_id=self.session_id,
                                             tool_call_id=call.id,
                                             tool_name=call.name,
                                             summary=_approval_summary(call, self.language),
-                                            parameters=preview_data,
-                                            preview=raw_preview,
+                                            parameters=prepared.parameters,
+                                            preview=prepared.preview,
                                         )
                                         self.state = transition(
                                             self.state, RunState.WAITING_APPROVAL
@@ -541,6 +544,13 @@ class CodingAgent:
                                             self.state = transition(
                                                 self.state, RunState.CANCELLED
                                             )
+                                            for event in self._cancel_pending_tool_calls(
+                                                calls,
+                                                call_index,
+                                                step,
+                                                current_requested=True,
+                                            ):
+                                                yield event
                                             yield self._event(
                                                 "run.cancelled",
                                                 step=step,
@@ -575,15 +585,32 @@ class CodingAgent:
                                                 tool=call.name,
                                                 metadata={"tool_call_id": call.id},
                                             )
-                                            result = await self._execute_tool(
-                                                call,
-                                                approved=True,
-                                                expected_hashes=(
-                                                    expected_hashes
-                                                    if isinstance(expected_hashes, dict)
-                                                    else None
-                                                ),
-                                            )
+                                            try:
+                                                result = await self._tool_dispatcher.execute(
+                                                    call,
+                                                    approved=True,
+                                                    expected_hashes=prepared.expected_hashes,
+                                                )
+                                            except asyncio.CancelledError:
+                                                self.state = transition(
+                                                    self.state, RunState.CANCELLED
+                                                )
+                                                for event in self._cancel_pending_tool_calls(
+                                                    calls,
+                                                    call_index,
+                                                    step,
+                                                    current_requested=True,
+                                                ):
+                                                    yield event
+                                                yield self._event(
+                                                    "run.cancelled",
+                                                    step=step,
+                                                    summary=_cancelled_summary(self.language),
+                                                    metadata=self._terminal_metadata(
+                                                        incomplete_reason="RUN_CANCELLED"
+                                                    ),
+                                                )
+                                                return
                             else:
                                 self.state = transition(
                                     self.state, RunState.EXECUTING_TOOL
@@ -594,7 +621,26 @@ class CodingAgent:
                                     tool=call.name,
                                     metadata={"tool_call_id": call.id},
                                 )
-                                result = await self._execute_tool(call)
+                                try:
+                                    result = await self._tool_dispatcher.execute(call)
+                                except asyncio.CancelledError:
+                                    self.state = transition(self.state, RunState.CANCELLED)
+                                    for event in self._cancel_pending_tool_calls(
+                                        calls,
+                                        call_index,
+                                        step,
+                                        current_requested=True,
+                                    ):
+                                        yield event
+                                    yield self._event(
+                                        "run.cancelled",
+                                        step=step,
+                                        summary=_cancelled_summary(self.language),
+                                        metadata=self._terminal_metadata(
+                                            incomplete_reason="RUN_CANCELLED"
+                                        ),
+                                    )
+                                    return
                             assert result is not None
                     content = result.to_model_content()
                     content_bytes = len(content.encode("utf-8"))
@@ -783,29 +829,50 @@ class CodingAgent:
             },
         )
 
-    async def _execute_tool(
+    def _cancel_pending_tool_calls(
         self,
-        call: ToolCall,
+        calls: tuple[ToolCall, ...],
+        start_index: int,
+        step: int,
         *,
-        approved: bool = False,
-        expected_hashes: dict[str, str | None] | None = None,
-    ) -> ToolResult:
-        try:
-            if approved:
-                return await asyncio.to_thread(
-                    self.tools.execute_approved,
-                    call,
-                    expected_hashes=expected_hashes,
-                    cancel_signal=self.cancel_event,
+        current_requested: bool,
+    ) -> tuple[RuntimeEvent, ...]:
+        """Close every outstanding assistant call with a safe tool result."""
+
+        events: list[RuntimeEvent] = []
+        first_index = start_index if current_requested else start_index + 1
+        for call in calls[first_index:]:
+            if call is not calls[start_index] or not current_requested:
+                events.append(
+                    self._event(
+                        "tool.requested",
+                        step=step,
+                        tool=call.name,
+                        metadata={"tool_call_id": call.id},
+                    )
                 )
-            return await asyncio.to_thread(
-                self.tools.execute,
+            result = tool_error_result(
                 call,
-                cancel_signal=self.cancel_event,
+                "TOOL_CANCELLED",
+                "Tool call was cancelled before completion",
             )
-        except asyncio.CancelledError:
-            self.cancel_event.set()
-            raise
+            self.evidence.record(call.name, result)
+            self.context.append(
+                ModelMessage(role="tool", content=result.to_model_content(), tool_call_id=call.id)
+            )
+            events.append(
+                self._event(
+                    "tool.completed",
+                    step=step,
+                    tool=call.name,
+                    metadata={
+                        **result.public_metadata,
+                        "tool_call_id": call.id,
+                        "ok": False,
+                    },
+                )
+            )
+        return tuple(events)
 
     def _event(self, event_type: RuntimeEventType, **kwargs) -> RuntimeEvent:
         event = RuntimeEvent(
@@ -995,10 +1062,9 @@ def _runtime_tool_error(
     *,
     recoverable: bool = True,
 ) -> ToolResult:
-    return ToolResult(
-        tool_call_id=call.id,
-        tool=call.name,
-        ok=False,
-        error=ToolErrorInfo(code=code, message=message, recoverable=recoverable),
-        public_metadata={"error_code": code, "recoverable": recoverable},
+    return tool_error_result(
+        call,
+        code,
+        message,
+        recoverable=recoverable,
     )
