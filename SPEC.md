@@ -31,7 +31,7 @@ Version 0.1 will provide:
 - redacted JSONL execution traces;
 - standard and plan operating modes;
 - CLI, local web, and one-shot headless interfaces;
-- an isolated JSON Lines protocol for external tool plugins.
+- a documented extension boundary, without loading third-party plugins yet.
 
 ## Foundation milestone
 
