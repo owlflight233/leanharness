@@ -7,6 +7,7 @@ import pytest
 
 from leanharness.errors import (
     ModelAuthError,
+    ModelContextLengthError,
     ModelProtocolError,
     ModelRateLimitError,
     ModelTimeoutError,
@@ -106,6 +107,19 @@ def test_complete_sends_optional_thinking_fields_when_configured() -> None:
 
     assert captured["thinking"] == {"type": "enabled"}
     assert captured["reasoning_effort"] == "high"
+
+
+def test_complete_classifies_provider_context_overflow() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"error": {"message": "Maximum context length was exceeded"}},
+        )
+
+    client = OpenAICompatibleClient(config(), transport=httpx.MockTransport(handler))
+
+    with pytest.raises(ModelContextLengthError):
+        run(client.complete(ModelRequest(messages=(ModelMessage(role="user", content="x"),))))
 
 
 def test_stream_parses_cross_chunk_unicode_finish_reason_and_usage() -> None:

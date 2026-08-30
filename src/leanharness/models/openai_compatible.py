@@ -10,6 +10,7 @@ import httpx
 
 from leanharness.errors import (
     ModelAuthError,
+    ModelContextLengthError,
     ModelError,
     ModelProtocolError,
     ModelRateLimitError,
@@ -59,8 +60,8 @@ class OpenAICompatibleClient:
                 headers=self._headers(),
                 json=payload,
             ) as response:
-                self._raise_for_status(response.status_code)
                 body = await _read_bounded(response)
+                self._raise_for_status(response.status_code, body)
         except ModelError:
             raise
         except httpx.TimeoutException as exc:
@@ -110,7 +111,9 @@ class OpenAICompatibleClient:
                 headers=self._headers(),
                 json=payload,
             ) as response:
-                self._raise_for_status(response.status_code)
+                if response.status_code < 200 or response.status_code >= 300:
+                    body = await _read_bounded(response)
+                    self._raise_for_status(response.status_code, body)
                 yield ModelEvent(type="turn.started", sequence=sequence)
                 sequence += 1
 
@@ -212,7 +215,7 @@ class OpenAICompatibleClient:
         return payload
 
     @staticmethod
-    def _raise_for_status(status_code: int) -> None:
+    def _raise_for_status(status_code: int, body: bytes = b"") -> None:
         if status_code in {401, 403}:
             raise ModelAuthError("Model authentication failed")
         if status_code == 429:
@@ -221,8 +224,23 @@ class OpenAICompatibleClient:
             raise ModelTimeoutError("Model request timed out")
         if status_code >= 500:
             raise ModelUnavailableError("Model service is unavailable")
+        if status_code in {400, 413, 422} and _is_context_length_error(body):
+            raise ModelContextLengthError("Model context window was exceeded")
         if status_code < 200 or status_code >= 300:
             raise ModelProtocolError(f"Model service returned HTTP {status_code}")
+
+
+def _is_context_length_error(body: bytes) -> bool:
+    text = body[:64_000].decode("utf-8", errors="ignore").casefold()
+    markers = (
+        "context length",
+        "context window",
+        "maximum context",
+        "too many tokens",
+        "input length",
+        "max context",
+    )
+    return any(marker in text for marker in markers)
 
 
 async def _read_bounded(response: httpx.Response) -> bytes:

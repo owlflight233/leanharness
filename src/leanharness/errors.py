@@ -61,6 +61,12 @@ class ModelProtocolError(ModelError):
     code = "MODEL_PROTOCOL_ERROR"
 
 
+class ModelContextLengthError(ModelProtocolError):
+    """Raised when the provider rejects the active context window."""
+
+    code = "MODEL_CONTEXT_LENGTH_EXCEEDED"
+
+
 class ModelUnavailableError(ModelError):
     """Raised when the upstream cannot serve the request."""
 
