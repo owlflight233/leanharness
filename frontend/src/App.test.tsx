@@ -130,6 +130,76 @@ describe("application shell", () => {
     expect(workspaceClient.select).toHaveBeenCalledWith("C:\\projects\\next");
   });
 
+  it("keeps project order stable and restores a separate session per project", async () => {
+    const user = userEvent.setup();
+    const firstProject = {
+      id: "project-1",
+      root_path: "C:\\projects\\one",
+      permission_mode: "inspect" as const,
+      created_at: "2026-08-27T10:00:00+00:00",
+      updated_at: "2026-08-27T10:00:00+00:00",
+    };
+    const secondProject = {
+      ...firstProject,
+      id: "project-2",
+      root_path: "C:\\projects\\two",
+      created_at: "2026-08-27T10:01:00+00:00",
+      updated_at: "2026-08-27T10:01:00+00:00",
+    };
+    const firstSession = { ...baseSession, id: "session-one", project_id: firstProject.id, title: "项目一会话" };
+    const secondSession = { ...baseSession, id: "session-two", project_id: secondProject.id, title: "项目二会话" };
+    let currentWorkspace = firstProject.root_path;
+    const healthLoader: HealthLoader = async () => ({ ...healthy, workspace: currentWorkspace });
+    const workspaceClient: WorkspaceClient = {
+      select: vi.fn(async (path) => {
+        currentWorkspace = path;
+        return { workspace: path };
+      }),
+      list: vi.fn(async () => ({
+        current_workspace: currentWorkspace,
+        projects: [firstProject, secondProject],
+      })),
+    };
+    const client: SessionClient = {
+      list: vi.fn(async () => [
+        currentWorkspace === firstProject.root_path ? firstSession : secondSession,
+      ]),
+      get: vi.fn(async (id) => sessionDetail(id === firstSession.id ? firstSession : secondSession)),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+    };
+    window.localStorage.setItem(`leanharness.session.${firstProject.id}`, firstSession.id);
+    window.localStorage.setItem(`leanharness.session.${secondProject.id}`, secondSession.id);
+
+    render(
+      <App
+        healthLoader={healthLoader}
+        modelStatusLoader={configuredModel}
+        sessionClient={client}
+        workspaceClient={workspaceClient}
+      />,
+    );
+
+    expect((await screen.findAllByText(firstSession.title)).length).toBeGreaterThan(0);
+    const firstButton = screen.getAllByTitle(firstProject.root_path).find(
+      (element) => element.tagName === "BUTTON",
+    )!;
+    const secondButton = screen.getAllByTitle(secondProject.root_path).find(
+      (element) => element.tagName === "BUTTON",
+    )!;
+    expect(firstButton.compareDocumentPosition(secondButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(secondButton);
+    expect((await screen.findAllByText(secondSession.title)).length).toBeGreaterThan(0);
+    expect(client.get).toHaveBeenLastCalledWith(secondSession.id);
+    expect(firstButton.compareDocumentPosition(secondButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await user.click(firstButton);
+    expect((await screen.findAllByText(firstSession.title)).length).toBeGreaterThan(0);
+    expect(client.get).toHaveBeenLastCalledWith(firstSession.id);
+  });
+
   it("renders a failed connection", async () => {
     const failedHealth: HealthLoader = async () => {
       throw new Error("offline");
@@ -337,6 +407,27 @@ describe("application shell", () => {
         permission_mode: "unrestricted",
       }),
     );
+  });
+
+  it("rolls back the permission selector when persistence fails", async () => {
+    const user = userEvent.setup();
+    const client = mockSessionClient();
+    client.update = vi.fn(async () => {
+      throw new Error("保存失败");
+    });
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        sessionClient={client}
+      />,
+    );
+    await screen.findByText("已保存的结论");
+
+    await user.selectOptions(screen.getByLabelText("权限"), "unrestricted");
+
+    await waitFor(() => expect(screen.getByLabelText("权限")).toHaveValue("inspect"));
+    expect(screen.getByText("保存失败")).toBeInTheDocument();
   });
 
   it("requires confirmation before deleting one session", async () => {

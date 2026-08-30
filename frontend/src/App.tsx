@@ -168,6 +168,15 @@ function App({
   const [sessionError, setSessionError] = useState<string | null>(null);
   const nextMessageId = useRef(1);
   const activeRequest = useRef<AbortController | null>(null);
+  const sessionSelection = useRef(0);
+
+  function projectSessionKey(projectId: string | undefined): string {
+    return projectId ? `leanharness.session.${projectId}` : "leanharness.session";
+  }
+
+  function currentProjectId(projectList: ProjectSummary[] = projects, currentWorkspace = workspace): string | undefined {
+    return projectList.find((project) => project.root_path === currentWorkspace)?.id;
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -196,24 +205,41 @@ function App({
     const controller = new AbortController();
     setSessionsLoading(true);
     const loadProjects = workspaceClient.list ?? listProjects;
-    loadProjects(controller.signal)
-      .then((data) => setProjects(data.projects))
-      .catch((error: unknown) => {
-        if (!isAbortError(error)) setSessionError(errorMessage(error));
-      });
-    sessionClient.list(controller.signal)
-      .then((items) => {
+    const projectRequest = loadProjects(controller.signal).catch((error: unknown) => {
+      if (!isAbortError(error)) setSessionError(errorMessage(error));
+      return null;
+    });
+    const sessionRequest = sessionClient.list(controller.signal).catch((error: unknown) => {
+      if (!isAbortError(error)) setSessionError(errorMessage(error));
+      return null;
+    });
+    Promise.all([projectRequest, sessionRequest])
+      .then(([projectData, items]) => {
+        if (controller.signal.aborted) return;
+        const projectList = projectData?.projects ?? projects;
+        if (projectData) setProjects(projectData.projects);
+        if (!items) return;
         setSessions(items);
-        const saved = window.localStorage.getItem("leanharness.session");
+        const projectId = projectData
+          ? currentProjectId(projectData.projects, projectData.current_workspace)
+          : currentProjectId(projectList);
+        const scopedKey = projectSessionKey(projectId);
+        const scopedSaved = window.localStorage.getItem(scopedKey);
+        const legacySaved = projectId ? window.localStorage.getItem("leanharness.session") : null;
+        const saved = scopedSaved || legacySaved;
         const selected = items.find((item) => item.id === saved) || items[0];
-        if (selected) void selectSession(selected.id);
-      })
-      .catch((error: unknown) => {
-        if (!isAbortError(error)) setSessionError(errorMessage(error));
+        if (projectId && legacySaved && selected?.id === legacySaved) {
+          window.localStorage.removeItem("leanharness.session");
+        }
+        if (selected) void selectSession(selected.id, projectId);
       })
       .finally(() => setSessionsLoading(false));
     return () => controller.abort();
-  }, [health.status, sessionClient]);
+  }, [
+    health.status,
+    health.status === "ready" ? health.data.workspace : null,
+    sessionClient,
+  ]);
 
   const workspace = health.status === "ready" ? health.data.workspace : "未选择";
   const version = health.status === "ready" ? health.data.version : "0.1.0.dev0";
@@ -239,6 +265,7 @@ function App({
     !planLoading &&
     input.trim().length > 0 &&
     input.length <= 32_000;
+  const runPermissionMode = latestRunPermission(trace);
 
   async function submitMessage() {
     if (!canSubmit) return;
@@ -271,7 +298,7 @@ function App({
             if (typeof event.session_id === "string" && event.session_id !== resolvedSessionId) {
               resolvedSessionId = event.session_id;
               setSessionId(event.session_id);
-              window.localStorage.setItem("leanharness.session", event.session_id);
+              window.localStorage.setItem(projectSessionKey(currentProjectId()), event.session_id);
             }
             if (event.type === "plan.created" && isRecord(event.plan)) {
               const created = event.plan as unknown as Plan;
@@ -331,7 +358,7 @@ function App({
             if (event.session_id && event.session_id !== resolvedSessionId) {
               resolvedSessionId = event.session_id;
               setSessionId(event.session_id);
-              window.localStorage.setItem("leanharness.session", event.session_id);
+              window.localStorage.setItem(projectSessionKey(currentProjectId()), event.session_id);
             }
             if (event.type === "content.delta") {
               updateMessage(assistantId, (current) => ({
@@ -361,7 +388,7 @@ function App({
             if (event.session_id && event.session_id !== resolvedSessionId) {
               resolvedSessionId = event.session_id;
               setSessionId(event.session_id);
-              window.localStorage.setItem("leanharness.session", event.session_id);
+              window.localStorage.setItem(projectSessionKey(currentProjectId()), event.session_id);
             }
             if (event.type === "assistant.progress") {
               setProcessVisibility(event.run_id, true);
@@ -442,10 +469,12 @@ function App({
     setComposerMenuOpen(false);
   }
 
-  async function selectSession(id: string) {
+  async function selectSession(id: string, projectId = currentProjectId()) {
     if (isStreaming) return;
+    const requestId = ++sessionSelection.current;
     try {
       const detail = await sessionClient.get(id);
+      if (requestId !== sessionSelection.current) return;
       setSessionId(id);
       setPermissionMode(detail.session.permission_mode);
       setMessages(
@@ -483,7 +512,7 @@ function App({
       setOpenProcesses({});
       setActiveRunId(null);
       setPendingApproval(null);
-      window.localStorage.setItem("leanharness.session", id);
+      window.localStorage.setItem(projectSessionKey(projectId), id);
       setSessionError(null);
     } catch (error: unknown) {
       setSessionError(errorMessage(error));
@@ -495,6 +524,7 @@ function App({
     const nextPath = window.prompt("输入工作区目录", health.data.workspace);
     if (!nextPath || nextPath.trim() === health.data.workspace) return;
     try {
+      sessionSelection.current += 1;
       await workspaceClient.select(nextPath.trim());
       setHealth({ status: "loading" });
       const refreshed = await healthLoader();
@@ -503,7 +533,7 @@ function App({
       setTrace([]);
       setPlan(null);
       setSessionId(null);
-      window.localStorage.removeItem("leanharness.session");
+      setSessions([]);
     } catch (error: unknown) {
       setSessionError(errorMessage(error));
     }
@@ -512,6 +542,7 @@ function App({
   async function selectProject(project: ProjectSummary) {
     if (isStreaming || health.status !== "ready" || project.root_path === health.data.workspace) return;
     try {
+      sessionSelection.current += 1;
       await workspaceClient.select(project.root_path);
       setHealth({ status: "loading" });
       const refreshed = await healthLoader();
@@ -520,7 +551,7 @@ function App({
       setTrace([]);
       setPlan(null);
       setSessionId(null);
-      window.localStorage.removeItem("leanharness.session");
+      setSessions([]);
     } catch (error: unknown) {
       setSessionError(errorMessage(error));
     }
@@ -531,6 +562,7 @@ function App({
     const nextPath = window.prompt("输入新项目目录", `${health.data.workspace}\\新项目`);
     if (!nextPath?.trim()) return;
     try {
+      sessionSelection.current += 1;
       const created = await (workspaceClient.create ?? createWorkspace)(nextPath.trim());
       setHealth({ status: "loading" });
       const refreshed = await healthLoader();
@@ -540,7 +572,6 @@ function App({
       setPlan(null);
       setSessionId(null);
       setSessions([]);
-      window.localStorage.removeItem("leanharness.session");
     } catch (error: unknown) {
       setSessionError(errorMessage(error));
     }
@@ -577,7 +608,7 @@ function App({
       if (sessionId === session.id) {
         setSessionId(null);
         setMessages([]);
-        window.localStorage.removeItem("leanharness.session");
+        window.localStorage.removeItem(projectSessionKey(currentProjectId()));
         if (remaining[0]) await selectSession(remaining[0].id);
       }
     } catch (error: unknown) {
@@ -586,6 +617,9 @@ function App({
   }
 
   async function changePermission(next: PermissionMode) {
+    const previousPermission = permissionMode;
+    const previousPlan = plan;
+    const previousMessages = messages;
     setPermissionMode(next);
     setPlan((current) => current?.state === "AWAITING_CONFIRMATION"
       ? { ...current, execution_permission_mode: next }
@@ -603,6 +637,9 @@ function App({
         const updated = await sessionClient.update(sessionId, { permission_mode: next });
         setSessions((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       } catch (error: unknown) {
+        setPermissionMode(previousPermission);
+        setPlan(previousPlan);
+        setMessages(previousMessages);
         setSessionError(errorMessage(error));
       }
     }
@@ -614,7 +651,7 @@ function App({
       setSessions(items);
       if (preferredId) {
         setSessionId(preferredId);
-        window.localStorage.setItem("leanharness.session", preferredId);
+        window.localStorage.setItem(projectSessionKey(currentProjectId()), preferredId);
       }
       setSessionError(null);
     } catch (error: unknown) {
@@ -888,7 +925,7 @@ function App({
         <div className="inspector-body" role="tabpanel">
           {trace.filter((event) => event.type !== "assistant.progress").length === 0 ? <div className="panel-empty"><Activity size={18} /><strong>没有运行轨迹</strong><span>0 条事件</span></div> : <ol className="trace-list">{trace.filter((event) => event.type !== "assistant.progress").map((event) => <li key={`${"run_id" in event ? event.run_id : "turn"}-${event.sequence}-${event.type}`}><span>{event.sequence}</span><strong title={traceLabel(event)}>{traceLabel(event)}</strong></li>)}</ol>}
         </div>
-        <div className="inspector-summary"><div><span>模型</span><strong title={modelName ?? undefined}>{modelCopy}</strong></div><div><span>会话默认权限</span><strong>{permissionMode === "inspect" ? "只读检查" : permissionMode === "approve" ? "逐次批准" : "受控直接执行"}</strong></div></div>
+        <div className="inspector-summary"><div><span>模型</span><strong title={modelName ?? undefined}>{modelCopy}</strong></div><div><span>本次运行权限</span><strong>{runPermissionMode ? permissionLabel(runPermissionMode) : "尚未运行"}</strong></div><div><span>会话默认权限</span><strong>{permissionLabel(permissionMode)}</strong></div></div>
       </aside>
 
       <footer className="status-bar" aria-label="运行状态">
@@ -914,6 +951,26 @@ function traceLabel(event: TraceEvent | SavedRunTrace | PersistedTraceEvent): st
   if ("tool" in event && event.tool) return `${event.type}: ${event.tool}`;
   if ("summary" in event && event.summary) return `${event.type}: ${event.summary}`;
   return event.type;
+}
+
+function latestRunPermission(
+  trace: Array<TraceEvent | SavedRunTrace | PersistedTraceEvent>,
+): PermissionMode | null {
+  for (const event of [...trace].reverse()) {
+    if (
+      !["run.started", "run.permission.updated"].includes(event.type)
+      || !("metadata" in event)
+      || !event.metadata
+    ) continue;
+    const value = event.metadata.permission_mode;
+    if (value === "inspect" || value === "approve" || value === "unrestricted") return value;
+  }
+  return null;
+}
+
+function permissionLabel(permission: PermissionMode): string {
+  if (permission === "inspect") return "只读检查";
+  return permission === "approve" ? "逐次批准" : "受控直接执行";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

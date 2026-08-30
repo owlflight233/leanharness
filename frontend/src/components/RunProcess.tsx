@@ -39,6 +39,7 @@ export function RunProcess({
   const actions = aggregateActions(trace);
   if (!actions.length) return null;
   const metrics = terminalMetrics(trace);
+  const permission = runtimePermission(trace);
   return (
     <section className={`run-process ${open ? "is-open" : "is-closed"}`}>
       <button type="button" className="run-process-header" onClick={onToggle} aria-expanded={open}>
@@ -75,6 +76,9 @@ export function RunProcess({
             <div className="run-process-metrics">
               {metrics.modelCalls} 次模型 · {metrics.toolCalls} 次工具 · {metrics.totalTokens} tokens
             </div>
+          )}
+          {permission && (
+            <div className="run-process-metrics">本次运行权限：{permissionLabel(permission)}</div>
           )}
         </>
       )}
@@ -174,6 +178,20 @@ function terminalMetrics(trace: RunTraceItem[]) {
     };
   }
   return null;
+}
+
+function runtimePermission(trace: RunTraceItem[]): string | null {
+  const started = [...trace].reverse().find((event) =>
+    ["run.started", "run.permission.updated"].includes(event.type)
+  );
+  const permission = started?.metadata?.permission_mode;
+  return typeof permission === "string" ? permission : null;
+}
+
+function permissionLabel(permission: string): string {
+  if (permission === "inspect") return "只读检查";
+  if (permission === "approve") return "逐次批准";
+  return permission === "unrestricted" ? "受控直接执行" : permission;
 }
 
 function numberValue(value: unknown): number {

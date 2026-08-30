@@ -39,6 +39,11 @@ describe("RunProcess", () => {
     render(
       <RunProcess
         trace={[
+          {
+            type: "run.started",
+            sequence: 0,
+            metadata: { permission_mode: "unrestricted" },
+          },
           ...lifecycle,
           {
             type: "run.completed",
@@ -56,6 +61,7 @@ describe("RunProcess", () => {
 
     expect(screen.getByText("1 个步骤 · 1 个工具")).toBeInTheDocument();
     expect(screen.getByText("2 次模型 · 1 次工具 · 320 tokens")).toBeInTheDocument();
+    expect(screen.getByText("本次运行权限：受控直接执行")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /执行过程已结束/ }));
     expect(onToggle).toHaveBeenCalledOnce();
   });
