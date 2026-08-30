@@ -44,7 +44,7 @@ import {
 import { Markdown } from "./components/Markdown";
 import { PlanCard } from "./components/PlanCard";
 import { RunProcess } from "./components/RunProcess";
-import { createWorkspace, selectWorkspace, type WorkspaceClient } from "./api/workspace";
+import { createWorkspace, listProjects, selectWorkspace, type ProjectSummary, type WorkspaceClient } from "./api/workspace";
 import {
   fetchPlan,
   rejectPlan,
@@ -159,6 +159,7 @@ function App({
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(true);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("inspect");
@@ -194,6 +195,12 @@ function App({
     if (health.status !== "ready") return;
     const controller = new AbortController();
     setSessionsLoading(true);
+    const loadProjects = workspaceClient.list ?? listProjects;
+    loadProjects(controller.signal)
+      .then((data) => setProjects(data.projects))
+      .catch((error: unknown) => {
+        if (!isAbortError(error)) setSessionError(errorMessage(error));
+      });
     sessionClient.list(controller.signal)
       .then((items) => {
         setSessions(items);
@@ -502,6 +509,23 @@ function App({
     }
   }
 
+  async function selectProject(project: ProjectSummary) {
+    if (isStreaming || health.status !== "ready" || project.root_path === health.data.workspace) return;
+    try {
+      await workspaceClient.select(project.root_path);
+      setHealth({ status: "loading" });
+      const refreshed = await healthLoader();
+      setHealth({ status: "ready", data: refreshed });
+      setMessages([]);
+      setTrace([]);
+      setPlan(null);
+      setSessionId(null);
+      window.localStorage.removeItem("leanharness.session");
+    } catch (error: unknown) {
+      setSessionError(errorMessage(error));
+    }
+  }
+
   async function createProject() {
     if (isStreaming || health.status !== "ready") return;
     const nextPath = window.prompt("输入新项目目录", `${health.data.workspace}\\新项目`);
@@ -713,7 +737,11 @@ function App({
         <nav className="rail-content" aria-label="项目与会话">
           <section className="rail-section">
             <div className="section-label"><span>项目</span><button className="icon-button compact" type="button" disabled={isStreaming || health.status !== "ready"} aria-label="添加项目" title="新建项目" onClick={() => void createProject()}><Plus size={14} /></button></div>
-            <button className="empty-row workspace-picker" type="button" title="切换工作区" onClick={() => void changeWorkspace()} disabled={isStreaming || health.status !== "ready"}><FolderGit2 size={16} /><span>{workspace}</span><Pencil size={12} /></button>
+            {projects.length > 0 ? projects.map((project) => (
+              <button key={project.id} className={`empty-row workspace-picker ${project.root_path === workspace ? "active" : ""}`} type="button" title={project.root_path} onClick={() => void selectProject(project)} disabled={isStreaming || health.status !== "ready"}>
+                <FolderGit2 size={16} /><span>{project.root_path}</span>{project.root_path === workspace && <span className="project-current">当前</span>}
+              </button>
+            )) : <button className="empty-row workspace-picker" type="button" title="切换工作区" onClick={() => void changeWorkspace()} disabled={isStreaming || health.status !== "ready"}><FolderGit2 size={16} /><span>{workspace}</span><Pencil size={12} /></button>}
           </section>
           <section className="rail-section sessions-section">
             <div className="section-label"><span>当前运行</span></div>

@@ -126,6 +126,13 @@ class LocalStore:
         self.connection.commit()
         return ProjectRecord(project_id, str(root), permission_mode, now, now)
 
+    def list_projects(self) -> list[ProjectRecord]:
+        """Return known projects, most recently used first."""
+        rows = self.connection.execute(
+            "SELECT * FROM projects ORDER BY updated_at DESC, created_at DESC"
+        ).fetchall()
+        return [self._project_row(row) for row in rows]
+
     def create_session(
         self,
         project: ProjectRecord,

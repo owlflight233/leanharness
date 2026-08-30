@@ -265,6 +265,24 @@ def create_app(
         project = store.ensure_project(app.state.workspace)
         return {"sessions": [session_to_dict(session) for session in store.list_sessions(project)]}
 
+    @app.get("/api/v1/projects")
+    async def projects() -> dict[str, object]:
+        store: LocalStore = app.state.store
+        current = str(app.state.workspace.resolve())
+        return {
+            "current_workspace": current,
+            "projects": [
+                {
+                    "id": project.id,
+                    "root_path": project.root_path,
+                    "permission_mode": project.permission_mode,
+                    "created_at": project.created_at,
+                    "updated_at": project.updated_at,
+                }
+                for project in store.list_projects()
+            ],
+        }
+
     @app.post("/api/v1/sessions")
     async def create_session(payload: SessionCreateRequest) -> dict[str, object]:
         store: LocalStore = app.state.store

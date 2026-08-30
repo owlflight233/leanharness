@@ -156,6 +156,27 @@ def test_workspace_can_be_created_and_becomes_current(tmp_path: Path) -> None:
     assert get(app, "/api/v1/health").json()["workspace"] == str(new_workspace.resolve())
 
 
+def test_projects_list_groups_known_workspaces(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    app = create_app(build_config(workspace=first, data_dir=tmp_path / "data"))
+
+    post(app, "/api/v1/sessions", json_body={})
+    post(app, "/api/v1/workspace", json_body={"path": str(second)})
+    post(app, "/api/v1/sessions", json_body={})
+    response = get(app, "/api/v1/projects")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["current_workspace"] == str(second.resolve())
+    assert {item["root_path"] for item in payload["projects"]} == {
+        str(first.resolve()),
+        str(second.resolve()),
+    }
+
+
 def test_workspace_create_rejects_existing_target(tmp_path: Path) -> None:
     target = tmp_path / "existing"
     target.mkdir()
