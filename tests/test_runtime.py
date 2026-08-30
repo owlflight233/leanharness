@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from leanharness.errors import ModelUnavailableError
+from leanharness.errors import ModelProtocolError, ModelUnavailableError
 from leanharness.models import ModelRequest, ModelResponse, ModelUsage, ToolCall
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.runtime import (
@@ -228,6 +228,36 @@ def test_third_identical_call_is_recoverable_and_fourth_stalls(tmp_path: Path) -
     assert json.loads(third_result.content)["error"]["code"] == "TOOL_REPEATED"
 
 
+def test_repeated_invalid_mutations_stall_by_target_even_when_arguments_change(
+    tmp_path: Path,
+) -> None:
+    model = ScriptedModel(
+        [
+            tool_response(
+                f"write-{index}",
+                "workspace_write",
+                {
+                    "path": "result.txt",
+                    "content": f"attempt {index}\n",
+                    "mode": "replace",
+                    "expected_sha256": "0" * 64,
+                },
+            )
+            for index in range(1, 4)
+        ]
+    )
+
+    events = collect(
+        CodingAgent(tmp_path, model, permission_mode=PermissionMode.UNRESTRICTED),
+        "Update result.txt",
+    )
+
+    assert events[-1].type == "run.failed"
+    assert events[-1].error_code == "RUN_STALLED"
+    assert events[-1].metadata["incomplete_reason"] == "REPEATED_TOOL_FAILURE"
+    assert len(model.requests) == 3
+
+
 def test_tool_error_returns_to_model_and_can_recover(tmp_path: Path) -> None:
     model = ScriptedModel(
         [
@@ -315,6 +345,128 @@ def test_runtime_maps_model_failure_and_cancellation(tmp_path: Path) -> None:
         )
     )
     assert cancelled[-1].type == "run.cancelled"
+
+
+def test_runtime_requests_one_protocol_correction_then_recovers(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            ModelProtocolError("Model tool arguments are not valid JSON"),
+            tool_response("call-1", "workspace_list", {"path": "."}),
+            ModelResponse(content="The workspace was inspected."),
+        ]
+    )
+
+    events = collect(ReadOnlyAgent(tmp_path, model, max_steps=4))
+
+    assert events[-1].type == "run.completed"
+    assert len(model.requests) == 3
+    repair_request = model.requests[1]
+    assert "strict JSON" in repair_request.messages[-1].content
+    assert "not valid JSON" not in repair_request.messages[-1].content
+    assert sum(event.type == "assistant.progress" for event in events) >= 2
+
+
+def test_runtime_fails_after_second_protocol_error(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            ModelProtocolError("first malformed response"),
+            ModelProtocolError("second malformed response"),
+        ]
+    )
+
+    events = collect(ReadOnlyAgent(tmp_path, model, max_steps=4))
+
+    assert events[-1].type == "run.failed"
+    assert events[-1].error_code == "MODEL_PROTOCOL_ERROR"
+    assert events[-1].error_message == "Model returned an invalid response twice"
+    serialized = json.dumps([event.to_dict() for event in events])
+    assert "first malformed response" not in serialized
+    assert "second malformed response" not in serialized
+
+
+def test_structured_write_is_reported_as_changed_file(tmp_path: Path) -> None:
+    model = ScriptedModel(
+        [
+            tool_response(
+                "write-1",
+                "workspace_write",
+                {
+                    "path": "mini/app.py",
+                    "content": "print('ready')\n",
+                    "mode": "create",
+                    "create_parents": True,
+                },
+            ),
+            outcome_response("completed", "Created mini/app.py."),
+        ]
+    )
+
+    events = collect(
+        CodingAgent(tmp_path, model, permission_mode=PermissionMode.UNRESTRICTED),
+        "Create mini/app.py",
+    )
+
+    assert events[-1].type == "run.completed"
+    assert events[-1].metadata["evidence"]["changed_files"] == ["mini/app.py"]
+
+
+def test_mini_project_can_be_created_verified_and_completed(tmp_path: Path) -> None:
+    create_files = ModelResponse(
+        content="I will create the implementation and its test.",
+        tool_calls=(
+            ToolCall(
+                id="write-app",
+                name="workspace_write",
+                arguments={
+                    "path": "mini_todo/app.py",
+                    "content": "def add(a: int, b: int) -> int:\n    return a + b\n",
+                    "mode": "create",
+                    "create_parents": True,
+                },
+            ),
+            ToolCall(
+                id="write-test",
+                name="workspace_write",
+                arguments={
+                    "path": "mini_todo/test_app.py",
+                    "content": (
+                        "from app import add\n\n\n"
+                        "def test_add():\n"
+                        "    assert add(2, 3) == 5\n"
+                    ),
+                    "mode": "create",
+                    "create_parents": True,
+                },
+            ),
+        ),
+    )
+    model = ScriptedModel(
+        [
+            create_files,
+            tool_response(
+                "verify-1",
+                "workspace_command",
+                {"profile": "python-test", "args": ["mini_todo/test_app.py", "-q"]},
+            ),
+            outcome_response("completed", "Created and verified the mini project."),
+        ]
+    )
+
+    events = collect(
+        CodingAgent(
+            tmp_path,
+            model,
+            max_steps=4,
+            permission_mode=PermissionMode.UNRESTRICTED,
+        ),
+        "Create and test a tiny addition project.",
+    )
+
+    assert events[-1].type == "run.completed"
+    evidence = events[-1].metadata["evidence"]
+    assert evidence["changed_files"] == ["mini_todo/app.py", "mini_todo/test_app.py"]
+    assert evidence["verifications"] == 1
+    assert (tmp_path / "mini_todo" / "app.py").exists()
 
 
 def test_same_language_fallback_is_neutral_metadata(tmp_path: Path) -> None:

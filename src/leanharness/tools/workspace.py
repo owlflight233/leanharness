@@ -54,7 +54,9 @@ class WorkspaceBoundary:
         relative = resolved.relative_to(self.root).as_posix()
         return resolved, relative or "."
 
-    def resolve_output(self, value: object) -> tuple[Path, str]:
+    def resolve_output(
+        self, value: object, *, require_parent: bool = True
+    ) -> tuple[Path, str]:
         """Resolve a possibly new file while rejecting every symlinked path component."""
 
         path_text = _require_string(value, "path")
@@ -70,7 +72,7 @@ class WorkspaceBoundary:
             if current.is_symlink():
                 raise ToolExecutionError("PATH_SYMLINK", "Symbolic links cannot be modified")
         try:
-            resolved_parent = candidate.parent.resolve(strict=True)
+            resolved_parent = candidate.parent.resolve(strict=require_parent)
         except (OSError, RuntimeError) as exc:
             raise ToolExecutionError("PATH_NOT_FOUND", "Parent directory does not exist") from exc
         if not resolved_parent.is_relative_to(self.root):
@@ -187,6 +189,13 @@ class WorkspaceReadTool:
         selected, truncated = _read_lines(path, start, count)
         content = "\n".join(f"{number}: {line}" for number, line in selected)
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        # Keep the historical range digest for callers that display the read
+        # result, but also expose the complete-file digest used by guarded
+        # write/edit tools for optimistic concurrency checks.
+        try:
+            file_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise ToolExecutionError("TOOL_EXECUTION_FAILED", "File could not be read") from exc
         return ToolResult(
             tool_call_id=tool_call_id,
             tool=self.definition.name,
@@ -198,6 +207,7 @@ class WorkspaceReadTool:
                 "content": content,
                 "truncated": truncated,
                 "sha256": digest,
+                "file_sha256": file_digest,
             },
             public_metadata={
                 "path": relative,

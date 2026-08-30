@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -58,6 +59,7 @@ def test_read_returns_numbered_unicode_range_without_modifying_file(tmp_path: Pa
     assert result.data["line_count"] == 2
     assert result.data["truncated"] is True
     assert len(result.data["sha256"]) == 64
+    assert result.data["file_sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
     assert source.read_text(encoding="utf-8") == original
 
 

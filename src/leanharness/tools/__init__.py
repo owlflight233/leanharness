@@ -4,8 +4,10 @@ from leanharness.tools.contracts import ToolErrorInfo, ToolExecutionError, ToolR
 from leanharness.tools.controlled import (
     GitInspectTool,
     WorkspaceCommandTool,
+    WorkspaceEditTool,
     WorkspaceMkdirTool,
     WorkspacePatchTool,
+    WorkspaceWriteTool,
 )
 from leanharness.tools.registry import ToolRegistry
 
@@ -16,6 +18,8 @@ __all__ = [
     "ToolRegistry",
     "ToolResult",
     "WorkspaceCommandTool",
+    "WorkspaceEditTool",
     "WorkspaceMkdirTool",
     "WorkspacePatchTool",
+    "WorkspaceWriteTool",
 ]

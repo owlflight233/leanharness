@@ -16,7 +16,12 @@ from leanharness.context import (
     ContextSource,
     ContextStore,
 )
-from leanharness.errors import ApprovalExpiredError, ModelContextLengthError, ModelError
+from leanharness.errors import (
+    ApprovalExpiredError,
+    ModelContextLengthError,
+    ModelError,
+    ModelProtocolError,
+)
 from leanharness.models import ModelMessage, ModelRequest, ModelResponse, ToolCall
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.runtime.completion import CompletionLedger
@@ -104,9 +109,15 @@ class CodingAgent:
         self.metrics = RunMetrics()
         self._repeat_key: tuple[str, str] | None = None
         self._repeat_count = 0
-        self._failure_counts: dict[tuple[str, str], int] = {}
+        self._failure_counts: dict[tuple[str, str, str], int] = {}
+        # A malformed provider response is recoverable once.  Keeping this
+        # bounded prevents an upstream model that emits invalid tool JSON from
+        # consuming the entire run budget while still giving it one explicit
+        # correction opportunity.
+        self._protocol_recovery_used = False
 
     async def run(self, task: str) -> AsyncIterator[RuntimeEvent]:
+        self._protocol_recovery_used = False
         async for event in self._run_task(task, initialize_context=True):
             yield event
 
@@ -126,6 +137,7 @@ class CodingAgent:
         self._repeat_key = None
         self._repeat_count = 0
         self._failure_counts.clear()
+        self._protocol_recovery_used = False
         async for event in self._run_task(task, initialize_context=False):
             yield event
 
@@ -255,6 +267,31 @@ class CodingAgent:
                     step=step,
                     error_code="CONTEXT_BUDGET_EXCEEDED",
                     error_message=str(exc),
+                )
+                return
+            except ModelProtocolError:
+                if not self._protocol_recovery_used:
+                    self._protocol_recovery_used = True
+                    self.context.append(
+                        ModelMessage(
+                            role="user",
+                            content=_protocol_repair_prompt(self.language),
+                        )
+                    )
+                    self.state = transition(self.state, RunState.PREPARING)
+                    yield self._event(
+                        "assistant.progress",
+                        step=step,
+                        summary=_protocol_repair_summary(self.language),
+                    )
+                    yield self._event("step.completed", step=step)
+                    continue
+                self.state = transition(self.state, RunState.FAILED)
+                yield self._event(
+                    "run.failed",
+                    step=step,
+                    error_code="MODEL_PROTOCOL_ERROR",
+                    error_message="Model returned an invalid response twice",
                 )
                 return
             except ModelError as exc:
@@ -576,8 +613,24 @@ class CodingAgent:
                             "ok": result.ok,
                         },
                     )
+                    if result.error and _should_stall_on_tool_error(result.error.code):
+                        failure_key = _failure_key(call, result.error.code)
+                        if self._failure_counts.get(failure_key, 0) >= 3:
+                            self.state = transition(self.state, RunState.FAILED)
+                            yield self._event(
+                                "run.failed",
+                                step=step,
+                                error_code="RUN_STALLED",
+                                error_message=(
+                                    "The same tool failure recurred for the same target"
+                                ),
+                                metadata=self._terminal_metadata(
+                                    incomplete_reason="REPEATED_TOOL_FAILURE"
+                                ),
+                            )
+                            return
                     if result.error and result.error.code == "GIT_NOT_REPOSITORY":
-                        failure_key = (call.name, result.error.code)
+                        failure_key = _failure_key(call, result.error.code)
                         if self._failure_counts.get(failure_key, 0) >= 2:
                             self.state = transition(self.state, RunState.FAILED)
                             yield self._event(
@@ -669,7 +722,7 @@ class CodingAgent:
     def _failure_guidance(self, call: ToolCall, result: ToolResult) -> str | None:
         if result.ok or result.error is None:
             return None
-        key = (call.name, result.error.code)
+        key = _failure_key(call, result.error.code)
         count = self._failure_counts.get(key, 0) + 1
         self._failure_counts[key] = count
         if result.error.code == "GIT_NOT_REPOSITORY":
@@ -834,6 +887,8 @@ def _fallback_summary(call: ToolCall, language: str = "same") -> str:
             "workspace_search": f"在 {target} 下定位相关代码。",
             "workspace_mkdir": f"准备创建目录 {target}。",
             "workspace_patch": "准备应用受控补丁。",
+            "workspace_write": f"准备写入文件 {target}。",
+            "workspace_edit": f"准备编辑文件 {target}。",
             "workspace_command": "准备运行受控验证命令。",
             "git_inspect": "检查当前 Git 状态和差异。",
         }
@@ -851,6 +906,10 @@ def _fallback_summary(call: ToolCall, language: str = "same") -> str:
         return f"I will create the guarded workspace directory {target}."
     if call.name == "workspace_patch":
         return "I will apply a guarded workspace patch."
+    if call.name == "workspace_write":
+        return f"I will write the workspace file {target}."
+    if call.name == "workspace_edit":
+        return f"I will edit the workspace file {target}."
     if call.name == "workspace_command":
         return "I will run a guarded project verification command."
     if call.name == "git_inspect":
@@ -872,6 +931,10 @@ def _safe_arguments(call: ToolCall) -> dict[str, object]:
         "operation",
         "revision",
         "parents",
+        "mode",
+        "expected_sha256",
+        "end_line",
+        "create_parents",
     ):
         if key in call.arguments and isinstance(call.arguments[key], str | int | bool):
             safe[key] = call.arguments[key]
@@ -885,12 +948,16 @@ def _approval_summary(call: ToolCall, language: str) -> str:
         summaries = {
             "workspace_mkdir": "需要批准创建工作区目录。",
             "workspace_patch": "需要批准补丁写入。",
+            "workspace_write": "需要批准写入工作区文件。",
+            "workspace_edit": "需要批准编辑工作区文件。",
             "workspace_command": "需要批准验证命令。",
         }
         return summaries.get(call.name, "需要批准此工具操作。")
     summaries = {
         "workspace_mkdir": "Approval is required to create this workspace directory.",
         "workspace_patch": "Approval is required to apply this patch.",
+        "workspace_write": "Approval is required to write this workspace file.",
+        "workspace_edit": "Approval is required to edit this workspace file.",
         "workspace_command": "Approval is required to run this verification command.",
     }
     return summaries.get(call.name, "Approval is required for this tool action.")
@@ -940,12 +1007,69 @@ def _outcome_retry_summary(language: str) -> str:
     )
 
 
+def _protocol_repair_prompt(language: str) -> str:
+    if language == "zh":
+        return (
+            "上一轮模型响应无法按协议解析。请重新选择下一步: 工具调用必须是严格 JSON "
+            "对象并完全符合工具参数定义; 如果无法安全调用工具, 请使用 "
+            "report_run_outcome 报告 incomplete。不要重复输出解释性文本代替工具参数。"
+        )
+    return (
+        "The previous model response could not be parsed by the tool protocol. Choose the "
+        "next action again: tool arguments must be a strict JSON object matching the "
+        "tool schema. If no safe tool call is possible, use report_run_outcome with "
+        "status=incomplete. Do not emit explanatory text in place of tool arguments."
+    )
+
+
+def _protocol_repair_summary(language: str) -> str:
+    return (
+        "模型响应格式无效, 已请求一次协议修正"
+        if language == "zh"
+        else "Model response format was invalid; one protocol correction was requested"
+    )
+
+
 # Backward-compatible name for integrations created before coding tools were enabled.
 ReadOnlyAgent = CodingAgent
 
 
 def _stable_arguments(call: ToolCall) -> str:
     return json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _failure_key(call: ToolCall, error_code: str) -> tuple[str, str, str]:
+    """Group retries by operation and public target, not full model arguments."""
+
+    if error_code == "GIT_NOT_REPOSITORY":
+        return call.name, error_code, "<workspace>"
+    resource_parts: list[str] = []
+    for name in ("path", "profile", "operation", "query"):
+        value = call.arguments.get(name)
+        if isinstance(value, str):
+            resource_parts.append(f"{name}={value[:160]}")
+    resource = "|".join(resource_parts) or "<operation>"
+    return call.name, error_code, resource
+
+
+def _should_stall_on_tool_error(error_code: str) -> bool:
+    if error_code in {
+        "APPROVAL_REJECTED",
+        "APPROVAL_TIMEOUT",
+        "APPROVAL_UNAVAILABLE",
+        "TOOL_RESULT_BUDGET",
+        "TOOL_CALL_LIMIT",
+    }:
+        return False
+    return error_code.startswith(
+        (
+            "PATCH_",
+            "WRITE_",
+            "EDIT_",
+            "DIRECTORY_",
+            "PATH_",
+        )
+    ) or error_code == "TOOL_INVALID_ARGUMENTS"
 
 
 def _runtime_tool_error(

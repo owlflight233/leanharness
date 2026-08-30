@@ -28,7 +28,12 @@ ALLOWED_TRANSITIONS: dict[RunState, frozenset[RunState]] = {
         {RunState.REQUESTING_MODEL, RunState.EXHAUSTED, RunState.FAILED, RunState.CANCELLED}
     ),
     RunState.REQUESTING_MODEL: frozenset(
-        {RunState.INTERPRETING, RunState.FAILED, RunState.CANCELLED}
+        {
+            RunState.PREPARING,
+            RunState.INTERPRETING,
+            RunState.FAILED,
+            RunState.CANCELLED,
+        }
     ),
     RunState.INTERPRETING: frozenset(
         {

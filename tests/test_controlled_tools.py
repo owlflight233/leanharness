@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 from pathlib import Path
@@ -44,6 +45,67 @@ def test_patch_creates_modifies_and_deletes_utf8_files(tmp_path: Path) -> None:
     assert not (tmp_path / "delete.txt").exists()
     assert result.public_metadata["created"] == 1
     assert result.public_metadata["deleted"] == 1
+
+
+def test_structured_write_creates_nested_file_without_diff_syntax(tmp_path: Path) -> None:
+    registry = ToolRegistry(tmp_path, mode=PermissionMode.UNRESTRICTED)
+
+    result = registry.execute(
+        call(
+            "workspace_write",
+            path="mini-todo/app.py",
+            content="print('hello')\n",
+            mode="create",
+            create_parents=True,
+        )
+    )
+
+    assert result.ok is True
+    assert (tmp_path / "mini-todo" / "app.py").read_text(encoding="utf-8") == "print('hello')\n"
+    assert result.public_metadata["created"] is True
+    assert "print('hello')" not in result.to_model_content()
+
+
+def test_structured_write_replace_and_edit_use_file_hashes(tmp_path: Path) -> None:
+    path = tmp_path / "app.py"
+    path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    registry = ToolRegistry(tmp_path, mode=PermissionMode.UNRESTRICTED)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    edited = registry.execute(
+        call(
+            "workspace_edit",
+            path="app.py",
+            start_line=2,
+            end_line=2,
+            replacement="changed",
+            expected_sha256=digest,
+        )
+    )
+    assert edited.ok is True
+    assert path.read_text(encoding="utf-8") == "one\nchanged\nthree\n"
+
+    stale = registry.execute(
+        call(
+            "workspace_write",
+            path="app.py",
+            content="stale\n",
+            mode="replace",
+            expected_sha256=digest,
+        )
+    )
+    assert stale.ok is False and stale.error is not None
+    assert stale.error.code == "WRITE_STALE"
+
+
+def test_git_inspect_rejects_parent_repository_scope(tmp_path: Path) -> None:
+    os.system(f'git -C "{tmp_path}" init -q')
+    child = tmp_path / "child"
+    child.mkdir()
+    result = ToolRegistry(child).execute(call("git_inspect", operation="status"))
+
+    assert result.ok is False and result.error is not None
+    assert result.error.code == "GIT_SCOPE_DENIED"
 
 
 def test_patch_validates_all_hunks_before_writing(tmp_path: Path) -> None:
@@ -108,12 +170,70 @@ def test_patch_approval_snapshot_detects_external_change(tmp_path: Path) -> None
     assert source.read_text(encoding="utf-8") == "external\n"
 
 
+def test_structured_edit_approval_rechecks_prior_read_hash(tmp_path: Path) -> None:
+    source = tmp_path / "source.txt"
+    source.write_text("before\n", encoding="utf-8")
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    registry = ToolRegistry(tmp_path, mode=PermissionMode.APPROVE)
+    tool_call = call(
+        "workspace_edit",
+        path="source.txt",
+        start_line=1,
+        end_line=1,
+        replacement="after",
+        expected_sha256=expected,
+    )
+    registry.preview(tool_call)
+    source.write_text("external\n", encoding="utf-8")
+
+    result = registry.execute_approved(tool_call)
+
+    assert result.ok is False and result.error is not None
+    assert result.error.code == "EDIT_STALE"
+    assert source.read_text(encoding="utf-8") == "external\n"
+
+
 def test_inspect_mode_registers_only_read_tools(tmp_path: Path) -> None:
     registry = ToolRegistry(tmp_path, mode=PermissionMode.INSPECT)
     names = {definition.name for definition in registry.definitions}
     assert "git_inspect" in names
     assert "workspace_patch" not in names
     assert "workspace_command" not in names
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_tools"),
+    [
+        (PermissionMode.INSPECT, set()),
+        (
+            PermissionMode.APPROVE,
+            {"workspace_mkdir", "workspace_patch", "workspace_write", "workspace_edit"},
+        ),
+        (
+            PermissionMode.UNRESTRICTED,
+            {"workspace_mkdir", "workspace_patch", "workspace_write", "workspace_edit"},
+        ),
+    ],
+)
+def test_permission_modes_register_structured_mutation_tools(
+    tmp_path: Path,
+    mode: PermissionMode,
+    expected_tools: set[str],
+) -> None:
+    registry = ToolRegistry(tmp_path, mode=mode)
+    names = {definition.name for definition in registry.definitions}
+
+    assert names.intersection(
+        {"workspace_mkdir", "workspace_patch", "workspace_write", "workspace_edit"}
+    ) == expected_tools
+    if mode is PermissionMode.APPROVE:
+        assert registry.approval_required(
+            call("workspace_write", path="new.txt", content="new\n", mode="create")
+        )
+    elif mode is PermissionMode.UNRESTRICTED:
+        assert not registry.approval_required(
+            call("workspace_write", path="new.txt", content="new\n", mode="create")
+        )
 
 
 def test_command_rejects_unknown_profiles_and_dangerous_arguments(tmp_path: Path) -> None:

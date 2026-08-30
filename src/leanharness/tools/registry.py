@@ -11,8 +11,10 @@ from leanharness.tools.controlled import (
     CancellationSignal,
     GitInspectTool,
     WorkspaceCommandTool,
+    WorkspaceEditTool,
     WorkspaceMkdirTool,
     WorkspacePatchTool,
+    WorkspaceWriteTool,
 )
 from leanharness.tools.workspace import (
     WorkspaceBoundary,
@@ -32,6 +34,8 @@ class ToolRegistry:
             GitInspectTool(boundary),
             WorkspaceMkdirTool(boundary),
             WorkspacePatchTool(boundary),
+            WorkspaceWriteTool(boundary),
+            WorkspaceEditTool(boundary),
             WorkspaceCommandTool(boundary),
         )
         self._mode = mode

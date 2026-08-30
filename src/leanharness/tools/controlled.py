@@ -24,6 +24,8 @@ MAX_PATCH_RESULT_BYTES = 8 * 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 64 * 1024
 DEFAULT_COMMAND_TIMEOUT = 120
 MAX_COMMAND_TIMEOUT = 600
+MAX_WRITE_BYTES = 2 * 1024 * 1024
+MAX_EDIT_LINES = 400
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
@@ -256,6 +258,185 @@ class WorkspacePatchTool:
         return _parse_unified_diff(patch)
 
 
+class WorkspaceWriteTool:
+    definition = ToolDefinition(
+        name="workspace_write",
+        description=(
+            "Create or replace one UTF-8 text file in the workspace. Use create for a new file; "
+            "use replace only with the complete file sha256 from a prior workspace_read."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string", "maxLength": MAX_WRITE_BYTES},
+                "mode": {"type": "string", "enum": ["create", "replace"]},
+                "expected_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+                "create_parents": {"type": "boolean"},
+            },
+            "required": ["path", "content", "mode"],
+            "additionalProperties": False,
+        },
+    )
+
+    def __init__(self, boundary: WorkspaceBoundary) -> None:
+        self._boundary = boundary
+
+    def preview(self, arguments: dict[str, Any]) -> dict[str, object]:
+        path, relative, content, mode, expected, create_parents = self._validate(arguments)
+        return {
+            "path": relative,
+            "mode": mode,
+            "bytes": len(content.encode("utf-8")),
+            "expected_sha256": expected,
+            "current_sha256": _file_hash(path) if path.exists() else None,
+            "create_parents": create_parents,
+        }
+
+    def execute(self, tool_call_id: str, arguments: dict[str, Any]) -> ToolResult:
+        path, relative, content, mode, expected, create_parents = self._validate(arguments)
+        if path.exists() and path.is_dir():
+            raise ToolExecutionError("PATH_NOT_FILE", f"Path is not a file: {relative}")
+        current = _file_hash(path) if path.exists() else None
+        if mode == "create" and path.exists():
+            raise ToolExecutionError("PATH_ALREADY_EXISTS", f"File already exists: {relative}")
+        if mode == "replace" and current != expected:
+            raise ToolExecutionError("WRITE_STALE", "Target file changed since it was read")
+        if not path.parent.exists():
+            if not create_parents:
+                raise ToolExecutionError("PATH_NOT_FOUND", "Parent directory does not exist")
+            path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = content.encode("utf-8")
+        _atomic_write(path, encoded)
+        metadata = {
+            "path": relative,
+            "mode": mode,
+            "bytes": len(encoded),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+            "created": mode == "create",
+            "modified": mode == "replace",
+        }
+        return ToolResult(
+            tool_call_id, self.definition.name, True, metadata, public_metadata=metadata
+        )
+
+    def _validate(
+        self, arguments: dict[str, Any]
+    ) -> tuple[Path, str, str, str, str | None, bool]:
+        _reject_unknown(arguments, {"path", "content", "mode", "expected_sha256", "create_parents"})
+        path, relative = self._boundary.resolve_output(arguments.get("path"), require_parent=False)
+        content = arguments.get("content")
+        if not isinstance(content, str):
+            raise ToolExecutionError("TOOL_INVALID_ARGUMENTS", "content must be text")
+        if len(content.encode("utf-8")) > MAX_WRITE_BYTES:
+            raise ToolExecutionError("WRITE_TOO_LARGE", "File content exceeds 2 MiB")
+        mode = arguments.get("mode")
+        if mode not in {"create", "replace"}:
+            raise ToolExecutionError("TOOL_INVALID_ARGUMENTS", "mode must be create or replace")
+        expected = arguments.get("expected_sha256")
+        if mode == "replace" and not isinstance(expected, str):
+            raise ToolExecutionError(
+                "WRITE_EXPECTED_HASH_REQUIRED", "replace requires expected_sha256"
+            )
+        if expected is not None and (
+            not isinstance(expected, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected)
+        ):
+            raise ToolExecutionError(
+                "TOOL_INVALID_ARGUMENTS", "expected_sha256 must be hexadecimal"
+            )
+        create_parents = arguments.get("create_parents", False)
+        if not isinstance(create_parents, bool):
+            raise ToolExecutionError("TOOL_INVALID_ARGUMENTS", "create_parents must be boolean")
+        return path, relative, content, mode, expected.lower() if expected else None, create_parents
+
+
+class WorkspaceEditTool:
+    definition = ToolDefinition(
+        name="workspace_edit",
+        description=(
+            "Replace a bounded inclusive line range in one UTF-8 text file. "
+            "Provide the complete file sha256 from workspace_read to prevent stale edits."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "start_line": {"type": "integer", "minimum": 1},
+                "end_line": {"type": "integer", "minimum": 1},
+                "replacement": {"type": "string", "maxLength": MAX_WRITE_BYTES},
+                "expected_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+            },
+            "required": ["path", "start_line", "end_line", "replacement", "expected_sha256"],
+            "additionalProperties": False,
+        },
+    )
+
+    def __init__(self, boundary: WorkspaceBoundary) -> None:
+        self._boundary = boundary
+
+    def preview(self, arguments: dict[str, Any]) -> dict[str, object]:
+        path, relative, start, end, replacement, expected = self._validate(arguments)
+        return {
+            "path": relative,
+            "start_line": start,
+            "end_line": end,
+            "replacement_lines": len(replacement.splitlines()),
+            "expected_sha256": expected,
+            "current_sha256": _file_hash(path),
+        }
+
+    def execute(self, tool_call_id: str, arguments: dict[str, Any]) -> ToolResult:
+        path, relative, start, end, replacement, expected = self._validate(arguments)
+        raw = path.read_bytes()
+        _decode_utf8(raw, relative)
+        if hashlib.sha256(raw).hexdigest() != expected:
+            raise ToolExecutionError("EDIT_STALE", "Target file changed since it was read")
+        lines = raw.decode("utf-8").splitlines(keepends=True)
+        if end > len(lines):
+            raise ToolExecutionError("EDIT_RANGE_INVALID", "Line range exceeds file length")
+        newline = "\r\n" if b"\r\n" in raw else "\n"
+        replacement_text = replacement.replace("\r\n", "\n").replace("\r", "\n")
+        if replacement_text and not replacement_text.endswith("\n"):
+            replacement_text += "\n"
+        if newline != "\n":
+            replacement_text = replacement_text.replace("\n", newline)
+        updated = (
+            "".join(lines[: start - 1]) + replacement_text + "".join(lines[end:])
+        ).encode("utf-8")
+        if len(updated) > MAX_WRITE_BYTES:
+            raise ToolExecutionError("WRITE_TOO_LARGE", "Edited file exceeds 2 MiB")
+        _atomic_write(path, updated)
+        metadata = {
+            "path": relative,
+            "start_line": start,
+            "end_line": end,
+            "bytes": len(updated),
+            "sha256": hashlib.sha256(updated).hexdigest(),
+        }
+        return ToolResult(
+            tool_call_id, self.definition.name, True, metadata, public_metadata=metadata
+        )
+
+    def _validate(self, arguments: dict[str, Any]) -> tuple[Path, str, int, int, str, str]:
+        _reject_unknown(
+            arguments, {"path", "start_line", "end_line", "replacement", "expected_sha256"}
+        )
+        path, relative = self._boundary.resolve(arguments.get("path"), expected="file")
+        start = _bounded_int(arguments.get("start_line"), "start_line", 1, 10_000_000)
+        end = _bounded_int(arguments.get("end_line"), "end_line", start, 10_000_000)
+        if end - start + 1 > MAX_EDIT_LINES:
+            raise ToolExecutionError("EDIT_RANGE_TOO_LARGE", "Edit range exceeds 400 lines")
+        replacement = arguments.get("replacement")
+        expected = arguments.get("expected_sha256")
+        if not isinstance(replacement, str):
+            raise ToolExecutionError("TOOL_INVALID_ARGUMENTS", "replacement must be text")
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
+            raise ToolExecutionError(
+                "WRITE_EXPECTED_HASH_REQUIRED", "expected_sha256 must be a file hash"
+            )
+        return path, relative, start, end, replacement, expected.lower()
+
+
 class WorkspaceCommandTool:
     definition = ToolDefinition(
         name="workspace_command",
@@ -410,6 +591,34 @@ class GitInspectTool:
         operation = arguments.get("operation")
         if operation not in {"status", "diff", "log", "show"}:
             raise ToolExecutionError("GIT_OPERATION_DENIED", "Git operation is not read-only")
+        repository_root = _git_repository_root(self._boundary.root)
+        if repository_root is None:
+            return ToolResult(
+                tool_call_id,
+                self.definition.name,
+                False,
+                error=_tool_error("GIT_NOT_REPOSITORY", "Workspace is not a Git repository"),
+                public_metadata={
+                    "operation": operation,
+                    "ok": False,
+                    "error_code": "GIT_NOT_REPOSITORY",
+                    "repository": False,
+                },
+            )
+        if repository_root != self._boundary.root:
+            return ToolResult(
+                tool_call_id,
+                self.definition.name,
+                False,
+                error=_tool_error(
+                    "GIT_SCOPE_DENIED", "Git top-level directory is outside the workspace"
+                ),
+                public_metadata={
+                    "operation": operation,
+                    "ok": False,
+                    "error_code": "GIT_SCOPE_DENIED",
+                },
+            )
         command = ["git"]
         if operation == "status":
             command += ["status", "--short", "--branch"]
@@ -626,6 +835,43 @@ def _decode_utf8(value: bytes, name: str) -> str:
 
 def _file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    descriptor, temp_name = tempfile.mkstemp(prefix=".leanharness-write-", dir=path.parent)
+    temp = Path(temp_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    except OSError as exc:
+        temp.unlink(missing_ok=True)
+        raise ToolExecutionError("WRITE_FAILED", "File write failed", recoverable=False) from exc
+
+
+def _git_repository_root(workspace: Path) -> Path | None:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=workspace,
+            env=_minimal_environment(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        return Path(completed.stdout.decode("utf-8").strip()).resolve(strict=True)
+    except (UnicodeDecodeError, OSError, RuntimeError):
+        return None
 
 
 def _minimal_environment() -> dict[str, str]:

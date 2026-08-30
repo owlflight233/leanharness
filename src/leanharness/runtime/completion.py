@@ -22,21 +22,34 @@ class CompletionLedger:
     unresolved_errors: list[str] = field(default_factory=list)
 
     def record(self, tool: str, result: ToolResult) -> None:
-        if tool in {"workspace_mkdir", "workspace_patch"}:
+        if tool in {"workspace_mkdir", "workspace_patch", "workspace_write", "workspace_edit"}:
             self.mutation_attempts += 1
         elif tool == "workspace_command":
             self.verification_attempts += 1
         if result.ok:
             if tool in _OBSERVATION_TOOLS:
                 self.successful_observations += 1
-            elif tool in {"workspace_mkdir", "workspace_patch"}:
+            elif tool in {
+                "workspace_mkdir",
+                "workspace_patch",
+                "workspace_write",
+                "workspace_edit",
+            }:
                 self.successful_mutations += 1
+                # Patch returns ``files`` while structured write/edit tools
+                # return a single ``path``. Normalize both into one audit
+                # field so completion summaries and persisted traces agree.
                 paths = result.public_metadata.get("files", [])
                 if tool == "workspace_mkdir":
                     paths = result.public_metadata.get("created_paths", [])
+                elif tool in {"workspace_write", "workspace_edit"}:
+                    path = result.public_metadata.get("path")
+                    paths = [path] if isinstance(path, str) else []
                 if isinstance(paths, list):
                     self.changed_files.update(str(path) for path in paths)
                 self._clear_tool_errors("PATCH_")
+                self._clear_tool_errors("WRITE_")
+                self._clear_tool_errors("EDIT_")
                 self._clear_tool_errors("DIRECTORY_")
             elif tool == "workspace_command":
                 self.successful_verifications += 1
