@@ -39,6 +39,10 @@ class ContextBudgetError(RuntimeError):
     """Raised when protected context cannot fit the configured hard budget."""
 
 
+class ContextProtocolError(RuntimeError):
+    """Raised when a projected message sequence has an unclosed tool call."""
+
+
 class ContextModelClient(Protocol):
     async def complete(self, request: ModelRequest) -> ModelResponse: ...
 
@@ -147,6 +151,7 @@ class ContextProjector:
         compressed_messages, compressed_steps = _deterministic_compact(
             messages, self.soft_chars
         )
+        _validate_tool_protocol(messages)
         after = _message_size(messages)
         return ContextProjection(
             messages=tuple(messages),
@@ -244,6 +249,7 @@ class ContextProjector:
         projected = tuple(source.message for source in projected_sources)
         if _message_size(projected) > self.max_chars:
             return self._fallback_projection(sources)
+        _validate_tool_protocol(projected)
         candidate_ids = tuple(
             source.source_id
             for source in candidate_sources
@@ -274,6 +280,7 @@ class ContextProjector:
     ) -> ContextProjection:
         messages = [source.message for source in sources]
         compressed, steps = _deterministic_compact(messages, self.soft_chars)
+        _validate_tool_protocol(messages)
         if _message_size(messages) > self.max_chars:
             raise ContextBudgetError("Context budget exceeded after semantic fallback")
         return ContextProjection(
@@ -508,6 +515,33 @@ def _validate_relative_path(value: str) -> None:
 
 def _count_steps(messages: Sequence[ModelMessage]) -> int:
     return sum(1 for message in messages if message.role == "assistant" and message.tool_calls)
+
+
+def _validate_tool_protocol(messages: Sequence[ModelMessage]) -> None:
+    """Ensure every projected assistant tool call has exactly one result."""
+
+    pending: dict[str, str] = {}
+    completed: set[str] = set()
+    for message in messages:
+        if message.role == "assistant":
+            for call in message.tool_calls:
+                if not call.id or call.id in pending or call.id in completed:
+                    raise ContextProtocolError(
+                        "Projected context contains a duplicate tool call ID"
+                    )
+                pending[call.id] = call.name
+        elif message.role == "tool":
+            call_id = message.tool_call_id
+            if not call_id or call_id not in pending or call_id in completed:
+                raise ContextProtocolError(
+                    "Projected context contains an orphan or duplicate tool result"
+                )
+            completed.add(call_id)
+            del pending[call_id]
+    if pending:
+        raise ContextProtocolError(
+            "Projected context contains an assistant tool call without a result"
+        )
 
 
 def _message_size(messages: Sequence[ModelMessage]) -> int:

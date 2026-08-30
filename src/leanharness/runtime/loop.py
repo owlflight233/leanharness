@@ -12,6 +12,7 @@ from typing import Protocol
 from leanharness.context import (
     ContextBudgetError,
     ContextProjection,
+    ContextProtocolError,
     ContextSource,
     ContextStore,
 )
@@ -270,6 +271,24 @@ class CodingAgent:
                     error_message=str(exc),
                     metadata=self._terminal_metadata(
                         incomplete_reason="CONTEXT_BUDGET_EXCEEDED"
+                    ),
+                )
+                return
+            except ContextProtocolError as exc:
+                self.state = transition(self.state, RunState.FAILED)
+                yield self._event(
+                    "context.compaction.failed",
+                    step=step,
+                    error_code="CONTEXT_PROTOCOL_ERROR",
+                    error_message=str(exc),
+                )
+                yield self._event(
+                    "run.failed",
+                    step=step,
+                    error_code="CONTEXT_PROTOCOL_ERROR",
+                    error_message="Projected model context contained an invalid tool sequence",
+                    metadata=self._terminal_metadata(
+                        incomplete_reason="CONTEXT_PROTOCOL_ERROR"
                     ),
                 )
                 return

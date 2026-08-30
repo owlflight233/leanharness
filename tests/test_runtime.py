@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from leanharness.errors import ModelProtocolError, ModelUnavailableError
-from leanharness.models import ModelRequest, ModelResponse, ModelUsage, ToolCall
+from leanharness.models import ModelMessage, ModelRequest, ModelResponse, ModelUsage, ToolCall
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.runtime import (
     CodingAgent,
@@ -610,6 +610,25 @@ def test_incomplete_outcome_closes_control_tool_call_before_terminal_event(
         index for index, event in enumerate(events) if event.type == "run.incomplete"
     )
     assert requested_index < completed_index < terminal_index
+
+
+def test_invalid_historical_tool_sequence_fails_before_model_request(tmp_path: Path) -> None:
+    model = ScriptedModel([ModelResponse(content="should not be requested")])
+    invalid_history = (
+        ModelMessage(
+            role="assistant",
+            content="",
+            tool_calls=(ToolCall("orphan", "workspace_list", {"path": "."}),),
+        ),
+    )
+    agent = CodingAgent(tmp_path, model, history=invalid_history)
+
+    events = collect(agent)
+
+    assert events[-1].type == "run.failed"
+    assert events[-1].error_code == "CONTEXT_PROTOCOL_ERROR"
+    assert events[-1].metadata["incomplete_reason"] == "CONTEXT_PROTOCOL_ERROR"
+    assert model.requests == []
 
 
 def test_model_can_report_incomplete_without_keyword_inference(tmp_path: Path) -> None:

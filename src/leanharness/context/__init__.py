@@ -7,6 +7,7 @@ from leanharness.context.projection import (
     ContextModelClient,
     ContextProjection,
     ContextProjector,
+    ContextProtocolError,
     ContextSource,
 )
 from leanharness.context.store import ContextStore
@@ -18,6 +19,7 @@ __all__ = [
     "ContextModelClient",
     "ContextProjection",
     "ContextProjector",
+    "ContextProtocolError",
     "ContextSource",
     "ContextStore",
 ]

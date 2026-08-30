@@ -11,6 +11,7 @@ from leanharness.context import (
     ContextBudgetError,
     ContextJournal,
     ContextProjector,
+    ContextProtocolError,
     ContextSource,
 )
 from leanharness.errors import ModelContextLengthError
@@ -134,6 +135,42 @@ def test_deterministic_compaction_preserves_tool_protocol_and_recent_steps() -> 
     ]
     assert any("evidence_capsule" in message.content for message in tools[:-2])
     assert all("evidence_capsule" not in message.content for message in tools[-2:])
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        (
+            ModelMessage(
+                role="tool", tool_call_id="missing", content='{"ok":false}'
+            ),
+        ),
+        (
+            ModelMessage(
+                role="assistant",
+                content="",
+                tool_calls=(ToolCall("call-1", "workspace_list", {"path": "."}),),
+            ),
+        ),
+        (
+            ModelMessage(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    ToolCall("call-1", "workspace_list", {"path": "."}),
+                    ToolCall("call-1", "workspace_read", {"path": "README.md"}),
+                ),
+            ),
+        ),
+    ],
+)
+def test_projection_rejects_unclosed_or_orphaned_tool_messages(
+    messages: tuple[ModelMessage, ...],
+) -> None:
+    with pytest.raises(ContextProtocolError):
+        ContextProjector(max_chars=8_000, soft_chars=6_000).project(
+            (), ContextJournal(messages)
+        )
 
 
 def test_semantic_compaction_is_bounded_cached_and_tool_free() -> None:
