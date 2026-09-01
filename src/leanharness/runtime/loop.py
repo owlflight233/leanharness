@@ -57,6 +57,9 @@ MAX_TASK_CHARS = 32_000
 MAX_TOOL_CALLS_PER_STEP = 4
 MAX_STEP_TOOL_RESULT_BYTES = 96 * 1024
 MAX_PROGRESS_CHARS = 200
+# Leave room for thinking plus structured tool arguments. The provider may
+# impose a lower model-specific ceiling, but 2,048 was too small for DOCX calls.
+MODEL_OUTPUT_TOKEN_BUDGET = 16_384
 _HAN_CHAR = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 _LATIN_CHAR = re.compile(r"[A-Za-z]")
 
@@ -981,7 +984,7 @@ class CodingAgent:
         )
         return ModelRequest(
             messages=messages,
-            max_tokens=2_048,
+            max_tokens=MODEL_OUTPUT_TOKEN_BUDGET,
             tools=(
                 ()
                 if summary_round

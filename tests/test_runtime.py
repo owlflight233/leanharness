@@ -72,6 +72,7 @@ def test_runtime_executes_tool_observes_result_and_accepts_final_answer(tmp_path
     assert agent.state is RunState.COMPLETED
     assert events[-1].type == "run.completed"
     assert events[-1].answer == "The repository contains an Example README."
+    assert model.requests[0].max_tokens == 16_384
     assert [event.sequence for event in events] == list(range(len(events)))
     assert any(event.type == "assistant.progress" for event in events)
     completed = next(event for event in events if event.type == "tool.completed")
