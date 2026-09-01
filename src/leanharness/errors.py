@@ -85,6 +85,30 @@ class StorageError(LeanHarnessError):
     code = "STORAGE_ERROR"
 
 
+class AttachmentError(StorageError):
+    """Raised when attachment input violates the public file contract."""
+
+    code = "INVALID_ATTACHMENT"
+
+
+class AttachmentNotFoundError(AttachmentError):
+    code = "ATTACHMENT_NOT_FOUND"
+
+
+class PluginError(LeanHarnessError):
+    """Raised for safe plugin lifecycle and protocol failures."""
+
+    code = "PLUGIN_ERROR"
+
+
+class PluginNotFoundError(PluginError):
+    code = "PLUGIN_NOT_FOUND"
+
+
+class PluginManifestError(PluginError):
+    code = "PLUGIN_MANIFEST_INVALID"
+
+
 class SessionNotFoundError(StorageError):
     """Raised when a requested local session does not exist."""
 

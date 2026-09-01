@@ -3,8 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App, { type SessionClient } from "./App";
+import type { Attachment } from "./api/attachments";
 import type { HealthLoader, HealthResponse } from "./api/health";
 import type { ModelStatusLoader } from "./api/model";
+import type { PluginSummary } from "./api/plugins";
 import type { ApprovalResolver, RunStreamer, UserInputResolver } from "./api/run";
 import type { WorkspaceClient } from "./api/workspace";
 import type { PermissionMode, SessionDetail, SessionSummary } from "./api/sessions";
@@ -495,6 +497,106 @@ describe("application shell", () => {
 
     await waitFor(() => expect(run).toHaveBeenCalled());
     expect(run.mock.calls[0]?.[4]).toBe(baseSession.id);
+  });
+
+  it("uploads a text attachment and sends only its id to the current run", async () => {
+    const user = userEvent.setup();
+    const client = mockSessionClient();
+    const attachment: Attachment = {
+      id: "attachment-1",
+      session_id: baseSession.id,
+      message_id: null,
+      filename: "notes.txt",
+      media_type: "text/plain",
+      kind: "text",
+      byte_size: 5,
+      sha256: "a".repeat(64),
+      created_at: baseSession.created_at,
+    };
+    const attachmentClient = {
+      upload: vi.fn(async () => attachment),
+      delete: vi.fn(async () => undefined),
+    };
+    const run = vi.fn<RunStreamer>(async (_task, onEvent) => {
+      onEvent({ type: "run.started", sequence: 0, run_id: "attachment-run" });
+      onEvent({
+        type: "run.completed",
+        sequence: 1,
+        run_id: "attachment-run",
+        answer: "已读取附件。",
+      });
+    });
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        sessionClient={client}
+        attachmentClient={attachmentClient}
+        runStreamer={run}
+      />,
+    );
+    await screen.findByText("已保存的结论");
+
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" });
+    await user.upload(screen.getByLabelText("选择文本或代码附件"), file);
+    expect(await screen.findByText("notes.txt")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("任务输入"), "读取附件");
+    await user.click(screen.getByRole("button", { name: "发送任务" }));
+
+    await waitFor(() => expect(run).toHaveBeenCalled());
+    expect(attachmentClient.upload).toHaveBeenCalledWith(baseSession.id, file);
+    expect(run.mock.calls[0]?.[5]).toEqual([attachment.id]);
+    expect(run.mock.calls[0]?.[6]).toEqual([]);
+  });
+
+  it("shows only enabled plugins and passes an explicit selection to the run", async () => {
+    const user = userEvent.setup();
+    const plugins: PluginSummary[] = [
+      {
+        id: "leanharness-docx",
+        name: "LeanHarness DOCX",
+        version: "0.1.0",
+        description: "Generate DOCX",
+        protocol_version: "leanharness.plugin.v1",
+        enabled: true,
+        tools: [{ name: "docx_generate", description: "Generate", mutation: true }],
+        installed_at: baseSession.created_at,
+        updated_at: baseSession.updated_at,
+      },
+      {
+        id: "disabled-plugin",
+        name: "Disabled Plugin",
+        version: "0.1.0",
+        description: "Disabled",
+        protocol_version: "leanharness.plugin.v1",
+        enabled: false,
+        tools: [{ name: "disabled_tool", description: "Disabled", mutation: false }],
+        installed_at: baseSession.created_at,
+        updated_at: baseSession.updated_at,
+      },
+    ];
+    const run = vi.fn<RunStreamer>(async (_task, onEvent) => {
+      onEvent({ type: "run.started", sequence: 0, run_id: "plugin-run" });
+      onEvent({ type: "run.completed", sequence: 1, run_id: "plugin-run", answer: "完成" });
+    });
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        runStreamer={run}
+        pluginLoader={async () => plugins}
+      />,
+    );
+    await screen.findByText("工作区已连接");
+    await user.click(screen.getByRole("button", { name: "添加模式、文件或插件" }));
+    const docx = await screen.findByRole("menuitemcheckbox", { name: /LeanHarness DOCX/ });
+    expect(screen.queryByText("Disabled Plugin")).not.toBeInTheDocument();
+    await user.click(docx);
+    await user.type(screen.getByLabelText("任务输入"), "生成报告");
+    await user.click(screen.getByRole("button", { name: "发送任务" }));
+
+    await waitFor(() => expect(run).toHaveBeenCalled());
+    expect(run.mock.calls[0]?.[6]).toEqual(["leanharness-docx"]);
   });
 
   it("renders safe Markdown without raw HTML or dangerous links", async () => {

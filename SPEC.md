@@ -31,7 +31,8 @@ Version 0.1 will provide:
 - redacted JSONL execution traces;
 - standard and plan operating modes;
 - CLI, local web, and one-shot headless interfaces;
-- a documented extension boundary, without loading third-party plugins yet.
+- bounded image/text attachments and a documented local plugin extension
+  boundary with the bundled controlled DOCX example.
 
 ## Foundation milestone
 
@@ -49,7 +50,8 @@ The first milestone is complete when:
 - No model request is sent.
 - No workspace file is modified by the application.
 - No shell command is exposed to a model.
-- No plugin is discovered or loaded.
+- No plugin is downloaded, auto-discovered, or allowed to replace the fixed
+  runtime, permission, or trace core.
 - No conversation or run is persisted.
 - No multi-agent orchestration is implemented.
 

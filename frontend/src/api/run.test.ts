@@ -54,4 +54,34 @@ describe("agent run stream", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("serializes attachment and plugin selections in the run request", async () => {
+    const originalFetch = globalThis.fetch;
+    let body: Record<string, unknown> | undefined;
+    globalThis.fetch = async (_input, init) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(
+        '{"type":"run.completed","sequence":0,"run_id":"r1","answer":"ok"}\n',
+        { status: 200 },
+      );
+    };
+    try {
+      await streamRun(
+        "generate",
+        () => undefined,
+        new AbortController().signal,
+        24,
+        "session-1",
+        ["attachment-1"],
+        ["leanharness-docx"],
+      );
+      expect(body).toMatchObject({
+        session_id: "session-1",
+        attachment_ids: ["attachment-1"],
+        plugin_ids: ["leanharness-docx"],
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

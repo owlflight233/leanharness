@@ -9,13 +9,21 @@ from typing import Protocol
 
 from leanharness.application.language import language_instruction
 from leanharness.context import ContextSource
-from leanharness.models import ModelRequest, ModelResponse
+from leanharness.models import ModelMessage, ModelRequest, ModelResponse
 from leanharness.permissions import PermissionMode
 from leanharness.planning.contracts import PlanStep
 from leanharness.planning.parser import parse_plan_markdown
 from leanharness.runtime import CodingAgent, RuntimeEvent
 
 PLAN_GENERATION_MAX_STEPS = 8
+
+
+def plan_generation_task(task: str) -> str:
+    return (
+        "Inspect the repository and any supplied attachments as needed, then produce an "
+        "implementation plan for this request. Do not modify files or run commands. "
+        f"Request: {task}"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +84,7 @@ class PlanGenerator:
         session_id: str = "ephemeral",
         history_sources: tuple[ContextSource, ...] = (),
         context_sanitizer: Callable[[str], str] | None = None,
+        user_message: ModelMessage | None = None,
     ) -> None:
         self.agent = CodingAgent(
             workspace,
@@ -88,13 +97,11 @@ class PlanGenerator:
             history_sources=history_sources,
             context_sanitizer=context_sanitizer,
             include_outcome_tool=False,
+            user_message=user_message,
         )
 
     async def generate(self, task: str) -> AsyncIterator[RuntimeEvent | GeneratedPlan]:
-        planning_task = (
-            "Inspect the repository as needed, then produce an implementation plan for this "
-            f"request. Do not modify files or run commands. Request: {task}"
-        )
+        planning_task = plan_generation_task(task)
         async for event in self.agent.run(planning_task):
             if event.type == "run.completed" and event.answer:
                 title, steps = parse_plan_markdown(event.answer)

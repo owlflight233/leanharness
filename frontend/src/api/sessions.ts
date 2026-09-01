@@ -1,5 +1,15 @@
 export type PermissionMode = "inspect" | "approve" | "unrestricted";
 
+export interface MessageAttachment {
+  id: string;
+  filename: string;
+  media_type: string;
+  kind: "image" | "text";
+  byte_size: number;
+  sha256: string;
+  created_at: string;
+}
+
 export interface SessionSummary {
   id: string;
   project_id: string;
@@ -23,6 +33,7 @@ export interface SessionDetail {
     run_id?: string | null;
     kind?: "chat" | "plan" | "progress";
     plan_id?: string | null;
+    attachments?: MessageAttachment[];
   }>;
   plans?: import("./plans").Plan[];
   runs: Array<{

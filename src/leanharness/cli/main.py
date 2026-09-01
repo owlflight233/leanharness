@@ -18,6 +18,7 @@ from leanharness.application.model_settings import (
     load_effective_model_config,
 )
 from leanharness.application.plan_gateway import create_plan_generator
+from leanharness.application.plugin_gateway import plugin_registry_factory
 from leanharness.application.session_gateway import (
     apply_first_task_title,
     context_history_for_session,
@@ -37,6 +38,7 @@ from leanharness.logging import configure_logging
 from leanharness.models import OpenAICompatibleClient
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.planning import PlanController, PlanState
+from leanharness.plugins.manager import PluginManager
 from leanharness.runtime import UserInputCoordinator
 from leanharness.runtime.loop import DEFAULT_MAX_STEPS, MAX_MAX_STEPS, MIN_MAX_STEPS
 from leanharness.runtime.metrics import RunMetrics
@@ -115,6 +117,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Workspace directory; defaults to the current directory.",
     )
     run_parser.add_argument(
+        "--plugin",
+        dest="plugin_ids",
+        action="append",
+        default=[],
+        help="Enabled plugin ID to expose for this run; repeat for multiple plugins.",
+    )
+    run_parser.add_argument(
         "--max-steps",
         type=int,
         default=DEFAULT_MAX_STEPS,
@@ -163,6 +172,22 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser = plan_subparsers.add_parser(command)
         command_parser.add_argument("plan_id")
         command_parser.add_argument("--workspace")
+        command_parser.add_argument("--data-dir")
+        if command in {"confirm", "resume"}:
+            command_parser.add_argument(
+                "--plugin", dest="plugin_ids", action="append", default=[]
+            )
+
+    plugin_parser = subparsers.add_parser("plugin", help="Manage local process plugins.")
+    plugin_subparsers = plugin_parser.add_subparsers(dest="plugin_command", required=True)
+    plugin_list = plugin_subparsers.add_parser("list")
+    plugin_list.add_argument("--data-dir")
+    plugin_install = plugin_subparsers.add_parser("install")
+    plugin_install.add_argument("path")
+    plugin_install.add_argument("--data-dir")
+    for command in ("enable", "disable", "remove"):
+        command_parser = plugin_subparsers.add_parser(command)
+        command_parser.add_argument("plugin_id")
         command_parser.add_argument("--data-dir")
     return parser
 
@@ -232,6 +257,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.session_id,
                     args.data_dir,
                     args.permission,
+                    tuple(args.plugin_ids),
                 )
             )
         if args.command == "session":
@@ -252,8 +278,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.plan_id,
                     resolve_workspace(args.workspace),
                     args.data_dir,
+                    tuple(getattr(args, "plugin_ids", [])),
                 )
             )
+        if args.command == "plugin":
+            return _plugin_command(args)
     except LeanHarnessError as exc:
         print(f"error [{exc.code}]: {exc.message}", file=sys.stderr)
         return 2
@@ -316,6 +345,7 @@ async def _inspect(
     session_id: str | None,
     data_dir: str | None,
     permission: str | None = None,
+    plugin_ids: tuple[str, ...] = (),
 ) -> int:
     store = LocalStore(Path(data_dir).expanduser() if data_dir else None)
     _, session = ensure_session(
@@ -324,6 +354,7 @@ async def _inspect(
     session = apply_first_task_title(store, session, task)
     selected_permission = permission or session.permission_mode
     history = context_history_for_session(store, session)
+    selected_tool_registry = plugin_registry_factory(store, workspace, plugin_ids)
     run = store.create_run(
         session.id,
         "coding",
@@ -363,6 +394,7 @@ async def _inspect(
         history_sources=history,
         context_sanitizer=store.redactor.text,
         data_dir=data_dir,
+        tool_registry_factory=selected_tool_registry,
     )
     exit_code = 0
     async for event in runtime.run(task):
@@ -458,6 +490,31 @@ def _session_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _plugin_command(args: argparse.Namespace) -> int:
+    data_dir = Path(args.data_dir).expanduser() if args.data_dir else None
+    with LocalStore(data_dir) as store:
+        manager = PluginManager(store)
+        if args.plugin_command == "list":
+            for plugin in manager.list():
+                print(
+                    f"{plugin.id}\t{plugin.version}\t"
+                    f"{'enabled' if plugin.enabled else 'disabled'}\t{plugin.name}"
+                )
+            return 0
+        if args.plugin_command == "install":
+            print(manager.install(args.path).id)
+            return 0
+        if args.plugin_command == "enable":
+            print(manager.enable(args.plugin_id).id)
+            return 0
+        if args.plugin_command == "disable":
+            print(manager.disable(args.plugin_id).id)
+            return 0
+        manager.remove(args.plugin_id)
+        print(args.plugin_id)
+        return 0
+
+
 async def _plan_generate(
     task: str, workspace: Path, session_id: str | None, data_dir: str | None
 ) -> int:
@@ -495,7 +552,11 @@ async def _plan_generate(
 
 
 async def _plan_lifecycle(
-    command: str, plan_id: str, workspace: Path, data_dir: str | None
+    command: str,
+    plan_id: str,
+    workspace: Path,
+    data_dir: str | None,
+    plugin_ids: tuple[str, ...] = (),
 ) -> int:
     store = LocalStore(Path(data_dir).expanduser() if data_dir else None)
     plan = store.get_plan(plan_id)
@@ -514,6 +575,7 @@ async def _plan_lifecycle(
     if command not in {"confirm", "resume"}:
         raise LeanHarnessError(f"Unknown plan command: {command}")
     session = store.get_session(plan.session_id)
+    selected_tool_registry = plugin_registry_factory(store, workspace, plugin_ids)
     if command == "resume" and plan.run_id:
         run = store.get_run(plan.run_id)
     else:
@@ -533,6 +595,7 @@ async def _plan_lifecycle(
         approvals=approvals,
         history_sources=context_history_for_session(store, session, exclude_run_id=run.id),
         initial_metrics=RunMetrics.from_events(existing_events) if existing_events else None,
+        tool_registry_factory=selected_tool_registry,
     )
     answer = None
     async for event in controller.run():

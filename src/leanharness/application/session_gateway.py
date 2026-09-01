@@ -80,6 +80,20 @@ def apply_first_task_title(store: LocalStore, session: SessionRecord, task: str)
 
 def session_detail(store: LocalStore, session_id: str) -> dict[str, object]:
     session = store.get_session(session_id)
+    attachments_by_message: dict[str, list[dict[str, object]]] = {}
+    for attachment in store.list_attachments(session_id):
+        if attachment.message_id is not None:
+            attachments_by_message.setdefault(attachment.message_id, []).append(
+                {
+                    "id": attachment.id,
+                    "filename": attachment.filename,
+                    "media_type": attachment.media_type,
+                    "kind": attachment.kind,
+                    "byte_size": attachment.byte_size,
+                    "sha256": attachment.sha256,
+                    "created_at": attachment.created_at,
+                }
+            )
     plans = []
     for plan in store.list_plans(session_id):
         permission = session.permission_mode
@@ -126,6 +140,7 @@ def session_detail(store: LocalStore, session_id: str) -> dict[str, object]:
                 "run_id": message.run_id,
                 "kind": message.kind,
                 "plan_id": message.plan_id,
+                "attachments": attachments_by_message.get(message.id, []),
             }
             for message in store.list_messages(session_id)
         ],

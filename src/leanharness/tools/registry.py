@@ -25,7 +25,13 @@ from leanharness.tools.workspace import (
 
 
 class ToolRegistry:
-    def __init__(self, workspace: Path, *, mode: PermissionMode = PermissionMode.INSPECT) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        mode: PermissionMode = PermissionMode.INSPECT,
+        additional_tools: tuple[BuiltinTool, ...] = (),
+    ) -> None:
         boundary = WorkspaceBoundary.create(workspace)
         builtins: tuple[BuiltinTool, ...] = (
             WorkspaceListTool(boundary),
@@ -39,11 +45,18 @@ class ToolRegistry:
             WorkspaceCommandTool(boundary),
         )
         self._mode = mode
-        self._tools = {
+        self._tools: dict[str, BuiltinTool] = {
             tool.definition.name: tool
             for tool in builtins
             if authorize_tool(mode, tool.definition.name).allowed
         }
+        for tool in additional_tools:
+            name = tool.definition.name
+            if name in self._tools or any(item.definition.name == name for item in builtins):
+                raise ValueError(f"Duplicate tool name: {name}")
+            mutation = bool(getattr(tool, "is_mutating", False))
+            if authorize_tool(mode, name, mutation=mutation).allowed:
+                self._tools[name] = tool
 
     @property
     def definitions(self) -> tuple[ToolDefinition, ...]:
@@ -58,14 +71,16 @@ class ToolRegistry:
         tool = self._tools.get(call.name)
         if tool is None:
             return _error_result(call, ToolExecutionError("TOOL_NOT_FOUND", "Unknown tool"))
-        decision = authorize_tool(self._mode, call.name)
+        decision = self._decision(call.name, tool)
         if not decision.allowed:
             return _error_result(
                 call,
                 ToolExecutionError(decision.code, "Tool is not allowed in inspect mode"),
             )
         try:
-            if isinstance(tool, WorkspaceCommandTool):
+            if isinstance(tool, WorkspaceCommandTool) or bool(
+                getattr(tool, "supports_cancellation", False)
+            ):
                 return tool.execute(call.id, call.arguments, cancel_signal=cancel_signal)
             return tool.execute(call.id, call.arguments)
         except ToolExecutionError as exc:
@@ -81,7 +96,10 @@ class ToolRegistry:
             )
 
     def approval_required(self, call: ToolCall) -> bool:
-        return authorize_tool(self._mode, call.name).requires_approval
+        tool = self._tools.get(call.name)
+        if tool is None:
+            return False
+        return self._decision(call.name, tool).requires_approval
 
     def preview(self, call: ToolCall) -> dict[str, object]:
         tool = self._tools.get(call.name)
@@ -107,6 +125,8 @@ class ToolRegistry:
                 return tool.execute(call.id, call.arguments, expected_hashes=expected_hashes)
             if isinstance(tool, WorkspaceCommandTool):
                 return tool.execute(call.id, call.arguments, cancel_signal=cancel_signal)
+            if bool(getattr(tool, "supports_cancellation", False)):
+                return tool.execute(call.id, call.arguments, cancel_signal=cancel_signal)
             return tool.execute(call.id, call.arguments)
         except ToolExecutionError as exc:
             return _error_result(call, exc)
@@ -119,6 +139,14 @@ class ToolRegistry:
                     recoverable=False,
                 ),
             )
+
+    def _decision(self, name: str, tool: BuiltinTool):
+        mutation = getattr(tool, "is_mutating", None)
+        return authorize_tool(
+            self._mode,
+            name,
+            mutation=mutation if isinstance(mutation, bool) else None,
+        )
 
 
 def _error_result(call: ToolCall, exc: ToolExecutionError) -> ToolResult:

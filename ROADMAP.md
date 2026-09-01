@@ -8,7 +8,7 @@
 - Explicit agent state machine
 - Standard and Plan modes
 - CLI, web, and headless interfaces
-- Stable extension boundary (plugin loading remains deferred)
+- Local controlled plugin protocol and bundled DOCX artifact example
 
 ## 0.2 - Delegated workers
 
@@ -28,7 +28,7 @@
 
 ## 1.0 - Stable local runtime
 
-- Versioned external plugin protocol and safe plugin loading
+- Hardened plugin protocol compatibility and security review
 - Security review and release installation tests
 - Stable configuration and migration policy
 - Published benchmark and token-efficiency results

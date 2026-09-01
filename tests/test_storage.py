@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
-from leanharness.errors import InvalidPermissionError, SessionNotFoundError
+from leanharness.errors import InvalidPermissionError, SessionNotFoundError, StorageError
 from leanharness.storage import LocalStore, TraceRedactor, default_data_dir, redact_payload
 
 # Migration fixtures intentionally keep their SQL schema definitions readable.
@@ -204,4 +206,100 @@ def test_v1_database_migrates_without_losing_history(tmp_path: Path) -> None:
         versions = store.connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row["version"] for row in versions] == [1, 2, 3, 4]
+        assert [row["version"] for row in versions] == [1, 2, 3, 4, 5, 6]
+
+
+def test_attachment_lifecycle_binds_to_message_and_deletes_with_session(
+    tmp_path: Path,
+) -> None:
+    data = tmp_path / "data"
+    with LocalStore(data) as store:
+        project = store.ensure_project(tmp_path)
+        session = store.create_session(project)
+        attachment = store.create_attachment(
+            session.id,
+            "../notes.py",
+            "text/plain",
+            b"print('ready')\n",
+        )
+        assert attachment.filename == "notes.py"
+        assert attachment.kind == "text"
+        assert Path(attachment.storage_path).is_file()
+        message = store.add_message(
+            session.id,
+            "user",
+            "Review this file",
+            attachment_ids=(attachment.id,),
+        )
+        bound = store.get_attachment(attachment.id)
+        assert bound.message_id == message.id
+        assert store.read_attachment(attachment.id, session_id=session.id) == b"print('ready')\n"
+        store.delete_session(session.id)
+        assert not Path(attachment.storage_path).exists()
+
+
+def test_attachment_validates_image_bytes_and_session_ownership(tmp_path: Path) -> None:
+    image_bytes = io.BytesIO()
+    Image.new("RGB", (8, 8), "red").save(image_bytes, format="PNG")
+    with LocalStore(tmp_path / "data") as store:
+        project = store.ensure_project(tmp_path)
+        first = store.create_session(project)
+        second = store.create_session(project)
+        attachment = store.create_attachment(
+            first.id,
+            "screen.png",
+            "image/png",
+            image_bytes.getvalue(),
+        )
+        assert attachment.kind == "image"
+        assert attachment.media_type == "image/png"
+        with pytest.raises(StorageError, match="does not belong"):
+            store.read_attachment(attachment.id, session_id=second.id)
+        with pytest.raises(StorageError, match="does not match"):
+            store.create_attachment(first.id, "fake.png", "image/jpeg", image_bytes.getvalue())
+        with pytest.raises(StorageError, match="not a valid"):
+            store.create_attachment(first.id, "broken.png", "image/png", b"not an image")
+
+
+def test_attachment_rejects_unsupported_text_and_mime_or_duplicate_binding(tmp_path: Path) -> None:
+    with LocalStore(tmp_path / "data") as store:
+        session = store.create_session(store.ensure_project(tmp_path))
+        with pytest.raises(StorageError, match="not supported"):
+            store.create_attachment(session.id, "archive.zip", "application/zip", b"PK")
+        with pytest.raises(StorageError, match="UTF-8"):
+            store.create_attachment(session.id, "bad.txt", "text/plain", b"\xff")
+        attachment = store.create_attachment(session.id, "a.txt", "text/plain", b"ok")
+        store.add_message(session.id, "user", "first", attachment_ids=(attachment.id,))
+        with pytest.raises(StorageError, match="already bound"):
+            store.add_message(session.id, "user", "second", attachment_ids=(attachment.id,))
+
+
+def test_session_detail_includes_only_attachment_metadata(tmp_path: Path) -> None:
+    from leanharness.application.session_gateway import session_detail
+
+    with LocalStore(tmp_path / "data") as store:
+        session = store.create_session(store.ensure_project(tmp_path))
+        attachment = store.create_attachment(session.id, "notes.txt", "text/plain", b"secret source")
+        message = store.add_message(
+            session.id, "user", "Review", attachment_ids=(attachment.id,)
+        )
+        payload = session_detail(store, session.id)
+        message_payload = next(item for item in payload["messages"] if item["id"] == message.id)
+        assert message_payload["attachments"][0]["filename"] == "notes.txt"
+        assert "secret source" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_model_attachment_text_is_bounded_without_mutating_stored_file(tmp_path: Path) -> None:
+    from leanharness.application.attachments import (
+        MAX_MODEL_ATTACHMENT_TEXT_CHARS,
+        message_with_attachments,
+    )
+
+    content = "x" * (MAX_MODEL_ATTACHMENT_TEXT_CHARS + 5_000)
+    with LocalStore(tmp_path / "data") as store:
+        session = store.create_session(store.ensure_project(tmp_path))
+        attachment = store.create_attachment(session.id, "large.txt", "text/plain", content.encode())
+        message = message_with_attachments(store, session.id, "Review", (attachment.id,))
+        assert len(message.content) < MAX_MODEL_ATTACHMENT_TEXT_CHARS + 500
+        assert "content truncated" in message.content
+        assert len(store.read_attachment(attachment.id, session_id=session.id)) == len(content)

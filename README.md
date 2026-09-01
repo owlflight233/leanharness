@@ -12,10 +12,12 @@ To understand the implementation in request-flow order, see
 ## Current status
 
 The current milestone provides an installable Python package, environment
-diagnostics, a provider-independent model gateway, a bounded coding loop, persistent local sessions, guarded unified-diff edits,
-verification command profiles, read-only Git inspection, and a persistent Plan
-Mode through both the CLI and responsive local web interface. Arbitrary shell
-execution, Git writes, and plugins remain intentionally out of scope.
+diagnostics, a provider-independent model gateway, a bounded coding loop,
+persistent local sessions, guarded workspace edits, verification command
+profiles, read-only Git inspection, persistent Plan Mode, bounded image/text
+attachments, and a local controlled plugin protocol through both the CLI and
+responsive web interface. Arbitrary shell execution, Git writes, plugin
+downloads, and plugin-owned agent loops remain out of scope.
 
 ## Prerequisites
 
@@ -176,6 +178,22 @@ uv run leanharness session new --title "Repository review"
 uv run leanharness session rename SESSION_ID "New title"
 uv run leanharness session delete SESSION_ID
 ```
+
+Local plugins are installed only from an explicit local directory. The bundled
+`plugins/leanharness-docx` example can generate a validated DOCX artifact through
+the existing permission and approval runtime:
+
+```sh
+uv run leanharness plugin install plugins/leanharness-docx
+uv run leanharness plugin enable leanharness-docx
+uv run leanharness plugin list
+uv run leanharness plugin disable leanharness-docx
+uv run leanharness plugin remove leanharness-docx
+```
+
+The plugin protocol is LeanHarness-owned and versioned; it is not MCP-compatible.
+Plugins run in a bounded child process and cannot access model credentials,
+session storage, traces, or arbitrary workspace paths.
 
 For frontend development, keep the Python server on port 4318 and run
 `pnpm dev` from `frontend/`; Vite proxies `/api` to the local server.

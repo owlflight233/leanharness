@@ -1,10 +1,12 @@
 import asyncio
+import io
 import json
 from pathlib import Path
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from PIL import Image
 
 from leanharness.application.model_settings import LocalModelSettings, LocalModelSettingsStore
 from leanharness.config import build_config
@@ -28,6 +30,25 @@ def post(app: FastAPI, path: str, *, json_body: dict[str, object] | None = None)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             return await client.post(path, json=json_body)
+
+    return asyncio.run(request())
+
+
+def post_file(
+    app: FastAPI,
+    path: str,
+    *,
+    filename: str,
+    media_type: str,
+    content: bytes,
+) -> httpx.Response:
+    async def request() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                files={"file": (filename, content, media_type)},
+            )
 
     return asyncio.run(request())
 
@@ -124,6 +145,31 @@ class HistoryRuntimeClient:
                 ),
             )
         return ModelResponse(content="The workspace was inspected.")
+
+
+class CapturingRuntimeClient:
+    def __init__(self) -> None:
+        self.requests = []
+
+    async def complete(self, request):
+        self.requests.append(request)
+        if len(self.requests) % 2 == 1:
+            return ModelResponse(
+                content="Inspecting the workspace.",
+                tool_calls=(
+                    ToolCall("list-workspace", "workspace_list", {"path": "."}),
+                ),
+            )
+        return ModelResponse(
+            content="",
+            tool_calls=(
+                ToolCall(
+                    "finish-run",
+                    "report_run_outcome",
+                    {"status": "completed", "answer": "Inspection complete."},
+                ),
+            ),
+        )
 
 
 def test_health_contract_is_exact(tmp_path: Path) -> None:
@@ -362,6 +408,167 @@ def test_model_status_uses_persistent_non_secret_settings(
         "model": "deepseek-v4-flash-vision-exp",
     }
     assert "must-not-leak" not in response.text
+
+
+def test_attachment_api_feeds_only_the_current_model_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LEANHARNESS_MODEL_BASE_URL", "https://models.example.test/v1")
+    monkeypatch.setenv("LEANHARNESS_MODEL_NAME", "vision-model")
+    data_dir = tmp_path / "data"
+    client = CapturingRuntimeClient()
+    app = create_app(
+        build_config(workspace=tmp_path, data_dir=data_dir),
+        model_client_factory=lambda _config: client,
+    )
+    session = post(app, "/api/v1/sessions", json_body={}).json()
+    image_data = io.BytesIO()
+    Image.new("RGB", (2, 2), color="red").save(image_data, format="PNG")
+    image = post_file(
+        app,
+        f"/api/v1/attachments?session_id={session['id']}",
+        filename="screen.png",
+        media_type="image/png",
+        content=image_data.getvalue(),
+    ).json()
+    source_text = "private attachment source\n"
+    source = post_file(
+        app,
+        f"/api/v1/attachments?session_id={session['id']}",
+        filename="sample.py",
+        media_type="text/x-python",
+        content=source_text.encode(),
+    ).json()
+
+    response = post(
+        app,
+        "/api/v1/runs",
+        json_body={
+            "task": "Inspect the supplied files",
+            "session_id": session["id"],
+            "attachment_ids": [image["id"], source["id"]],
+        },
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.text.splitlines()[-1])["type"] == "run.completed"
+    first_request = client.requests[0]
+    current_user = next(
+        message for message in reversed(first_request.messages) if message.role == "user"
+    )
+    assert source_text.strip() in current_user.content
+    assert current_user.images[0].data == image_data.getvalue()
+    assert current_user.images[0].media_type == "image/png"
+    detail = get(app, f"/api/v1/sessions/{session['id']}").json()
+    user_message = next(message for message in detail["messages"] if message["role"] == "user")
+    assert {item["filename"] for item in user_message["attachments"]} == {
+        "screen.png",
+        "sample.py",
+    }
+    assert source_text.strip() not in json.dumps(detail, ensure_ascii=False)
+    assert source_text.encode() not in (data_dir / "leanharness.sqlite3").read_bytes()
+
+
+def test_attachment_api_rejects_cross_session_use_before_creating_a_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LEANHARNESS_MODEL_BASE_URL", "https://models.example.test/v1")
+    monkeypatch.setenv("LEANHARNESS_MODEL_NAME", "vision-model")
+    app = create_app(build_config(workspace=tmp_path, data_dir=tmp_path / "data"))
+    first = post(app, "/api/v1/sessions", json_body={}).json()
+    second = post(app, "/api/v1/sessions", json_body={}).json()
+    attachment = post_file(
+        app,
+        f"/api/v1/attachments?session_id={first['id']}",
+        filename="notes.txt",
+        media_type="text/plain",
+        content=b"session one",
+    ).json()
+
+    response = post(
+        app,
+        "/api/v1/runs",
+        json_body={
+            "task": "Read it",
+            "session_id": second["id"],
+            "attachment_ids": [attachment["id"]],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_ATTACHMENT"
+    assert app.state.store.list_runs(second["id"]) == []
+
+
+def test_plugin_api_lifecycle_and_permission_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LEANHARNESS_MODEL_BASE_URL", "https://models.example.test/v1")
+    monkeypatch.setenv("LEANHARNESS_MODEL_NAME", "example-model")
+    client = CapturingRuntimeClient()
+    app = create_app(
+        build_config(workspace=tmp_path, data_dir=tmp_path / "data"),
+        model_client_factory=lambda _config: client,
+    )
+    plugin_path = Path(__file__).parents[1] / "plugins" / "leanharness-docx"
+    installed = post(
+        app,
+        "/api/v1/plugins/install",
+        json_body={"path": str(plugin_path)},
+    )
+    assert installed.status_code == 200
+    assert installed.json()["enabled"] is False
+    enabled = post(app, "/api/v1/plugins/leanharness-docx/enable")
+    assert enabled.json()["enabled"] is True
+
+    inspect_session = post(app, "/api/v1/sessions", json_body={}).json()
+    inspect_run = post(
+        app,
+        "/api/v1/runs",
+        json_body={
+            "task": "Inspect",
+            "session_id": inspect_session["id"],
+            "plugin_ids": ["leanharness-docx"],
+        },
+    )
+    assert inspect_run.status_code == 200
+    assert "docx_generate" not in {tool.name for tool in client.requests[0].tools}
+
+    unrestricted_session = post(
+        app,
+        "/api/v1/sessions",
+        json_body={"permission_mode": "unrestricted"},
+    ).json()
+    unrestricted_run = post(
+        app,
+        "/api/v1/runs",
+        json_body={
+            "task": "Inspect with DOCX available",
+            "session_id": unrestricted_session["id"],
+            "plugin_ids": ["leanharness-docx"],
+        },
+    )
+    assert unrestricted_run.status_code == 200
+    assert "docx_generate" in {tool.name for tool in client.requests[2].tools}
+
+    assert post(app, "/api/v1/plugins/leanharness-docx/disable").json()["enabled"] is False
+    rejected_session = post(app, "/api/v1/sessions", json_body={}).json()
+    rejected = post(
+        app,
+        "/api/v1/runs",
+        json_body={
+            "task": "Invalid plugin selection",
+            "session_id": rejected_session["id"],
+            "plugin_ids": ["leanharness-docx"],
+        },
+    )
+    assert rejected.status_code == 422
+    assert app.state.store.list_runs(rejected_session["id"]) == []
+    assert delete(app, "/api/v1/plugins/leanharness-docx").json()["deleted"] is True
+    assert get(app, "/api/v1/plugins").json() == {"plugins": []}
 
 
 def test_model_check_contract_does_not_expose_credentials(

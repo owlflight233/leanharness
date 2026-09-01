@@ -70,5 +70,35 @@ class ApprovalRecord:
     decided_at: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class AttachmentRecord:
+    id: str
+    session_id: str
+    message_id: str | None
+    filename: str
+    media_type: str
+    kind: str
+    byte_size: int
+    sha256: str
+    storage_path: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class PluginRecord:
+    id: str
+    name: str
+    version: str
+    description: str
+    protocol_version: str
+    source_path: str
+    install_path: str
+    entrypoint: tuple[str, ...]
+    tools: tuple[dict[str, Any], ...]
+    enabled: bool
+    installed_at: str
+    updated_at: str
+
+
 PlanRecord = Plan
 PlanStepRecord = PlanStep

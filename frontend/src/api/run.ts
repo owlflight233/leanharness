@@ -54,6 +54,8 @@ export type RunStreamer = (
   signal: AbortSignal,
   maxSteps?: number,
   sessionId?: string,
+  attachmentIds?: string[],
+  pluginIds?: string[],
 ) => Promise<void>;
 
 export type ApprovalResolver = (
@@ -106,11 +108,19 @@ export async function streamRun(
   signal: AbortSignal,
   maxSteps = 24,
   sessionId?: string,
+  attachmentIds: string[] = [],
+  pluginIds: string[] = [],
 ): Promise<void> {
   const response = await fetch("/api/v1/runs", {
     method: "POST",
     headers: { Accept: "application/x-ndjson", "Content-Type": "application/json" },
-    body: JSON.stringify({ task, max_steps: maxSteps, ...(sessionId ? { session_id: sessionId } : {}) }),
+    body: JSON.stringify({
+      task,
+      max_steps: maxSteps,
+      ...(sessionId ? { session_id: sessionId } : {}),
+      ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
+      ...(pluginIds.length ? { plugin_ids: pluginIds } : {}),
+    }),
     signal,
   });
   if (!response.ok) throw new Error(await readApiError(response));

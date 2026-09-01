@@ -9,13 +9,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from leanharness import __version__
 from leanharness.application.agent_gateway import create_coding_run
+from leanharness.application.attachments import attachment_to_dict, message_with_attachments
 from leanharness.application.health import get_health
 from leanharness.application.model_gateway import ModelClientFactory, check_model
 from leanharness.application.model_settings import (
@@ -23,6 +24,7 @@ from leanharness.application.model_settings import (
     load_effective_model_config,
 )
 from leanharness.application.plan_gateway import create_plan_generator, plan_to_dict
+from leanharness.application.plugin_gateway import plugin_registry_factory, plugin_to_dict
 from leanharness.application.session_gateway import (
     apply_first_task_title,
     context_history_for_session,
@@ -36,12 +38,16 @@ from leanharness.errors import (
     ApprovalAlreadyResolvedError,
     ApprovalExpiredError,
     ApprovalNotFoundError,
+    AttachmentError,
+    AttachmentNotFoundError,
     InvalidPermissionError,
     LeanHarnessError,
     ModelNotConfiguredError,
     PlanConflictError,
     PlanNotFoundError,
     PlanStateError,
+    PluginError,
+    PluginNotFoundError,
     RunConflictError,
     RunInputError,
     SessionNotFoundError,
@@ -56,7 +62,8 @@ from leanharness.permissions import (
     PermissionMode,
 )
 from leanharness.planning import Plan, PlanController, PlanState, PlanStep, render_plan_markdown
-from leanharness.planning.generator import GeneratedPlan
+from leanharness.planning.generator import GeneratedPlan, plan_generation_task
+from leanharness.plugins.manager import PluginManager
 from leanharness.runtime import RuntimeEvent, UserInputCoordinator, UserInputProtocolError
 from leanharness.runtime.metrics import RunMetrics
 from leanharness.runtime.user_input import UserInputExpiredError
@@ -67,11 +74,22 @@ class RunRequest(BaseModel):
     task: str
     max_steps: int = 24
     session_id: str | None = None
+    attachment_ids: list[str] = Field(default_factory=list, max_length=8)
+    plugin_ids: list[str] = Field(default_factory=list, max_length=8)
 
 
 class PlanCreateRequest(BaseModel):
     task: str
     session_id: str | None = None
+    attachment_ids: list[str] = Field(default_factory=list, max_length=8)
+
+
+class PluginInstallRequest(BaseModel):
+    path: str
+
+
+class PluginSelectionRequest(BaseModel):
+    plugin_ids: list[str] = Field(default_factory=list, max_length=8)
 
 
 class PlanStepUpdate(BaseModel):
@@ -159,6 +177,7 @@ def create_app(
     )
     user_inputs = UserInputCoordinator()
     active_runs = ActiveRunRegistry()
+    plugins = PluginManager(store)
     plan_cancellations: dict[str, asyncio.Event] = {}
 
     @asynccontextmanager
@@ -182,6 +201,7 @@ def create_app(
     app.state.approvals = approvals
     app.state.user_inputs = user_inputs
     app.state.active_runs = active_runs
+    app.state.plugins = plugins
 
     @app.exception_handler(LeanHarnessError)
     async def application_error(_request: Request, exc: LeanHarnessError) -> JSONResponse:
@@ -190,7 +210,11 @@ def create_app(
             status_code = 422
         elif isinstance(exc, SessionNotFoundError):
             status_code = 404
-        elif isinstance(exc, InvalidPermissionError):
+        elif isinstance(exc, AttachmentError):
+            status_code = 404 if exc.code == AttachmentNotFoundError.code else 422
+        elif isinstance(exc, PluginNotFoundError):
+            status_code = 404
+        elif isinstance(exc, (PluginError, InvalidPermissionError)):
             status_code = 422
         elif isinstance(exc, StorageError):
             status_code = 500
@@ -327,6 +351,60 @@ def create_app(
         )
         return result.to_dict()
 
+    @app.get("/api/v1/plugins")
+    async def list_plugins() -> dict[str, object]:
+        return {"plugins": [plugin_to_dict(plugin) for plugin in plugins.list()]}
+
+    @app.post("/api/v1/plugins/install")
+    async def install_plugin(payload: PluginInstallRequest) -> dict[str, object]:
+        if not payload.path.strip():
+            raise PluginError("Plugin path must not be blank")
+        return plugin_to_dict(plugins.install(payload.path))
+
+    @app.post("/api/v1/plugins/{plugin_id}/enable")
+    async def enable_plugin(plugin_id: str) -> dict[str, object]:
+        return plugin_to_dict(plugins.enable(plugin_id))
+
+    @app.post("/api/v1/plugins/{plugin_id}/disable")
+    async def disable_plugin(plugin_id: str) -> dict[str, object]:
+        return plugin_to_dict(plugins.disable(plugin_id))
+
+    @app.delete("/api/v1/plugins/{plugin_id}")
+    async def remove_plugin(plugin_id: str) -> dict[str, object]:
+        plugins.remove(plugin_id)
+        return {"deleted": True, "plugin_id": plugin_id}
+
+    @app.post("/api/v1/attachments")
+    async def upload_attachment(session_id: str, file: UploadFile = File(...)) -> dict[str, object]:  # noqa: B008
+        store: LocalStore = app.state.store
+        _, session = ensure_session(store, app.state.workspace, session_id)
+        try:
+            data = await file.read(20 * 1024 * 1024 + 1)
+            if not data:
+                raise AttachmentError("Attachment must not be empty")
+            attachment = store.create_attachment(
+                session.id,
+                file.filename or "attachment",
+                file.content_type,
+                data,
+            )
+            return attachment_to_dict(attachment)
+        finally:
+            await file.close()
+
+    @app.get("/api/v1/attachments/{attachment_id}")
+    async def get_attachment(attachment_id: str) -> dict[str, object]:
+        attachment = app.state.store.get_attachment(attachment_id)
+        ensure_session(app.state.store, app.state.workspace, attachment.session_id)
+        return attachment_to_dict(attachment)
+
+    @app.delete("/api/v1/attachments/{attachment_id}")
+    async def delete_attachment(attachment_id: str) -> dict[str, object]:
+        attachment = app.state.store.get_attachment(attachment_id)
+        _, session = ensure_session(app.state.store, app.state.workspace, attachment.session_id)
+        app.state.store.delete_attachment(attachment_id, session_id=session.id)
+        return {"deleted": True, "attachment_id": attachment_id}
+
     @app.post("/api/v1/runs")
     async def run(payload: RunRequest) -> StreamingResponse:
         store: LocalStore = app.state.store
@@ -334,6 +412,13 @@ def create_app(
         session = apply_first_task_title(store, session, payload.task)
         active_runs.assert_available(session.id)
         history = context_history_for_session(store, session)
+        attachment_ids = tuple(payload.attachment_ids)
+        user_message = message_with_attachments(
+            store, session.id, payload.task, attachment_ids
+        )
+        selected_tool_registry = plugin_registry_factory(
+            store, app.state.workspace, tuple(payload.plugin_ids)
+        )
         run_record = store.create_run(
             session.id,
             "coding",
@@ -356,8 +441,16 @@ def create_app(
             history_sources=history,
             context_sanitizer=store.redactor.text,
             data_dir=app.state.config.data_dir,
+            user_message=user_message,
+            tool_registry_factory=selected_tool_registry,
         )
-        store.add_message(session.id, "user", payload.task, run_id=run_record.id)
+        store.add_message(
+            session.id,
+            "user",
+            payload.task,
+            run_id=run_record.id,
+            attachment_ids=attachment_ids,
+        )
 
         async def ndjson_events() -> AsyncIterator[bytes]:
             last_sequence = -1
@@ -405,7 +498,13 @@ def create_app(
         _, session = ensure_session(store, app.state.workspace, payload.session_id)
         session = apply_first_task_title(store, session, task)
         run = store.create_run(session.id, "plan_draft", task, 8, permission_mode="inspect")
-        store.add_message(session.id, "user", task, run_id=run.id)
+        attachment_ids = tuple(payload.attachment_ids)
+        user_message = message_with_attachments(
+            store, session.id, plan_generation_task(task), attachment_ids
+        )
+        store.add_message(
+            session.id, "user", task, run_id=run.id, attachment_ids=attachment_ids
+        )
         history = context_history_for_session(store, session, exclude_run_id=run.id)
         generator = create_plan_generator(
             app.state.workspace,
@@ -416,6 +515,7 @@ def create_app(
             history_sources=history,
             context_sanitizer=store.redactor.text,
             data_dir=app.state.config.data_dir,
+            user_message=user_message,
         )
         generated: GeneratedPlan | None = None
         generation_events: list[RuntimeEvent] = []
@@ -467,7 +567,13 @@ def create_app(
         session = apply_first_task_title(store, session, task)
         active_runs.assert_available(session.id)
         run = store.create_run(session.id, "plan_draft", task, 8, permission_mode="inspect")
-        store.add_message(session.id, "user", task, run_id=run.id)
+        attachment_ids = tuple(payload.attachment_ids)
+        user_message = message_with_attachments(
+            store, session.id, plan_generation_task(task), attachment_ids
+        )
+        store.add_message(
+            session.id, "user", task, run_id=run.id, attachment_ids=attachment_ids
+        )
         history = context_history_for_session(store, session, exclude_run_id=run.id)
         generator = create_plan_generator(
             app.state.workspace,
@@ -478,6 +584,7 @@ def create_app(
             history_sources=history,
             context_sanitizer=store.redactor.text,
             data_dir=app.state.config.data_dir,
+            user_message=user_message,
         )
         active_runs.acquire(session.id, run.id)
 
@@ -613,7 +720,12 @@ def create_app(
         plan = app.state.store.update_plan_state(plan_id, PlanState.CANCELLED)
         return serialize_plan(plan)
 
-    async def execute_plan(plan_id: str, *, resume: bool = False) -> StreamingResponse:
+    async def execute_plan(
+        plan_id: str,
+        *,
+        resume: bool = False,
+        plugin_ids: tuple[str, ...] = (),
+    ) -> StreamingResponse:
         store: LocalStore = app.state.store
         plan = store.get_plan(plan_id)
         if resume:
@@ -623,6 +735,12 @@ def create_app(
             raise LeanHarnessError("Only an unconfirmed plan can be confirmed")
         session = store.get_session(plan.session_id)
         active_runs.assert_available(session.id)
+        selected_tool_registry = plugin_registry_factory(
+            store, app.state.workspace, plugin_ids
+        )
+        model = app.state.model_client_factory(
+            load_effective_model_config(app.state.config.data_dir)
+        )
         if resume and plan.run_id:
             run = store.get_run(plan.run_id)
             previous_permission = run.permission_mode
@@ -636,9 +754,6 @@ def create_app(
             store.attach_plan_run(plan.id, run.id)
         plan = store.get_plan(plan.id)
         active_runs.acquire(session.id, run.id)
-        model = app.state.model_client_factory(
-            load_effective_model_config(app.state.config.data_dir)
-        )
         existing_events = store.list_events(run.id)
         initial_sequence = (
             int(existing_events[-1].get("sequence", -1)) + 1 if existing_events else 0
@@ -680,6 +795,7 @@ def create_app(
                 store, session, exclude_run_id=run.id
             ),
             initial_metrics=RunMetrics.from_events(existing_events) if resume else None,
+            tool_registry_factory=selected_tool_registry,
         )
 
         async def events() -> AsyncIterator[bytes]:
@@ -753,12 +869,22 @@ def create_app(
         )
 
     @app.post("/api/v1/plans/{plan_id}/confirm")
-    async def confirm_plan(plan_id: str) -> StreamingResponse:
-        return await execute_plan(plan_id)
+    async def confirm_plan(
+        plan_id: str, payload: PluginSelectionRequest | None = None
+    ) -> StreamingResponse:
+        return await execute_plan(
+            plan_id, plugin_ids=tuple(payload.plugin_ids) if payload else ()
+        )
 
     @app.post("/api/v1/plans/{plan_id}/resume")
-    async def resume_plan(plan_id: str) -> StreamingResponse:
-        return await execute_plan(plan_id, resume=True)
+    async def resume_plan(
+        plan_id: str, payload: PluginSelectionRequest | None = None
+    ) -> StreamingResponse:
+        return await execute_plan(
+            plan_id,
+            resume=True,
+            plugin_ids=tuple(payload.plugin_ids) if payload else (),
+        )
 
     @app.post("/api/v1/plans/{plan_id}/cancel")
     async def cancel_plan(plan_id: str) -> dict[str, object]:

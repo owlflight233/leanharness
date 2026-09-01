@@ -22,11 +22,19 @@ export interface Plan {
   generation_trace?: Array<Record<string, unknown>>;
 }
 
-export async function createPlan(task: string, sessionId?: string): Promise<Plan> {
+export async function createPlan(
+  task: string,
+  sessionId?: string,
+  attachmentIds: string[] = [],
+): Promise<Plan> {
   const response = await fetch("/api/v1/plans", {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify({ task, ...(sessionId ? { session_id: sessionId } : {}) }),
+    body: JSON.stringify({
+      task,
+      ...(sessionId ? { session_id: sessionId } : {}),
+      ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
+    }),
   });
   if (!response.ok) throw new Error(await readError(response));
   return (await response.json()) as Plan;
@@ -37,11 +45,16 @@ export async function streamPlanCreation(
   onEvent: (event: Record<string, unknown>) => void,
   signal: AbortSignal,
   sessionId?: string,
+  attachmentIds: string[] = [],
 ): Promise<void> {
   const response = await fetch("/api/v1/plans/stream", {
     method: "POST",
     headers: { Accept: "application/x-ndjson", "Content-Type": "application/json" },
-    body: JSON.stringify({ task, ...(sessionId ? { session_id: sessionId } : {}) }),
+    body: JSON.stringify({
+      task,
+      ...(sessionId ? { session_id: sessionId } : {}),
+      ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
+    }),
     signal,
   });
   if (!response.ok) throw new Error(await readError(response));
@@ -97,10 +110,12 @@ export async function* streamPlanAction(
   id: string,
   action: "confirm" | "resume",
   signal: AbortSignal,
+  pluginIds: string[] = [],
 ): AsyncGenerator<Record<string, unknown>> {
   const response = await fetch(`/api/v1/plans/${encodeURIComponent(id)}/${action}`, {
     method: "POST",
-    headers: { Accept: "application/x-ndjson" },
+    headers: { Accept: "application/x-ndjson", "Content-Type": "application/json" },
+    body: JSON.stringify({ plugin_ids: pluginIds }),
     signal,
   });
   if (!response.ok) throw new Error(await readError(response));

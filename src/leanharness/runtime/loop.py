@@ -95,6 +95,7 @@ class CodingAgent:
         include_outcome_tool: bool = True,
         context_sanitizer: Callable[[str], str] | None = None,
         metrics: RunMetrics | None = None,
+        user_message: ModelMessage | None = None,
     ) -> None:
         if max_steps is not None and not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
             raise ValueError(f"max_steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}")
@@ -124,6 +125,9 @@ class CodingAgent:
         self.evidence = CompletionLedger()
         self.metrics = metrics or RunMetrics()
         self._protocol_recovery = ModelProtocolRecovery()
+        if user_message is not None and user_message.role != "user":
+            raise ValueError("Initial runtime message must have the user role")
+        self._initial_user_message = user_message
         self._failure_tracker = ToolFailureTracker(self.language)
         # Tools can become unavailable after a deterministic environment fact
         # (for example, git_inspect in a non-repository workspace).  The model
@@ -194,8 +198,11 @@ class CodingAgent:
                 )
             )
         self.context.append(
-            ModelMessage(role="user", content=validated_task)
+            self._initial_user_message
+            if initialize_context and self._initial_user_message is not None
+            else ModelMessage(role="user", content=validated_task)
         )
+        self._initial_user_message = None
         yield self._event(
             "run.started",
             summary=_run_started_summary(self.language),

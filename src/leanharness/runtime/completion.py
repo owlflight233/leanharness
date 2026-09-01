@@ -33,7 +33,11 @@ class CompletionLedger:
         return self.unresolved_errors[0] if self.unresolved_errors else None
 
     def record(self, tool: str, result: ToolResult) -> None:
-        if tool in {"workspace_mkdir", "workspace_patch", "workspace_write", "workspace_edit"}:
+        plugin_mutation = isinstance(result.public_metadata.get("plugin_id"), str)
+        if (
+            tool in {"workspace_mkdir", "workspace_patch", "workspace_write", "workspace_edit"}
+            or plugin_mutation
+        ):
             self.mutation_attempts += 1
         elif tool == "workspace_command":
             self.verification_attempts += 1
@@ -45,7 +49,7 @@ class CompletionLedger:
                 "workspace_patch",
                 "workspace_write",
                 "workspace_edit",
-            }:
+            } or plugin_mutation:
                 self.successful_mutations += 1
                 # Patch returns ``files`` while structured write/edit tools
                 # return a single ``path``. Normalize both into one audit
@@ -53,7 +57,7 @@ class CompletionLedger:
                 paths = result.public_metadata.get("files", [])
                 if tool == "workspace_mkdir":
                     paths = result.public_metadata.get("created_paths", [])
-                elif tool in {"workspace_write", "workspace_edit"}:
+                elif tool in {"workspace_write", "workspace_edit"} or plugin_mutation:
                     path = result.public_metadata.get("path")
                     paths = [path] if isinstance(path, str) else []
                 if isinstance(paths, list):

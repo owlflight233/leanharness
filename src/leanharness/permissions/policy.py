@@ -27,10 +27,15 @@ MUTATING_TOOLS = frozenset(
 )
 
 
-def authorize_tool(mode: PermissionMode, tool_name: str) -> PermissionDecision:
-    if tool_name in INSPECT_TOOLS:
+def authorize_tool(
+    mode: PermissionMode,
+    tool_name: str,
+    *,
+    mutation: bool | None = None,
+) -> PermissionDecision:
+    if mutation is False or tool_name in INSPECT_TOOLS:
         return PermissionDecision(allowed=True, code="TOOL_ALLOWED")
-    if tool_name in MUTATING_TOOLS:
+    if mutation is True or tool_name in MUTATING_TOOLS:
         if mode is PermissionMode.APPROVE:
             return PermissionDecision(
                 allowed=True, code="TOOL_APPROVAL_REQUIRED", requires_approval=True

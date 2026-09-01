@@ -8,7 +8,7 @@ from pathlib import Path
 from leanharness.application.model_gateway import ModelClientFactory
 from leanharness.application.model_settings import load_effective_model_config
 from leanharness.context import ContextSource
-from leanharness.models import ModelConfig, OpenAICompatibleClient, load_model_config
+from leanharness.models import ModelConfig, ModelMessage, OpenAICompatibleClient, load_model_config
 from leanharness.planning import Plan, PlanStep
 from leanharness.planning.generator import PlanGenerator
 
@@ -24,6 +24,7 @@ def create_plan_generator(
     context_sanitizer: Callable[[str], str] | None = None,
     model_config: ModelConfig | None = None,
     data_dir: str | Path | None = None,
+    user_message: ModelMessage | None = None,
 ) -> PlanGenerator:
     effective_config = model_config
     if effective_config is None:
@@ -40,6 +41,7 @@ def create_plan_generator(
         session_id=session_id,
         history_sources=history_sources,
         context_sanitizer=context_sanitizer,
+        user_message=user_message,
     )
 
 

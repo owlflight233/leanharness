@@ -18,6 +18,7 @@ from leanharness.runtime import (
     validate_run_task,
 )
 from leanharness.runtime.loop import MAX_MAX_STEPS, MIN_MAX_STEPS
+from leanharness.tools import ToolRegistry
 
 
 def create_coding_run(
@@ -37,6 +38,8 @@ def create_coding_run(
     context_sanitizer: Callable[[str], str] | None = None,
     model_config: ModelConfig | None = None,
     data_dir: str | Path | None = None,
+    user_message: ModelMessage | None = None,
+    tool_registry_factory: Callable[..., ToolRegistry] = ToolRegistry,
 ) -> CodingAgent:
     """Validate public input and create a bounded coding runtime."""
 
@@ -71,6 +74,8 @@ def create_coding_run(
         history=history,
         history_sources=history_sources,
         context_sanitizer=context_sanitizer,
+        user_message=user_message,
+        tool_registry_factory=tool_registry_factory,
     )
 
 

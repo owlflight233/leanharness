@@ -2,9 +2,11 @@
 
 from leanharness.storage.records import (
     ApprovalRecord,
+    AttachmentRecord,
     MessageRecord,
     PlanRecord,
     PlanStepRecord,
+    PluginRecord,
     ProjectRecord,
     RunRecord,
     SessionRecord,
@@ -17,10 +19,12 @@ from leanharness.storage.store import (
 
 __all__ = [
     "ApprovalRecord",
+    "AttachmentRecord",
     "LocalStore",
     "MessageRecord",
     "PlanRecord",
     "PlanStepRecord",
+    "PluginRecord",
     "ProjectRecord",
     "RunRecord",
     "SessionRecord",

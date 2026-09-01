@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import AsyncIterator
 from typing import Any
@@ -326,7 +327,26 @@ def _optional_token_count(value: object) -> int | None:
 
 
 def _serialize_message(message: ModelMessage) -> dict[str, object]:
-    payload: dict[str, object] = {"role": message.role, "content": message.content}
+    content: object = message.content
+    if message.images:
+        if message.role != "user":
+            raise ModelProtocolError("Only user messages may contain images")
+        content = [
+            {"type": "text", "text": message.content},
+            *(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": (
+                            f"data:{image.media_type};base64,"
+                            + base64.b64encode(image.data).decode("ascii")
+                        )
+                    },
+                }
+                for image in message.images
+            ),
+        ]
+    payload: dict[str, object] = {"role": message.role, "content": content}
     if message.role == "assistant" and message.tool_calls:
         payload["tool_calls"] = [
             {

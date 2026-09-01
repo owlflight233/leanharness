@@ -14,6 +14,7 @@ from leanharness.errors import (
     ModelUnavailableError,
 )
 from leanharness.models import (
+    ImageContent,
     ModelConfig,
     ModelMessage,
     ModelRequest,
@@ -87,6 +88,52 @@ def test_complete_sends_safe_openai_compatible_request() -> None:
             "max_tokens": 16,
         },
     }
+
+
+def test_complete_serializes_user_images_without_exposing_bytes_in_metadata() -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "seen"}}]})
+
+    raw = b"private-image-bytes"
+    client = OpenAICompatibleClient(config(), transport=httpx.MockTransport(handler))
+    run(
+        client.complete(
+            ModelRequest(
+                messages=(
+                    ModelMessage(
+                        role="user",
+                        content="分析截图",
+                        images=(ImageContent("image/png", raw),),
+                    ),
+                ),
+            )
+        )
+    )
+
+    content = captured["messages"][0]["content"]  # type: ignore[index]
+    assert content[0] == {"type": "text", "text": "分析截图"}
+    assert content[1]["type"] == "image_url"
+    assert "private-image-bytes" not in json.dumps(captured)
+
+
+def test_non_user_image_message_is_rejected() -> None:
+    with pytest.raises(ModelProtocolError):
+        run(
+            OpenAICompatibleClient(config()).complete(
+                ModelRequest(
+                    messages=(
+                        ModelMessage(
+                            role="system",
+                            content="bad",
+                            images=(ImageContent("image/png", b"x"),),
+                        ),
+                    )
+                )
+            )
+        )
 
 
 def test_complete_sends_optional_thinking_fields_when_configured() -> None:

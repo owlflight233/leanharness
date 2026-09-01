@@ -93,12 +93,12 @@ def test_plan_storage_crud_version_and_step_state(tmp_path: Path) -> None:
         )
 
 
-def test_plan_migration_is_version_three(tmp_path: Path) -> None:
+def test_plan_migration_includes_attachment_schema(tmp_path: Path) -> None:
     store = LocalStore(tmp_path / "data")
     versions = store.connection.execute(
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
-    assert [row["version"] for row in versions] == [1, 2, 3, 4]
+    assert [row["version"] for row in versions] == [1, 2, 3, 4, 5, 6]
 
 
 def test_plan_message_is_persisted_and_injected_into_chat_history(tmp_path: Path) -> None:

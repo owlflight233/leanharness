@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 
 def apply_migrations(connection: sqlite3.Connection) -> None:
@@ -86,5 +86,46 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
                 ALTER TABLE messages ADD COLUMN plan_id TEXT REFERENCES plans(id) ON DELETE SET NULL;
                 CREATE INDEX messages_plan ON messages(plan_id, sequence);
                 INSERT INTO schema_migrations(version, applied_at) VALUES(4, CURRENT_TIMESTAMP);
+                """
+            )
+        if current < 5:
+            connection.executescript(
+                """
+                CREATE TABLE attachments(
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    message_id TEXT REFERENCES messages(id) ON DELETE CASCADE,
+                    filename TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    byte_size INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    storage_path TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX attachments_session ON attachments(session_id, created_at);
+                CREATE INDEX attachments_message ON attachments(message_id);
+                INSERT INTO schema_migrations(version, applied_at) VALUES(5, CURRENT_TIMESTAMP);
+                """
+            )
+        if current < 6:
+            connection.executescript(
+                """
+                CREATE TABLE plugins(
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    protocol_version TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    install_path TEXT NOT NULL UNIQUE,
+                    entrypoint_json TEXT NOT NULL,
+                    tools_json TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    installed_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX plugins_enabled ON plugins(enabled, id);
+                INSERT INTO schema_migrations(version, applied_at) VALUES(6, CURRENT_TIMESTAMP);
                 """
             )

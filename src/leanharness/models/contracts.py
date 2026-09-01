@@ -16,6 +16,14 @@ type EventType = Literal[
 
 
 @dataclass(frozen=True, slots=True)
+class ImageContent:
+    """One in-memory image supplied to a multimodal model request."""
+
+    media_type: Literal["image/png", "image/jpeg", "image/webp"]
+    data: bytes = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class ToolDefinition:
     """Provider-independent description of a callable local capability."""
 
@@ -40,6 +48,7 @@ class ToolCall:
 class ModelMessage:
     role: MessageRole
     content: str
+    images: tuple[ImageContent, ...] = ()
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
 

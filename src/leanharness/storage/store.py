@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -12,11 +13,14 @@ import shutil
 import sqlite3
 import threading
 import uuid
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from leanharness.errors import (
+    AttachmentError,
+    AttachmentNotFoundError,
     InvalidPermissionError,
     PlanConflictError,
     PlanNotFoundError,
@@ -25,10 +29,18 @@ from leanharness.errors import (
     StorageError,
 )
 from leanharness.planning.contracts import Plan, PlanState, PlanStep, PlanStepState
+from leanharness.plugins.contracts import PluginManifest
+from leanharness.storage.attachments import (
+    MAX_ATTACHMENTS_PER_MESSAGE,
+    MAX_ATTACHMENTS_TOTAL_BYTES,
+    validate_attachment,
+)
 from leanharness.storage.migrations import apply_migrations
 from leanharness.storage.records import (
     ApprovalRecord,
+    AttachmentRecord,
     MessageRecord,
+    PluginRecord,
     ProjectRecord,
     RunRecord,
     SessionRecord,
@@ -65,6 +77,7 @@ class LocalStore:
     ) -> None:
         self.data_dir = (data_dir or default_data_dir()).expanduser().resolve()
         self.trace_dir = self.data_dir / "traces"
+        self.attachment_dir = self.data_dir / "attachments"
         self.db_path = self.data_dir / "leanharness.sqlite3"
         self.redactor = redactor or TraceRedactor.from_environment()
         self._connection: sqlite3.Connection | None = None
@@ -82,6 +95,7 @@ class LocalStore:
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             self.trace_dir.mkdir(parents=True, exist_ok=True)
+            self.attachment_dir.mkdir(parents=True, exist_ok=True)
             connection = sqlite3.connect(self.db_path, timeout=10)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
@@ -223,8 +237,19 @@ class LocalStore:
 
     def delete_session(self, session_id: str) -> None:
         session = self.get_session(session_id)
+        attachment_paths = [
+            self._safe_attachment_path(row["storage_path"])
+            for row in self.connection.execute(
+                "SELECT storage_path FROM attachments WHERE session_id=?", (session_id,)
+            ).fetchall()
+        ]
         with self.connection:
             self.connection.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        for path in attachment_paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                raise StorageError("Attachment file could not be deleted") from exc
         trace_session_dir = self.trace_dir / session.project_id / session_id
         try:
             if trace_session_dir.exists():
@@ -242,37 +267,258 @@ class LocalStore:
         run_id: str | None = None,
         kind: str = "chat",
         plan_id: str | None = None,
+        attachment_ids: tuple[str, ...] = (),
     ) -> MessageRecord:
         self.get_session(session_id)
         safe_content = self.redactor.text(content)
         message_id = str(uuid.uuid4())
         created_at = utc_now()
-        row = self.connection.execute(
-            """INSERT INTO messages(id, session_id, sequence, role, content, status, created_at, run_id, kind, plan_id)
-               SELECT ?, ?, COALESCE(MAX(sequence), -1) + 1, ?, ?, ?, ?, ?, ?, ?
-               FROM messages WHERE session_id=? RETURNING sequence""",
-            (
-                message_id,
-                session_id,
-                role,
-                safe_content,
-                status,
-                created_at,
-                run_id,
-                kind,
-                plan_id,
-                session_id,
-            ),
-        ).fetchone()
-        sequence = int(row["sequence"])
+        with self.connection:
+            row = self.connection.execute(
+                """INSERT INTO messages(id, session_id, sequence, role, content, status, created_at, run_id, kind, plan_id)
+                   SELECT ?, ?, COALESCE(MAX(sequence), -1) + 1, ?, ?, ?, ?, ?, ?, ?
+                   FROM messages WHERE session_id=? RETURNING sequence""",
+                (
+                    message_id,
+                    session_id,
+                    role,
+                    safe_content,
+                    status,
+                    created_at,
+                    run_id,
+                    kind,
+                    plan_id,
+                    session_id,
+                ),
+            ).fetchone()
+            sequence = int(row["sequence"])
+            if attachment_ids:
+                self._bind_attachments(session_id, attachment_ids, message_id)
+            self.connection.execute(
+                "UPDATE sessions SET updated_at=? WHERE id=?", (created_at, session_id)
+            )
         message = MessageRecord(
             message_id, session_id, sequence, role, safe_content, status, created_at, run_id, kind, plan_id
         )
+        return message
+
+    def create_attachment(
+        self,
+        session_id: str,
+        filename: str,
+        media_type: str | None,
+        data: bytes,
+    ) -> AttachmentRecord:
+        self.get_session(session_id)
+        safe_name, kind, canonical_type = validate_attachment(filename, media_type, data)
+        attachment_id = str(uuid.uuid4())
+        relative = Path("attachments") / f"{attachment_id}.bin"
+        path = self.data_dir / relative
+        digest = hashlib.sha256(data).hexdigest()
+        now = utc_now()
+        try:
+            path.write_bytes(data)
+            with self.connection:
+                self.connection.execute(
+                    "INSERT INTO attachments(id, session_id, message_id, filename, media_type, kind, byte_size, sha256, storage_path, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        attachment_id,
+                        session_id,
+                        None,
+                        safe_name,
+                        canonical_type,
+                        kind,
+                        len(data),
+                        digest,
+                        str(path),
+                        now,
+                    ),
+                )
+        except (OSError, sqlite3.Error) as exc:
+            with suppress(OSError):
+                path.unlink(missing_ok=True)
+            raise StorageError("Attachment could not be stored") from exc
+        return AttachmentRecord(
+            attachment_id,
+            session_id,
+            None,
+            safe_name,
+            canonical_type,
+            kind,
+            len(data),
+            digest,
+            str(path),
+            now,
+        )
+
+    def get_attachment(self, attachment_id: str) -> AttachmentRecord:
+        row = self.connection.execute(
+            "SELECT * FROM attachments WHERE id=?", (attachment_id,)
+        ).fetchone()
+        if row is None:
+            raise AttachmentNotFoundError("Attachment was not found")
+        return self._attachment_row(row)
+
+    def list_attachments(
+        self, session_id: str, *, message_id: str | None = None
+    ) -> list[AttachmentRecord]:
+        self.get_session(session_id)
+        if message_id is None:
+            rows = self.connection.execute(
+                "SELECT * FROM attachments WHERE session_id=? ORDER BY created_at",
+                (session_id,),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM attachments WHERE session_id=? AND message_id=? ORDER BY created_at",
+                (session_id, message_id),
+            ).fetchall()
+        return [self._attachment_row(row) for row in rows]
+
+    def read_attachment(self, attachment_id: str, *, session_id: str | None = None) -> bytes:
+        attachment = self.get_attachment(attachment_id)
+        if session_id is not None and attachment.session_id != session_id:
+            raise AttachmentError("Attachment does not belong to this session")
+        path = self._safe_attachment_path(attachment.storage_path)
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise StorageError("Attachment file could not be read") from exc
+        if hashlib.sha256(data).hexdigest() != attachment.sha256:
+            raise StorageError("Attachment file integrity check failed")
+        return data
+
+    def delete_attachment(self, attachment_id: str, *, session_id: str | None = None) -> None:
+        attachment = self.get_attachment(attachment_id)
+        if session_id is not None and attachment.session_id != session_id:
+            raise AttachmentError("Attachment does not belong to this session")
+        with self.connection:
+            self.connection.execute("DELETE FROM attachments WHERE id=?", (attachment_id,))
+        try:
+            self._safe_attachment_path(attachment.storage_path).unlink(missing_ok=True)
+        except OSError as exc:
+            raise StorageError("Attachment file could not be deleted") from exc
+
+    def _bind_attachments(
+        self, session_id: str, attachment_ids: tuple[str, ...], message_id: str
+    ) -> None:
+        if len(attachment_ids) > MAX_ATTACHMENTS_PER_MESSAGE:
+            raise AttachmentError("A message may contain at most 8 attachments")
+        unique = tuple(dict.fromkeys(attachment_ids))
+        if len(unique) != len(attachment_ids):
+            raise AttachmentError("Attachment IDs must be unique")
+        placeholders = ",".join("?" for _ in unique)
+        rows = self.connection.execute(
+            f"SELECT * FROM attachments WHERE id IN ({placeholders})", unique
+        ).fetchall()
+        if len(rows) != len(unique) or any(row["session_id"] != session_id for row in rows):
+            raise AttachmentError("Attachment does not belong to this session")
+        if any(row["message_id"] is not None for row in rows):
+            raise AttachmentError("Attachment is already bound to a message")
+        if sum(int(row["byte_size"]) for row in rows) > MAX_ATTACHMENTS_TOTAL_BYTES:
+            raise AttachmentError("Message attachments exceed 20 MiB")
+        self.connection.executemany(
+            "UPDATE attachments SET message_id=? WHERE id=?",
+            ((message_id, attachment_id) for attachment_id in unique),
+        )
+
+    @staticmethod
+    def _attachment_row(row: sqlite3.Row) -> AttachmentRecord:
+        return AttachmentRecord(
+            row["id"],
+            row["session_id"],
+            row["message_id"],
+            row["filename"],
+            row["media_type"],
+            row["kind"],
+            row["byte_size"],
+            row["sha256"],
+            row["storage_path"],
+            row["created_at"],
+        )
+
+    def _safe_attachment_path(self, value: object) -> Path:
+        if not isinstance(value, str) or not value:
+            raise StorageError("Attachment storage path is invalid")
+        path = Path(value).resolve()
+        if not path.is_relative_to(self.attachment_dir.resolve()):
+            raise StorageError("Attachment storage path is invalid")
+        return path
+
+    def list_plugins(self) -> list[PluginRecord]:
+        rows = self.connection.execute(
+            "SELECT * FROM plugins ORDER BY installed_at ASC, id ASC"
+        ).fetchall()
+        return [self._plugin_row(row) for row in rows]
+
+    def get_plugin(self, plugin_id: str) -> PluginRecord:
+        row = self.connection.execute("SELECT * FROM plugins WHERE id=?", (plugin_id,)).fetchone()
+        if row is None:
+            from leanharness.errors import PluginNotFoundError
+
+            raise PluginNotFoundError("Plugin was not found")
+        return self._plugin_row(row)
+
+    def save_plugin(
+        self, manifest: PluginManifest, *, source_path: Path, install_path: Path
+    ) -> PluginRecord:
+        from leanharness.errors import PluginError
+
+        now = utc_now()
+        record = (
+            manifest.id,
+            manifest.name,
+            manifest.version,
+            self.redactor.text(manifest.description),
+            manifest.protocol_version,
+            str(source_path.resolve()),
+            str(install_path.resolve()),
+            json.dumps(manifest.entrypoint, ensure_ascii=False),
+            json.dumps([tool.to_dict() for tool in manifest.tools], ensure_ascii=False),
+            0,
+            now,
+            now,
+        )
+        try:
+            with self.connection:
+                self.connection.execute(
+                    "INSERT INTO plugins(id,name,version,description,protocol_version,source_path,install_path,entrypoint_json,tools_json,enabled,installed_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET name=excluded.name,version=excluded.version,description=excluded.description,protocol_version=excluded.protocol_version,source_path=excluded.source_path,install_path=excluded.install_path,entrypoint_json=excluded.entrypoint_json,tools_json=excluded.tools_json,updated_at=excluded.updated_at",
+                    record,
+                )
+        except sqlite3.Error as exc:
+            raise PluginError("Plugin record could not be saved") from exc
+        return self.get_plugin(manifest.id)
+
+    def set_plugin_enabled(self, plugin_id: str, enabled: bool) -> PluginRecord:
+        self.get_plugin(plugin_id)
         with self.connection:
             self.connection.execute(
-                "UPDATE sessions SET updated_at=? WHERE id=?", (message.created_at, session_id)
+                "UPDATE plugins SET enabled=?, updated_at=? WHERE id=?",
+                (int(enabled), utc_now(), plugin_id),
             )
-        return message
+        return self.get_plugin(plugin_id)
+
+    def delete_plugin(self, plugin_id: str) -> None:
+        plugin = self.get_plugin(plugin_id)
+        with self.connection:
+            self.connection.execute("DELETE FROM plugins WHERE id=?", (plugin_id,))
+        try:
+            shutil.rmtree(plugin.install_path, ignore_errors=False)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise StorageError("Plugin files could not be removed") from exc
+
+    @staticmethod
+    def _plugin_row(row: sqlite3.Row) -> PluginRecord:
+        tools = json.loads(row["tools_json"])
+        return PluginRecord(
+            row["id"], row["name"], row["version"], row["description"],
+            row["protocol_version"], row["source_path"], row["install_path"],
+            tuple(json.loads(row["entrypoint_json"])), tuple(tools), bool(row["enabled"]),
+            row["installed_at"], row["updated_at"],
+        )
 
     def list_messages(self, session_id: str) -> list[MessageRecord]:
         self.get_session(session_id)

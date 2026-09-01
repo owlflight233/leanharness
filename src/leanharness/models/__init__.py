@@ -8,6 +8,7 @@ from leanharness.models.config import (
     load_model_config,
 )
 from leanharness.models.contracts import (
+    ImageContent,
     ModelEvent,
     ModelMessage,
     ModelRequest,
@@ -20,6 +21,7 @@ from leanharness.models.openai_compatible import OpenAICompatibleClient
 
 __all__ = [
     "MODEL_PROTOCOL",
+    "ImageContent",
     "ModelConfig",
     "ModelConfigStatus",
     "ModelEvent",

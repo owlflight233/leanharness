@@ -678,6 +678,14 @@ def _messages_digest(messages: Sequence[ModelMessage]) -> str:
         {
             "role": message.role,
             "content": message.content,
+            "images": [
+                {
+                    "media_type": image.media_type,
+                    "sha256": hashlib.sha256(image.data).hexdigest(),
+                    "byte_size": len(image.data),
+                }
+                for image in message.images
+            ],
             "tool_calls": [call.to_dict() for call in message.tool_calls],
             "tool_call_id": message.tool_call_id,
         }

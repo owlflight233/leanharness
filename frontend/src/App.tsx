@@ -2,11 +2,15 @@ import {
   Activity,
   Blocks,
   Bot,
+  FileCode2,
   FolderGit2,
+  Image as ImageIcon,
+  LoaderCircle,
   Menu,
   PanelRight,
   Pencil,
   Plus,
+  RotateCcw,
   Send,
   Settings,
   Square,
@@ -18,6 +22,12 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import { fetchHealth, type HealthLoader, type HealthResponse } from "./api/health";
+import {
+  deleteAttachment,
+  uploadAttachment,
+  type Attachment,
+} from "./api/attachments";
+import { fetchPlugins, type PluginSummary } from "./api/plugins";
 import {
   fetchModelStatus,
   type ModelStatus,
@@ -39,6 +49,7 @@ import {
   fetchSessions,
   updateSession,
   type PermissionMode,
+  type MessageAttachment,
   type SessionDetail,
   type SessionSummary,
 } from "./api/sessions";
@@ -71,6 +82,20 @@ interface ConversationMessage {
   status: MessageStatus;
   runId?: string;
   plan?: Plan;
+  attachments?: AttachmentView[];
+}
+
+interface AttachmentView extends MessageAttachment {
+  previewUrl?: string;
+}
+
+interface PendingAttachment {
+  localId: string;
+  file: File;
+  status: "uploading" | "ready" | "error";
+  attachment?: Attachment;
+  previewUrl?: string;
+  error?: string;
 }
 
 interface AppProps {
@@ -81,6 +106,13 @@ interface AppProps {
   userInputResolver?: UserInputResolver;
   sessionClient?: SessionClient;
   workspaceClient?: WorkspaceClient;
+  attachmentClient?: AttachmentClient;
+  pluginLoader?: (signal?: AbortSignal) => Promise<PluginSummary[]>;
+}
+
+export interface AttachmentClient {
+  upload(sessionId: string, file: File, signal?: AbortSignal): Promise<Attachment>;
+  delete(id: string): Promise<void>;
 }
 
 export interface SessionClient {
@@ -100,6 +132,11 @@ const defaultSessionClient: SessionClient = {
   create: createSession,
   update: updateSession,
   delete: deleteSession,
+};
+
+const defaultAttachmentClient: AttachmentClient = {
+  upload: uploadAttachment,
+  delete: deleteAttachment,
 };
 
 interface SavedRunTrace {
@@ -145,6 +182,8 @@ function App({
   userInputResolver = resolveRunInput,
   sessionClient = defaultSessionClient,
   workspaceClient = { select: selectWorkspace, create: createWorkspace },
+  attachmentClient = defaultAttachmentClient,
+  pluginLoader = fetchPlugins,
 }: AppProps) {
   const runStreamer = providedRunStreamer ?? streamRun;
   const [leftOpen, setLeftOpen] = useState(false);
@@ -173,9 +212,18 @@ function App({
   const [plan, setPlan] = useState<Plan | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [plugins, setPlugins] = useState<PluginSummary[]>([]);
+  const [selectedPluginIds, setSelectedPluginIds] = useState<string[]>([]);
+  const [pluginError, setPluginError] = useState<string | null>(null);
   const nextMessageId = useRef(1);
+  const nextAttachmentId = useRef(1);
   const activeRequest = useRef<AbortController | null>(null);
   const sessionSelection = useRef(0);
+  const imageInput = useRef<HTMLInputElement | null>(null);
+  const textInput = useRef<HTMLInputElement | null>(null);
+  const objectUrls = useRef(new Set<string>());
 
   function projectSessionKey(projectId: string | undefined): string {
     return projectId ? `leanharness.session.${projectId}` : "leanharness.session";
@@ -205,7 +253,26 @@ function App({
     return () => controller.abort();
   }, [modelStatusLoader]);
 
-  useEffect(() => () => activeRequest.current?.abort(), []);
+  useEffect(() => {
+    const controller = new AbortController();
+    pluginLoader(controller.signal)
+      .then((items) => {
+        setPlugins(items);
+        setSelectedPluginIds((current) =>
+          current.filter((id) => items.some((item) => item.id === id && item.enabled)),
+        );
+        setPluginError(null);
+      })
+      .catch((error: unknown) => {
+        if (!isAbortError(error)) setPluginError(errorMessage(error));
+      });
+    return () => controller.abort();
+  }, [pluginLoader]);
+
+  useEffect(() => () => {
+    activeRequest.current?.abort();
+    for (const url of objectUrls.current) URL.revokeObjectURL(url);
+  }, []);
 
   useEffect(() => {
     if (health.status !== "ready") return;
@@ -270,6 +337,7 @@ function App({
     modelStatus.data.configured &&
     !isStreaming &&
     !planLoading &&
+    !pendingAttachments.some((attachment) => attachment.status !== "ready") &&
     input.trim().length > 0 &&
     input.length <= 32_000;
   const runPermissionMode = latestRunPermission(trace) ?? restoredRunPermission;
@@ -278,11 +346,28 @@ function App({
     if (!canSubmit) return;
     const message = input;
     const userId = nextMessageId.current++;
+    const submittedAttachments = pendingAttachments;
+    const attachmentIds = submittedAttachments.flatMap((item) =>
+      item.attachment ? [item.attachment.id] : [],
+    );
+    const messageAttachments = submittedAttachments.flatMap((item) =>
+      item.attachment
+        ? [{ ...item.attachment, previewUrl: item.previewUrl }]
+        : [],
+    );
+    setPendingAttachments([]);
+    setAttachmentError(null);
     if (mode === "plan") {
       setInput("");
       setMessages((current) => [
         ...current,
-        { id: userId, role: "user", content: message, status: "complete" },
+        {
+          id: userId,
+          role: "user",
+          content: message,
+          status: "complete",
+          attachments: messageAttachments,
+        },
       ]);
       setInspectorTab("trace");
       const activeSessionId = sessionId;
@@ -292,10 +377,12 @@ function App({
       setActiveRunId(null);
       setIsStreaming(true);
       setPlanLoading(true);
+      let requestStarted = false;
       try {
         await streamPlanCreation(
           message.trim(),
           (event) => {
+            requestStarted = true;
             setTrace((current) => [...current, event as unknown as TraceEvent]);
             if (typeof event.run_id === "string") {
               const runId = event.run_id;
@@ -319,8 +406,10 @@ function App({
           },
           controller.signal,
           activeSessionId ?? undefined,
+          attachmentIds,
         );
       } catch (error: unknown) {
+        if (!requestStarted) setPendingAttachments(submittedAttachments);
         setSessionError(errorMessage(error));
       } finally {
         if (activeRequest.current === controller) activeRequest.current = null;
@@ -338,7 +427,13 @@ function App({
     setMessages((current) => {
       const next: ConversationMessage[] = [
         ...current,
-        { id: userId, role: "user", content: message, status: "complete" },
+        {
+          id: userId,
+          role: "user",
+          content: message,
+          status: "complete",
+          attachments: messageAttachments,
+        },
       ];
       return next;
     });
@@ -346,11 +441,13 @@ function App({
     setActiveRunId(null);
     setInspectorTab("trace");
     setIsStreaming(true);
+    let requestStarted = false;
 
     try {
       await runStreamer(
           message,
           (event) => {
+            requestStarted = true;
             setTrace((current) => [...current, event]);
             setActiveRunId(event.run_id);
             updateMessage(userId, (current) => ({ ...current, runId: event.run_id }));
@@ -415,8 +512,11 @@ function App({
           controller.signal,
           24,
           activeSessionId ?? undefined,
+          attachmentIds,
+          selectedPluginIds,
       );
     } catch (error: unknown) {
+      if (!requestStarted) setPendingAttachments(submittedAttachments);
       const content = isAbortError(error) ? "已停止运行" : errorMessage(error);
       appendMessage("assistant", content, isAbortError(error) ? "cancelled" : "error");
     } finally {
@@ -447,13 +547,149 @@ function App({
     setComposerMenuOpen(false);
   }
 
+  function togglePlugin(pluginId: string) {
+    if (isStreaming) return;
+    setSelectedPluginIds((current) =>
+      current.includes(pluginId)
+        ? current.filter((id) => id !== pluginId)
+        : [...current, pluginId],
+    );
+  }
+
+  async function ensureAttachmentSession(): Promise<string> {
+    if (sessionId) return sessionId;
+    const created = await sessionClient.create(permissionMode);
+    setSessions((current) => [created, ...current]);
+    setSessionId(created.id);
+    setPermissionMode(created.permission_mode);
+    window.localStorage.setItem(projectSessionKey(currentProjectId()), created.id);
+    return created.id;
+  }
+
+  async function queueAttachments(files: FileList | null) {
+    if (!files?.length || isStreaming) return;
+    const incoming = Array.from(files);
+    if (pendingAttachments.length + incoming.length > 8) {
+      setAttachmentError("每条消息最多添加 8 个附件");
+      return;
+    }
+    const totalBytes = [
+      ...pendingAttachments.map((item) => item.file.size),
+      ...incoming.map((file) => file.size),
+    ].reduce((total, size) => total + size, 0);
+    if (totalBytes > 20 * 1024 * 1024) {
+      setAttachmentError("每条消息的附件总量不能超过 20 MiB");
+      return;
+    }
+    const queued = incoming.map((file): PendingAttachment => {
+      const previewUrl = file.type.startsWith("image/") && "createObjectURL" in URL
+        ? URL.createObjectURL(file)
+        : undefined;
+      if (previewUrl) objectUrls.current.add(previewUrl);
+      return {
+        localId: `attachment-${nextAttachmentId.current++}`,
+        file,
+        status: "uploading",
+        previewUrl,
+      };
+    });
+    setPendingAttachments((current) => [...current, ...queued]);
+    setAttachmentError(null);
+    let targetSession: string;
+    try {
+      targetSession = await ensureAttachmentSession();
+    } catch (error: unknown) {
+      const message = errorMessage(error);
+      setPendingAttachments((current) => current.map((item) =>
+        queued.some((queuedItem) => queuedItem.localId === item.localId)
+          ? { ...item, status: "error", error: message }
+          : item,
+      ));
+      setAttachmentError(message);
+      return;
+    }
+    await Promise.all(queued.map((item) => uploadQueuedAttachment(item, targetSession)));
+  }
+
+  async function uploadQueuedAttachment(item: PendingAttachment, targetSession: string) {
+    try {
+      const attachment = await attachmentClient.upload(targetSession, item.file);
+      setPendingAttachments((current) => current.map((candidate) =>
+        candidate.localId === item.localId
+          ? { ...candidate, status: "ready", attachment, error: undefined }
+          : candidate,
+      ));
+    } catch (error: unknown) {
+      const message = errorMessage(error);
+      setPendingAttachments((current) => current.map((candidate) =>
+        candidate.localId === item.localId
+          ? { ...candidate, status: "error", error: message }
+          : candidate,
+      ));
+      setAttachmentError(message);
+    }
+  }
+
+  async function retryAttachment(item: PendingAttachment) {
+    if (item.status !== "error") return;
+    setPendingAttachments((current) => current.map((candidate) =>
+      candidate.localId === item.localId
+        ? { ...candidate, status: "uploading", error: undefined }
+        : candidate,
+    ));
+    setAttachmentError(null);
+    try {
+      await uploadQueuedAttachment(item, await ensureAttachmentSession());
+    } catch (error: unknown) {
+      setAttachmentError(errorMessage(error));
+    }
+  }
+
+  async function removePendingAttachment(item: PendingAttachment) {
+    try {
+      if (item.attachment) await attachmentClient.delete(item.attachment.id);
+      if (item.previewUrl) {
+        URL.revokeObjectURL(item.previewUrl);
+        objectUrls.current.delete(item.previewUrl);
+      }
+      setPendingAttachments((current) =>
+        current.filter((candidate) => candidate.localId !== item.localId),
+      );
+      setAttachmentError(null);
+    } catch (error: unknown) {
+      setAttachmentError(errorMessage(error));
+    }
+  }
+
+  async function discardPendingAttachments() {
+    const current = pendingAttachments;
+    for (const item of current) {
+      if (item.attachment) await attachmentClient.delete(item.attachment.id);
+      if (item.previewUrl) {
+        URL.revokeObjectURL(item.previewUrl);
+        objectUrls.current.delete(item.previewUrl);
+      }
+    }
+    setPendingAttachments([]);
+    setAttachmentError(null);
+  }
+
   async function selectSession(id: string, projectId = currentProjectId()) {
     if (isStreaming) return;
+    if (id !== sessionId && pendingAttachments.length) {
+      try {
+        await discardPendingAttachments();
+      } catch (error: unknown) {
+        setAttachmentError(errorMessage(error));
+        return;
+      }
+    }
     const requestId = ++sessionSelection.current;
     try {
       const detail = await sessionClient.get(id);
       if (requestId !== sessionSelection.current) return;
       setSessionId(id);
+      if (id !== sessionId) setSelectedPluginIds([]);
       setPermissionMode(detail.session.permission_mode);
       setMessages(
         detail.messages.map((message, index) => ({
@@ -465,6 +701,7 @@ function App({
           plan: message.plan_id
             ? detail.plans?.find((item) => item.id === message.plan_id)
             : undefined,
+          attachments: message.attachments ?? [],
         })),
       );
       setPlan(
@@ -504,6 +741,7 @@ function App({
     const nextPath = window.prompt("输入工作区目录", health.data.workspace);
     if (!nextPath || nextPath.trim() === health.data.workspace) return;
     try {
+      await discardPendingAttachments();
       sessionSelection.current += 1;
       await workspaceClient.select(nextPath.trim());
       setHealth({ status: "loading" });
@@ -515,6 +753,7 @@ function App({
       setPlan(null);
       setSessionId(null);
       setSessions([]);
+      setSelectedPluginIds([]);
     } catch (error: unknown) {
       setSessionError(errorMessage(error));
     }
@@ -523,6 +762,7 @@ function App({
   async function selectProject(project: ProjectSummary) {
     if (isStreaming || health.status !== "ready" || project.root_path === health.data.workspace) return;
     try {
+      await discardPendingAttachments();
       sessionSelection.current += 1;
       await workspaceClient.select(project.root_path);
       setHealth({ status: "loading" });
@@ -534,6 +774,7 @@ function App({
       setPlan(null);
       setSessionId(null);
       setSessions([]);
+      setSelectedPluginIds([]);
     } catch (error: unknown) {
       setSessionError(errorMessage(error));
     }
@@ -544,6 +785,7 @@ function App({
     const nextPath = window.prompt("输入新项目目录", `${health.data.workspace}\\新项目`);
     if (!nextPath?.trim()) return;
     try {
+      await discardPendingAttachments();
       sessionSelection.current += 1;
       const created = await (workspaceClient.create ?? createWorkspace)(nextPath.trim());
       setHealth({ status: "loading" });
@@ -555,6 +797,7 @@ function App({
       setPlan(null);
       setSessionId(null);
       setSessions([]);
+      setSelectedPluginIds([]);
     } catch (error: unknown) {
       setSessionError(errorMessage(error));
     }
@@ -563,8 +806,10 @@ function App({
   async function handleNewSession() {
     if (isStreaming) return;
     try {
+      await discardPendingAttachments();
       const created = await sessionClient.create(permissionMode);
       setSessions((current) => [created, ...current]);
+      setSelectedPluginIds([]);
       await selectSession(created.id);
     } catch (error: unknown) {
       setSessionError(errorMessage(error));
@@ -674,7 +919,12 @@ function App({
     setIsStreaming(true);
     setInspectorTab("trace");
     try {
-      for await (const event of streamPlanAction(targetPlan.id, action, controller.signal)) {
+      for await (const event of streamPlanAction(
+        targetPlan.id,
+        action,
+        controller.signal,
+        selectedPluginIds,
+      )) {
         setTrace((current) => [...current, event as unknown as TraceEvent]);
         if (typeof event.run_id === "string") {
           setActiveRunId(event.run_id);
@@ -850,6 +1100,20 @@ function App({
                         />
                       ) : message.content ? (message.role === "assistant" ? <Markdown content={message.content} /> : message.content) : "正在生成..."}
                     </div>
+                    {message.attachments && message.attachments.length > 0 && (
+                      <div className="message-attachments" aria-label="消息附件">
+                        {message.attachments.map((attachment) => (
+                          <div className="message-attachment" key={attachment.id}>
+                            {attachment.kind === "image" && attachment.previewUrl
+                              ? <img src={attachment.previewUrl} alt={attachment.filename} />
+                              : attachment.kind === "image"
+                                ? <ImageIcon size={16} />
+                                : <FileCode2 size={16} />}
+                            <span><strong>{attachment.filename}</strong><small>{formatBytes(attachment.byte_size)}</small></span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </article>
                 </div>
@@ -867,6 +1131,30 @@ function App({
         </section>
 
         <form className="composer" onSubmit={(event) => { event.preventDefault(); void submitMessage(); }}>
+          <input
+            ref={imageInput}
+            className="visually-hidden"
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            multiple
+            aria-label="选择图片附件"
+            onChange={(event) => {
+              void queueAttachments(event.target.files);
+              event.target.value = "";
+            }}
+          />
+          <input
+            ref={textInput}
+            className="visually-hidden"
+            type="file"
+            accept=".txt,.py,.ts,.tsx,.js,.jsx,.json,.yaml,.yml,.md,.css,.html,.htm,.sql,.java,.go,.rs,.toml,.xml,.sh,.bat,.ps1,.c,.h,.cpp,.hpp,.cs,text/plain,application/json"
+            multiple
+            aria-label="选择文本或代码附件"
+            onChange={(event) => {
+              void queueAttachments(event.target.files);
+              event.target.value = "";
+            }}
+          />
           {pendingApproval && (
             <div className="approval-panel" role="alert">
               <div className="approval-heading"><strong>{pendingApproval.summary}</strong><span>{pendingApproval.tool}</span></div>
@@ -895,6 +1183,27 @@ function App({
               </div>
             </div>
           )}
+          {pendingAttachments.length > 0 && (
+            <div className="pending-attachments" aria-label="待发送附件">
+              {pendingAttachments.map((item) => (
+                <div className={`pending-attachment is-${item.status}`} key={item.localId}>
+                  {item.previewUrl
+                    ? <img src={item.previewUrl} alt="" />
+                    : <FileCode2 size={17} />}
+                  <span>
+                    <strong title={item.file.name}>{item.file.name}</strong>
+                    <small>{item.status === "uploading" ? "正在上传" : item.status === "error" ? item.error : formatBytes(item.file.size)}</small>
+                  </span>
+                  {item.status === "uploading" && <LoaderCircle className="attachment-spinner" size={15} aria-label="正在上传" />}
+                  {item.status === "error" && (
+                    <button type="button" className="icon-button compact" aria-label={`重试上传 ${item.file.name}`} title="重试" onClick={() => void retryAttachment(item)}><RotateCcw size={14} /></button>
+                  )}
+                  <button type="button" className="icon-button compact" aria-label={`移除附件 ${item.file.name}`} title="移除" disabled={item.status === "uploading"} onClick={() => void removePendingAttachment(item)}><X size={14} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+          {attachmentError && <div className="attachment-error" role="alert">{attachmentError}</div>}
               <textarea aria-label="任务输入" placeholder={modelStatus.status === "ready" && !modelStatus.data.configured ? "模型尚未配置" : mode === "plan" ? "描述需要完成的工作" : "输入一个仓库任务"} rows={2} value={input} maxLength={32_000} disabled={health.status !== "ready" || modelStatus.status !== "ready" || !modelStatus.data.configured || isStreaming || planLoading} onChange={(event) => setInput(event.target.value)} />
           <div className="composer-actions">
             <div className="composer-menu-wrap">
@@ -917,11 +1226,28 @@ function App({
                   </button>
                   <div className="composer-menu-divider" />
                   <div className="composer-menu-label">附件与扩展</div>
-                  <button type="button" role="menuitem" disabled><Plus size={15} /><span>上传文件</span><small>即将支持</small></button>
-                  <button type="button" role="menuitem" disabled><Blocks size={15} /><span>选择插件</span><small>即将支持</small></button>
+                  <button type="button" role="menuitem" onClick={() => { setComposerMenuOpen(false); imageInput.current?.click(); }}><ImageIcon size={15} /><span>上传图片</span><small>PNG、JPEG、WebP</small></button>
+                  <button type="button" role="menuitem" onClick={() => { setComposerMenuOpen(false); textInput.current?.click(); }}><FileCode2 size={15} /><span>上传文本或代码</span><small>UTF-8 文件</small></button>
+                  {plugins.filter((plugin) => plugin.enabled).length === 0 ? (
+                    <button type="button" role="menuitem" disabled><Blocks size={15} /><span>没有已启用插件</span><small>使用 CLI 或 API 安装</small></button>
+                  ) : plugins.filter((plugin) => plugin.enabled).map((plugin) => (
+                    <button
+                      type="button"
+                      role="menuitemcheckbox"
+                      aria-checked={selectedPluginIds.includes(plugin.id)}
+                      className={selectedPluginIds.includes(plugin.id) ? "selected" : ""}
+                      key={plugin.id}
+                      title={`${plugin.description}\n工具：${plugin.tools.map((tool) => tool.name).join("、")}`}
+                      onClick={() => togglePlugin(plugin.id)}
+                    >
+                      <Blocks size={15} /><span>{plugin.name}</span><small>v{plugin.version}</small>
+                    </button>
+                  ))}
                 </div>
               )}
             </div>
+            {selectedPluginIds.length > 0 && <span className="plugin-selection" title={selectedPluginIds.join(", ")}><Blocks size={12} />{selectedPluginIds.length} 个插件</span>}
+            {pluginError && <span className="plugin-error" title={pluginError}>插件状态不可用</span>}
             <div className="composer-settings"><label htmlFor="permission-mode">权限</label><select id="permission-mode" value={permissionMode} onChange={(event) => void changePermission(event.target.value as PermissionMode)} disabled={isStreaming}><option value="inspect">只读检查</option><option value="approve">逐次批准</option><option value="unrestricted">受控直接执行</option></select></div><span className="composer-state">{isStreaming ? mode === "plan" ? "正在生成计划" : "Agent 正在执行" : modelStatus.status === "ready" && modelStatus.data.configured ? mode === "plan" ? "计划模式 · 本地保存" : "Agent · 本地保存" : `模型${modelCopy}`}</span>
             {isStreaming ? (
               <button className="send-button stop-button" type="button" aria-label="停止运行" title="停止运行" onClick={() => activeRequest.current?.abort()}><Square size={14} fill="currentColor" /></button>
@@ -997,6 +1323,12 @@ function projectPathParts(path: string): { name: string; parent: string } {
 function permissionLabel(permission: PermissionMode): string {
   if (permission === "inspect") return "只读检查";
   return permission === "approve" ? "逐次批准" : "受控直接执行";
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
