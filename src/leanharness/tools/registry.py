@@ -51,16 +51,36 @@ class ToolRegistry:
             if authorize_tool(mode, tool.definition.name).allowed
         }
         for tool in additional_tools:
-            name = tool.definition.name
-            if name in self._tools or any(item.definition.name == name for item in builtins):
-                raise ValueError(f"Duplicate tool name: {name}")
-            mutation = bool(getattr(tool, "is_mutating", False))
-            if authorize_tool(mode, name, mutation=mutation).allowed:
-                self._tools[name] = tool
+            self.register(tool, reserved_names={item.definition.name for item in builtins})
 
     @property
     def definitions(self) -> tuple[ToolDefinition, ...]:
         return tuple(tool.definition for tool in self._tools.values())
+
+    def register(
+        self,
+        tool: BuiltinTool,
+        *,
+        reserved_names: set[str] | None = None,
+    ) -> None:
+        """Register one core-owned capability after the base registry is built."""
+
+        name = tool.definition.name
+        if name in self._tools or name in (reserved_names or set()):
+            raise ValueError(f"Duplicate tool name: {name}")
+        mutation = getattr(tool, "is_mutating", None)
+        decision = authorize_tool(
+            self._mode,
+            name,
+            mutation=mutation if isinstance(mutation, bool) else None,
+        )
+        if decision.allowed:
+            self._tools[name] = tool
+
+    def get(self, name: str) -> BuiltinTool | None:
+        """Return a registered tool for Runtime-owned special execution."""
+
+        return self._tools.get(name)
 
     def execute(
         self,

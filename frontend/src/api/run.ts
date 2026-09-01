@@ -37,6 +37,17 @@ export type RunEvent =
       tool: string;
       metadata?: Record<string, unknown>;
     })
+  | (RunEventBase & {
+      type:
+        | "subtask.requested"
+        | "subtask.started"
+        | "subtask.completed"
+        | "subtask.failed"
+        | "subtask.cancelled";
+      summary?: string;
+      metadata: Record<string, unknown>;
+      error?: TurnError;
+    })
   | (RunEventBase & { type: "usage.reported"; usage: Usage })
   | (RunEventBase & {
       type: "context.projected" | "context.compacted" | "context.compaction.failed";
@@ -180,6 +191,9 @@ function isRunEvent(value: unknown): value is RunEvent {
   if (value.type === "assistant.progress") return typeof value.summary === "string";
   if (["tool.requested", "tool.started", "tool.completed", "approval.required", "approval.resolved", "input.required", "input.resolved"].includes(value.type)) {
     return typeof value.tool === "string";
+  }
+  if (["subtask.requested", "subtask.started", "subtask.completed", "subtask.failed", "subtask.cancelled"].includes(value.type)) {
+    return isRecord(value.metadata) && typeof value.metadata.subtask_id === "string";
   }
   if (value.type === "usage.reported") return isRecord(value.usage);
   if (["context.projected", "context.compacted"].includes(value.type)) {

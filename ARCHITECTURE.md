@@ -91,6 +91,24 @@ boundaries. An integer request limit remains available as an emergency fuse.
 Terminal plan reports are deterministic projections of step state and the
 public evidence ledger, not a concatenation of model-written step reports.
 
+## Parallel analysis workers
+
+The default CodingAgent may submit one batch of up to five independent analysis
+tasks through the core-owned `delegate_analysis` capability. The parent loop
+remains the only task owner: it chooses whether to delegate, defines each
+scope, evaluates returned evidence, performs mutations and verification, and
+decides completion. Workers reuse the same runtime with an isolated context,
+but receive only read-only workspace and Git tools. They cannot edit, run
+commands, invoke plugins, request approval, or delegate again.
+
+Workers run concurrently for latency, while their bounded structured results
+are inserted into the parent journal in request order. Only summaries, facts,
+normalized paths, checks, status, usage, and hashes cross the boundary; raw
+transcripts, source text, command output, and credentials do not. A worker
+failure is evidence for the parent to handle, never proof that the parent task
+is complete. This is a fixed capability rather than a configurable mode or
+model-routing framework.
+
 Permission is evaluated at the start of each execution segment. The session
 selector is a persistent default; an active segment keeps its captured mode.
 Plan generation is always inspect-only. Confirming a plan captures the current

@@ -10,12 +10,15 @@
 - CLI, web, and headless interfaces
 - Local controlled plugin protocol and bundled DOCX artifact example
 
-## 0.2 - Delegated workers
+## 0.2 - Fixed parallel analysis
 
-- Focused subagents with independent context budgets
-- Strong, balanced, and fast logical model routes
-- Structured delegation results and one-level delegation limit
-- Routing based on risk, complexity, and observed failures
+- One parent CodingAgent can delegate up to five independent read-only analyses
+- Workers reuse the core loop with isolated context and no nested delegation
+- Structured, redacted evidence returns to the parent in request order
+- No automatic routing, model profiles, or user-tuned delegation parameters
+
+Future model routing and adaptive delegation remain deliberate follow-up work,
+not part of the fixed first implementation.
 
 ## 0.3 - Budget Mode
 

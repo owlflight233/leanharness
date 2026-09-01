@@ -189,6 +189,7 @@ def test_health_contract_is_exact(tmp_path: Path) -> None:
             "model.streaming",
             "agent.inspect",
             "agent.streaming",
+            "agent.delegation",
             "session.persistence",
             "run.trace",
             "agent.edit",

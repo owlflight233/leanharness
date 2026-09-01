@@ -38,6 +38,7 @@ def get_health(config: AppConfig) -> HealthSnapshot:
             "model.streaming",
             "agent.inspect",
             "agent.streaming",
+            "agent.delegation",
             "session.persistence",
             "run.trace",
             "agent.edit",

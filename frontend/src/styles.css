@@ -474,6 +474,9 @@ textarea:focus-visible {
 .run-process-tools li { display: grid; min-height: 24px; grid-template-columns: 24px minmax(0, 1fr); align-items: center; color: var(--muted); font-size: 10px; }
 .run-process-tools strong { color: var(--muted); font-weight: 450; }
 .run-process-metrics { padding: 7px 10px 9px 32px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
+.run-process-tools li > div { min-width: 0; display: grid; gap: 3px; }
+.run-process-tools li small { color: var(--muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.run-process-subtask { border-left: 2px solid var(--accent); padding-left: 8px; }
 .run-process-finish { color: var(--accent-dark); }
 
 .message.is-error .message-body p {

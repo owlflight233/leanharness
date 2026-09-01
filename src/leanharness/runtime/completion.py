@@ -7,7 +7,13 @@ from dataclasses import dataclass, field
 from leanharness.tools import ToolResult
 
 _OBSERVATION_TOOLS = frozenset(
-    {"workspace_list", "workspace_read", "workspace_search", "git_inspect"}
+    {
+        "workspace_list",
+        "workspace_read",
+        "workspace_search",
+        "git_inspect",
+        "delegate_analysis",
+    }
 )
 _MUTATION_TOOLS = frozenset(
     {

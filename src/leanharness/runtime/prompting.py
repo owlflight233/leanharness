@@ -5,11 +5,23 @@ from __future__ import annotations
 from leanharness.permissions import PermissionMode
 
 
-def system_prompt(language: str, mode: PermissionMode) -> str:
+def system_prompt(
+    language: str,
+    mode: PermissionMode,
+    *,
+    delegation: bool = False,
+) -> str:
     capability = (
         "Use only the supplied read-only workspace and Git inspection tools."
         if mode is PermissionMode.INSPECT
         else "Use only the supplied guarded workspace, verification, and Git inspection tools."
+    )
+    delegation_rule = (
+        "When independent repository areas need broad analysis, you may submit one bounded "
+        "batch to delegate_analysis. You alone choose the subtasks, assess the returned "
+        "evidence, perform any edits or verification, and decide completion. "
+        if delegation
+        else ""
     )
     return (
         "You are a repository coding assistant. "
@@ -18,6 +30,8 @@ def system_prompt(language: str, mode: PermissionMode) -> str:
         "Decide the next action from the complete public conversation, the current request, "
         "and actual tool results; do not rely on application-side intent classification. "
         "Honor explicit user constraints and do not request an action that would violate them. "
+        + delegation_rule
+        +
         "For new small text files prefer workspace_write with mode=create and create_parents=true. "
         "For a bounded change to an existing file prefer workspace_edit after workspace_read, "
         "using workspace_read.file_sha256 as expected_sha256; "

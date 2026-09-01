@@ -40,6 +40,7 @@ def create_coding_run(
     data_dir: str | Path | None = None,
     user_message: ModelMessage | None = None,
     tool_registry_factory: Callable[..., ToolRegistry] = ToolRegistry,
+    enable_delegation: bool = True,
 ) -> CodingAgent:
     """Validate public input and create a bounded coding runtime."""
 
@@ -76,6 +77,7 @@ def create_coding_run(
         context_sanitizer=context_sanitizer,
         user_message=user_message,
         tool_registry_factory=tool_registry_factory,
+        enable_delegation=enable_delegation,
     )
 
 

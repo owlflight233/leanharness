@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -20,6 +22,18 @@ from leanharness.errors import ApprovalExpiredError, ModelError, ModelProtocolEr
 from leanharness.models import ModelMessage, ModelRequest, ModelResponse, ToolCall
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.runtime.completion import CompletionLedger
+from leanharness.runtime.delegation import (
+    CHILD_MAX_STEPS,
+    MAX_PARALLEL_SUBTASKS,
+    ParallelAnalysisTool,
+    ScopedReadOnlyToolRegistry,
+    SubtaskRequest,
+    SubtaskResult,
+    SubtaskStatus,
+    SubtaskUsage,
+    parse_worker_answer,
+    worker_system_prompt,
+)
 from leanharness.runtime.events import RuntimeEvent, RuntimeEventType
 from leanharness.runtime.metrics import RunMetrics
 from leanharness.runtime.model_step import (
@@ -48,7 +62,7 @@ from leanharness.runtime.user_input import (
     UserInputProtocolError,
     parse_user_input_call,
 )
-from leanharness.tools import ToolRegistry, ToolResult
+from leanharness.tools import ToolExecutionError, ToolRegistry, ToolResult
 
 DEFAULT_MAX_STEPS = 24
 MIN_MAX_STEPS = 2
@@ -99,6 +113,9 @@ class CodingAgent:
         context_sanitizer: Callable[[str], str] | None = None,
         metrics: RunMetrics | None = None,
         user_message: ModelMessage | None = None,
+        enable_delegation: bool = False,
+        system_message: str | None = None,
+        model_output_tokens: int = MODEL_OUTPUT_TOKEN_BUDGET,
     ) -> None:
         if max_steps is not None and not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
             raise ValueError(f"max_steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}")
@@ -108,6 +125,14 @@ class CodingAgent:
         self.run_id = run_id or uuid.uuid4().hex
         self.cancel_event = cancel_event or asyncio.Event()
         self.tools = tool_registry_factory(self.workspace, mode=permission_mode)
+        self._delegation_enabled = enable_delegation
+        self._context_sanitizer = context_sanitizer
+        self._system_message = system_message
+        self._model_output_tokens = model_output_tokens
+        if enable_delegation:
+            self.tools.register(
+                ParallelAnalysisTool(self.workspace, self._run_delegated_analysis)
+            )
         self._tool_dispatcher = ToolDispatcher(self.tools, self.cancel_event)
         self.context = ContextStore(
             max_chars=context_chars, summary_sanitizer=context_sanitizer
@@ -137,6 +162,7 @@ class CodingAgent:
         # still owns the next action; this set only projects the facts observed
         # by the runtime into subsequent tool definitions.
         self._disabled_tools: set[str] = set()
+        self._delegated_subtasks = 0
         self._model_step = ModelStepExecutor(
             context=self.context,
             model_client=self.model_client,
@@ -166,6 +192,7 @@ class CodingAgent:
         self.evidence = CompletionLedger()
         self._failure_tracker.reset()
         self._disabled_tools.clear()
+        self._delegated_subtasks = 0
         self._protocol_recovery.reset()
         async for event in self._run_task(task, initialize_context=False):
             yield event
@@ -197,7 +224,14 @@ class CodingAgent:
             self.context.append(
                 ModelMessage(
                     role="system",
-                    content=system_prompt(self.language, self.permission_mode),
+                    content=(
+                        self._system_message
+                        or system_prompt(
+                            self.language,
+                            self.permission_mode,
+                            delegation=self._delegation_enabled,
+                        )
+                    ),
                 )
             )
         self.context.append(
@@ -673,12 +707,111 @@ class CodingAgent:
                             )
                         else:
                             result = None
+                            registered_tool = self.tools.get(call.name)
                             if call.name == OUTCOME_TOOL_NAME:
                                 result = _runtime_tool_error(
                                     call,
                                     "OUTCOME_MUST_BE_ALONE",
                                     "report_run_outcome must be the only call in a response",
                                 )
+                            elif isinstance(registered_tool, ParallelAnalysisTool):
+                                self.state = transition(
+                                    self.state, RunState.EXECUTING_TOOL
+                                )
+                                yield self._event(
+                                    "tool.started",
+                                    step=step,
+                                    tool=call.name,
+                                    metadata={"tool_call_id": call.id},
+                                )
+                                try:
+                                    subtask_requests = registered_tool.prepare(call)
+                                except ToolExecutionError as exc:
+                                    result = registered_tool.error_result(call, exc)
+                                else:
+                                    remaining = MAX_PARALLEL_SUBTASKS - self._delegated_subtasks
+                                    if len(subtask_requests) > remaining:
+                                        result = registered_tool.error_result(
+                                            call,
+                                            ToolExecutionError(
+                                                "SUBTASK_LIMIT",
+                                                "A parent run may delegate at most five subtasks",
+                                            ),
+                                        )
+                                        subtask_requests = ()
+                                    else:
+                                        self._delegated_subtasks += len(subtask_requests)
+                                if result is None and subtask_requests:
+                                    for request in subtask_requests:
+                                        yield self._event(
+                                            "subtask.requested",
+                                            step=step,
+                                            summary=request.task[:MAX_PROGRESS_CHARS],
+                                            metadata=_subtask_request_metadata(request),
+                                        )
+                                    for request in subtask_requests:
+                                        yield self._event(
+                                            "subtask.started",
+                                            step=step,
+                                            summary=request.task[:MAX_PROGRESS_CHARS],
+                                            metadata=_subtask_request_metadata(request),
+                                        )
+                                    try:
+                                        result, subtask_results = (
+                                            await registered_tool.execute_batch(
+                                                call, subtask_requests
+                                            )
+                                        )
+                                    except asyncio.CancelledError:
+                                        self.cancel_event.set()
+                                        for request in subtask_requests:
+                                            yield self._event(
+                                                "subtask.cancelled",
+                                                step=step,
+                                                summary=request.task[:MAX_PROGRESS_CHARS],
+                                                metadata={
+                                                    **_subtask_request_metadata(request),
+                                                    "status": "cancelled",
+                                                },
+                                            )
+                                        self.state = transition(
+                                            self.state, RunState.CANCELLED
+                                        )
+                                        for event in self._cancel_pending_tool_calls(
+                                            calls,
+                                            call_index,
+                                            step,
+                                            current_requested=True,
+                                        ):
+                                            yield event
+                                        yield self._event(
+                                            "run.cancelled",
+                                            step=step,
+                                            summary=_cancelled_summary(self.language),
+                                            metadata=self._terminal_metadata(
+                                                incomplete_reason="RUN_CANCELLED"
+                                            ),
+                                        )
+                                        return
+                                    for subtask_result in subtask_results:
+                                        event_type: RuntimeEventType = (
+                                            "subtask.completed"
+                                            if subtask_result.status
+                                            is SubtaskStatus.COMPLETED
+                                            else "subtask.failed"
+                                        )
+                                        yield self._event(
+                                            event_type,
+                                            step=step,
+                                            summary=subtask_result.summary,
+                                            metadata=subtask_result.public_metadata(),
+                                            error_code=subtask_result.error_code,
+                                            error_message=(
+                                                subtask_result.summary
+                                                if subtask_result.error_code
+                                                else None
+                                            ),
+                                        )
                             elif self.tools.approval_required(call):
                                 if self.approvals is None:
                                     result = _runtime_tool_error(
@@ -974,6 +1107,114 @@ class CodingAgent:
             **({"incomplete_reason": incomplete_reason} if incomplete_reason else {}),
         }
 
+    async def _run_delegated_analysis(
+        self, request: SubtaskRequest
+    ) -> SubtaskResult:
+        """Run one isolated child loop and retain only bounded public evidence."""
+
+        started = time.monotonic()
+        observed_files: set[str] = set()
+        checks: list[str] = []
+        terminal_type = "run.failed"
+        terminal_answer = ""
+        terminal_error = "SUBTASK_FAILED"
+
+        def scoped_factory(path: Path, **_: object) -> ToolRegistry:
+            return ScopedReadOnlyToolRegistry(path, request.scope)
+
+        child = CodingAgent(
+            self.workspace,
+            self.model_client,
+            max_steps=CHILD_MAX_STEPS,
+            context_chars=64_000,
+            run_id=f"{self.run_id}:subtask:{request.id}",
+            cancel_event=self.cancel_event,
+            tool_registry_factory=scoped_factory,
+            language=self.language,
+            permission_mode=PermissionMode.INSPECT,
+            session_id=self.session_id,
+            history=(),
+            history_sources=(),
+            reserve_summary_round=True,
+            include_outcome_tool=True,
+            context_sanitizer=self._context_sanitizer,
+            enable_delegation=False,
+            system_message=worker_system_prompt(self.language, request.scope),
+            model_output_tokens=4_096,
+        )
+        async for event in child.run(request.task):
+            if (
+                event.type == "tool.completed"
+                and event.metadata
+                and event.metadata.get("ok") is True
+                and event.tool
+            ):
+                check = event.tool
+                operation = event.metadata.get("operation")
+                if isinstance(operation, str):
+                    check = f"{check}:{operation}"
+                if check not in checks:
+                    checks.append(check)
+                path = event.metadata.get("path")
+                if isinstance(path, str):
+                    observed_files.add(path)
+            if event.type in {
+                "run.completed",
+                "run.incomplete",
+                "run.failed",
+                "run.cancelled",
+            }:
+                terminal_type = event.type
+                terminal_answer = event.answer or ""
+                terminal_error = event.error_code or terminal_type.upper().replace(".", "_")
+
+        duration_ms = max(0, int((time.monotonic() - started) * 1000))
+        usage = SubtaskUsage(
+            input_tokens=child.metrics.prompt_tokens,
+            output_tokens=child.metrics.completion_tokens,
+        )
+        if terminal_type == "run.cancelled":
+            raise asyncio.CancelledError
+
+        status = (
+            SubtaskStatus.COMPLETED
+            if terminal_type == "run.completed"
+            else SubtaskStatus.INCOMPLETE
+            if terminal_type == "run.incomplete"
+            else SubtaskStatus.FAILED
+        )
+        try:
+            summary, facts, blockers = parse_worker_answer(
+                terminal_answer,
+                sanitizer=self._context_sanitizer,
+            )
+        except (ValueError, TypeError, json.JSONDecodeError):
+            summary = (
+                "子任务未返回有效的结构化证据"
+                if self.language == "zh"
+                else "The worker did not return valid structured evidence"
+            )
+            facts = ()
+            blockers = (
+                "SUBTASK_RESULT_INVALID",
+            )
+            if status is SubtaskStatus.COMPLETED:
+                status = SubtaskStatus.INCOMPLETE
+            terminal_error = "SUBTASK_RESULT_INVALID"
+
+        return SubtaskResult(
+            request=request,
+            status=status,
+            summary=summary,
+            facts=facts,
+            files_observed=tuple(sorted(observed_files)),
+            checks=tuple(checks),
+            blockers=blockers,
+            usage=usage,
+            duration_ms=duration_ms,
+            error_code=(None if status is SubtaskStatus.COMPLETED else terminal_error),
+        )
+
     def _model_request(
         self, messages: tuple[ModelMessage, ...], summary_round: bool
     ) -> ModelRequest:
@@ -984,7 +1225,7 @@ class CodingAgent:
         )
         return ModelRequest(
             messages=messages,
-            max_tokens=MODEL_OUTPUT_TOKEN_BUDGET,
+            max_tokens=self._model_output_tokens,
             tools=(
                 ()
                 if summary_round
@@ -1106,6 +1347,15 @@ def validate_run_task(task: str) -> str:
             f"Task must not exceed {MAX_TASK_CHARS} characters",
         )
     return task
+
+
+def _subtask_request_metadata(request: SubtaskRequest) -> dict[str, object]:
+    return {
+        "subtask_id": request.id,
+        "subtask_index": request.index,
+        "scope": list(request.scope),
+        "expected_output": request.expected_output.value,
+    }
 
 
 def _progress_summary(content: str, call: ToolCall, language: str = "same") -> str:

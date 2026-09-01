@@ -96,4 +96,42 @@ describe("RunProcess", () => {
       "计划第 2 步 · 读取测试文件",
     ]);
   });
+
+  it("renders delegated workers inside the same execution process", () => {
+    const actions = aggregateActions([
+      { type: "assistant.progress", sequence: 1, step: 1, summary: "并行检查项目" },
+      {
+        type: "subtask.requested",
+        sequence: 2,
+        step: 1,
+        summary: "检查运行入口",
+        metadata: { subtask_id: "s1", scope: ["src"] },
+      },
+      {
+        type: "subtask.started",
+        sequence: 3,
+        step: 1,
+        summary: "检查运行入口",
+        metadata: { subtask_id: "s1", scope: ["src"] },
+      },
+      {
+        type: "subtask.completed",
+        sequence: 4,
+        step: 1,
+        summary: "发现入口缺少错误转换",
+        metadata: {
+          subtask_id: "s1",
+          scope: ["src"],
+          status: "completed",
+          usage: { input_tokens: 4, output_tokens: 3 },
+          duration_ms: 12,
+        },
+      },
+    ]);
+
+    expect(actions).toHaveLength(1);
+    expect(actions[0]?.label).toBe("并行检查项目");
+    expect(actions[0]?.tools[0]?.label).toContain("子任务 · 检查运行入口 · 完成");
+    expect(actions[0]?.tools[0]?.detail).toContain("发现入口缺少错误转换");
+  });
 });

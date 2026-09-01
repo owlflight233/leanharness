@@ -23,6 +23,8 @@ interface SemanticTool {
   label: string;
   groupKey: string;
   planStep?: number;
+  kind?: "tool" | "subtask";
+  detail?: string;
 }
 
 export function RunProcess({
@@ -62,9 +64,12 @@ export function RunProcess({
                 {action.tools.length > 0 && (
                   <ol className="run-process-tools">
                     {action.tools.map((tool) => (
-                      <li key={tool.id}>
+                      <li key={tool.id} className={tool.kind === "subtask" ? "run-process-subtask" : undefined}>
                         <span>{tool.sequence}</span>
-                        <strong>{tool.label}</strong>
+                        <div>
+                          <strong>{tool.label}</strong>
+                          {tool.detail && <small>{tool.detail}</small>}
+                        </div>
                       </li>
                     ))}
                   </ol>
@@ -89,10 +94,18 @@ export function RunProcess({
 export function aggregateActions(trace: RunTraceItem[]): SemanticAction[] {
   const progress = new Map<string, RunTraceItem>();
   const tools = new Map<string, RunTraceItem[]>();
+  const subtasks = new Map<string, RunTraceItem[]>();
   let fallbackIndex = 0;
   for (const event of trace) {
     if (event.type === "assistant.progress") {
       progress.set(groupKeyFor(event), event);
+      continue;
+    }
+    if (event.type.startsWith("subtask.")) {
+      const subtaskId = event.metadata?.subtask_id;
+      if (typeof subtaskId === "string") {
+        subtasks.set(subtaskId, [...(subtasks.get(subtaskId) ?? []), event]);
+      }
       continue;
     }
     if (!event.type.startsWith("tool.") && !event.type.startsWith("approval.") && !event.type.startsWith("input.")) continue;
@@ -124,6 +137,33 @@ export function aggregateActions(trace: RunTraceItem[]): SemanticAction[] {
       label: `${first.tool ?? "工具"} · ${status}`,
       groupKey: groupKeyFor(first),
       planStep: planStepFor(first),
+      kind: "tool",
+    });
+  }
+  for (const [id, events] of subtasks) {
+    const first = events[0]!;
+    const terminal = [...events].reverse().find((event) =>
+      ["subtask.completed", "subtask.failed", "subtask.cancelled"].includes(event.type)
+    );
+    const state = terminal?.metadata?.status;
+    const status = terminal?.type === "subtask.completed"
+      ? "完成"
+      : terminal?.type === "subtask.cancelled"
+        ? "已取消"
+        : terminal?.type === "subtask.failed" && state === "incomplete"
+          ? "未完成"
+          : terminal
+            ? "失败"
+            : "分析中";
+    toolActions.push({
+      id: `subtask-${id}`,
+      sequence: first.sequence,
+      step: first.step,
+      label: `子任务 · ${first.summary || "并行分析"} · ${status}`,
+      detail: subtaskDetail(terminal),
+      groupKey: groupKeyFor(first),
+      planStep: planStepFor(first),
+      kind: "subtask",
     });
   }
   const actions: SemanticAction[] = [];
@@ -172,6 +212,24 @@ function groupKeyFor(event: RunTraceItem): string {
 function planStepFor(event: RunTraceItem): number | undefined {
   const value = event.metadata?.plan_step;
   return typeof value === "number" ? value : undefined;
+}
+
+function subtaskDetail(event: RunTraceItem | undefined): string | undefined {
+  if (!event) return undefined;
+  const parts: string[] = [];
+  if (event.summary) parts.push(event.summary);
+  const scope = event.metadata?.scope;
+  if (Array.isArray(scope) && scope.every((item) => typeof item === "string")) {
+    parts.push(`范围：${scope.join("、")}`);
+  }
+  const usage = event.metadata?.usage;
+  if (isRecord(usage)) {
+    const total = numberValue(usage.input_tokens) + numberValue(usage.output_tokens);
+    parts.push(`${total} tokens`);
+  }
+  const duration = event.metadata?.duration_ms;
+  if (typeof duration === "number") parts.push(`${duration} ms`);
+  return parts.join(" · ") || undefined;
 }
 
 function terminalMetrics(trace: RunTraceItem[]) {
