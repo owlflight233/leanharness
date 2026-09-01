@@ -80,6 +80,17 @@ verification commands. Tool failures are returned to the model as structured
 results; repeated calls, repeated equivalent failures, context pressure, and
 step budgets are runtime decisions rather than model instructions.
 
+Plan Mode does not introduce a second decision engine. After read-only plan
+generation and user confirmation, the complete plan is supplied to one
+`CodingAgent` loop as visible context. Plan steps remain persistent UI and
+audit records, but they do not partition model requests or receive independent
+budgets. Normal Plan Mode has no request-count limit; the model's explicit
+outcome action ends the loop, while cancellation, repeated-action detection,
+context limits, permissions, and tool guards remain fixed-core safety
+boundaries. An integer request limit remains available as an emergency fuse.
+Terminal plan reports are deterministic projections of step state and the
+public evidence ledger, not a concatenation of model-written step reports.
+
 Permission is evaluated at the start of each execution segment. The session
 selector is a persistent default; an active segment keeps its captured mode.
 Plan generation is always inspect-only. Confirming a plan captures the current

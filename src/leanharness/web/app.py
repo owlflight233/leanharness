@@ -667,6 +667,7 @@ def create_app(
             plan,
             app.state.workspace,
             model,
+            max_steps=None,
             permission_mode=PermissionMode(run.permission_mode),
             language=session.language or "same",
             approvals=approvals,

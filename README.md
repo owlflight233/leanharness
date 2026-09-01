@@ -151,10 +151,15 @@ location is `%LOCALAPPDATA%\\LeanHarness` on Windows,
 
 Plan Mode first generates a limited Markdown draft using only read-only tools.
 Review or edit the steps in the web client, then confirm execution. Confirmed
-plans run sequentially with a permission snapshot taken at confirmation time.
-Changing the session selector does not affect an active execution segment. A
-paused plan can be explicitly resumed with the newly selected permission; the
-transition is recorded in its audit trace:
+plans are projected into one continuous `CodingAgent` loop with a permission
+snapshot taken at confirmation time. Markdown steps are visible context and
+audit records; they do not create separate model loops or per-step budgets.
+Plan Mode has no model-request ceiling by default. It ends through the model's
+outcome action, cancellation, a safety failure, or a runtime invariant such as
+repeated identical actions. A paused plan can be explicitly resumed with the
+newly selected permission; the transition is recorded in its audit trace. The
+final report is rendered from step state and public evidence, rather than
+concatenated model-written step reports:
 
 ```sh
 uv run leanharness plan "Refactor the authentication module"

@@ -24,6 +24,8 @@ class CompletionLedger:
     unresolved_errors: list[str] = field(default_factory=list)
     verification_argument_denials: int = 0
     verification_recoveries: int = 0
+    verification_failures: list[dict[str, object]] = field(default_factory=list)
+    verification_profiles: set[str] = field(default_factory=set)
 
     @property
     def primary_error_code(self) -> str | None:
@@ -62,6 +64,9 @@ class CompletionLedger:
                 self._clear_tool_errors("DIRECTORY_")
             elif tool == "workspace_command":
                 self.successful_verifications += 1
+                profile = result.public_metadata.get("profile")
+                if isinstance(profile, str):
+                    self.verification_profiles.add(profile)
                 if self.verification_argument_denials > self.verification_recoveries:
                     self.verification_recoveries += 1
                 self._clear_tool_errors("COMMAND_")
@@ -74,6 +79,14 @@ class CompletionLedger:
             and result.error.code == "COMMAND_ARGUMENT_DENIED"
         ):
             self.verification_argument_denials += 1
+        if tool == "workspace_command" and result.error is not None:
+            profile = result.public_metadata.get("profile")
+            failure = {
+                "code": result.error.code,
+                **({"profile": profile} if isinstance(profile, str) else {}),
+            }
+            if failure not in self.verification_failures:
+                self.verification_failures.append(failure)
 
     def validate_completed(self, *, language: str = "same") -> CompletionDecision:
         """Reject completion only when observed tool facts contradict it."""
@@ -124,6 +137,8 @@ class CompletionLedger:
             "unresolved_errors": list(self.unresolved_errors),
             "verification_argument_denials": self.verification_argument_denials,
             "verification_recoveries": self.verification_recoveries,
+            "verification_failures": list(self.verification_failures),
+            "verification_profiles": sorted(self.verification_profiles),
         }
 
     def _clear_tool_errors(self, prefix: str) -> None:

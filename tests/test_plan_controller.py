@@ -225,3 +225,74 @@ def test_controller_budget_is_shared_across_plan_steps(tmp_path: Path) -> None:
     assert events[-1].metadata["incomplete_reason"] == "STEP_BUDGET_EXHAUSTED"
     assert len(model.requests) == 3
     assert any(event.type == "plan.step.started" and event.step == 2 for event in events)
+
+
+def test_default_plan_uses_one_unbounded_agent_loop(tmp_path: Path) -> None:
+    responses = [
+        ModelResponse(
+            content="",
+            tool_calls=(
+                ToolCall(
+                    f"search-{index}",
+                    "workspace_search",
+                    {"path": ".", "query": f"term-{index}"},
+                ),
+            ),
+        )
+        for index in range(25)
+    ]
+    responses.append(ModelResponse(content="The plan is complete."))
+    model = ScriptedModel(responses)
+    controller = PlanController(
+        make_plan(),
+        tmp_path,
+        model,
+        permission_mode=PermissionMode.INSPECT,
+        language="en",
+    )
+
+    async def collect():
+        return [event async for event in controller.run()]
+
+    events = asyncio.run(collect())
+    assert events[-1].type == "run.completed"
+    assert len(model.requests) == 26
+    assert "## Inspect files" in events[-1].answer
+    assert "## Inspect tests" in events[-1].answer
+
+
+def test_unbounded_plan_persists_evidence_report_when_model_stops_incomplete(
+    tmp_path: Path,
+) -> None:
+    model = ScriptedModel(
+        [
+            tool_response("observe"),
+            ModelResponse(
+                content="",
+                tool_calls=(
+                    ToolCall(
+                        "outcome",
+                        "report_run_outcome",
+                        {"status": "incomplete", "answer": "Temporary model report."},
+                    ),
+                ),
+            ),
+        ]
+    )
+    controller = PlanController(
+        make_plan(),
+        tmp_path,
+        model,
+        permission_mode=PermissionMode.INSPECT,
+        language="en",
+    )
+
+    async def collect():
+        return [event async for event in controller.run()]
+
+    events = asyncio.run(collect())
+    assert events[-2].type == "plan.paused"
+    assert events[-1].type == "run.incomplete"
+    assert events[-1].answer == events[-2].answer
+    assert "Temporary model report." not in events[-1].answer
+    assert "## Remaining" in events[-1].answer

@@ -527,6 +527,7 @@ async def _plan_lifecycle(
         store.get_plan(plan.id),
         workspace=workspace,
         model_client=OpenAICompatibleClient(load_effective_model_config(data_dir)),
+        max_steps=None,
         permission_mode=PermissionMode(session.permission_mode),
         language=session.language or "same",
         approvals=approvals,

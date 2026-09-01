@@ -78,7 +78,7 @@ class CodingAgent:
         workspace: Path,
         model_client: RuntimeModelClient,
         *,
-        max_steps: int = DEFAULT_MAX_STEPS,
+        max_steps: int | None = DEFAULT_MAX_STEPS,
         context_chars: int = 160_000,
         run_id: str | None = None,
         cancel_event: asyncio.Event | None = None,
@@ -96,7 +96,7 @@ class CodingAgent:
         context_sanitizer: Callable[[str], str] | None = None,
         metrics: RunMetrics | None = None,
     ) -> None:
-        if not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
+        if max_steps is not None and not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
             raise ValueError(f"max_steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}")
         self.workspace = workspace.resolve(strict=True)
         self.model_client = model_client
@@ -202,7 +202,9 @@ class CodingAgent:
             metadata={"permission_mode": self.permission_mode.value},
         )
 
-        for step in range(1, self.max_steps + 1):
+        step = 0
+        while self.max_steps is None or step < self.max_steps:
+            step += 1
             if self.cancel_event.is_set():
                 self.state = transition(self.state, RunState.CANCELLED)
                 yield self._event(
@@ -219,7 +221,11 @@ class CodingAgent:
                 step=step,
                 summary=_step_started_summary(step, self.language),
             )
-            summary_round = self.reserve_summary_round and step == self.max_steps
+            summary_round = (
+                self.reserve_summary_round
+                and self.max_steps is not None
+                and step == self.max_steps
+            )
             response: ModelResponse | None = None
             protocol_repaired = False
             try:
@@ -929,8 +935,11 @@ class CodingAgent:
             )
             yield self._event("step.completed", step=step)
 
-        # PlanController disables the per-step summary round so one budget is
-        # shared across the whole plan. Exhaustion still needs a terminal event.
+        if self.max_steps is None:
+            return
+        # An explicit max_steps is an emergency fuse. Exhaustion still needs a
+        # terminal event, while an unbounded run relies on model completion,
+        # cancellation, and the existing repetition safeguards.
         self.state = transition(self.state, RunState.EXHAUSTED)
         yield self._event(
             "run.incomplete",

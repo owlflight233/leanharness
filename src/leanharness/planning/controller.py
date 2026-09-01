@@ -20,7 +20,6 @@ PlanEventType = str
 StepUpdater = Callable[[str, PlanStepState, dict[str, object] | None, str | None], None]
 
 MAX_STEP_ANSWER_CHARS = 6_000
-MAX_PLAN_ANSWER_CHARS = 32_000
 MAX_PLAN_CONTEXT_CHARS = 12_000
 
 
@@ -65,7 +64,7 @@ class PlanController:
         *,
         permission_mode: PermissionMode,
         language: str,
-        max_steps: int = 24,
+        max_steps: int | None = None,
         approvals: ApprovalCoordinator | None = None,
         tool_registry_factory: Callable[[Path], ToolRegistry] = ToolRegistry,
         initial_sequence: int = 0,
@@ -79,6 +78,10 @@ class PlanController:
         self.plan = plan
         self._sequence = initial_sequence
         self._on_step = on_step
+        # ``None`` is the normal Plan Mode setting.  The agent owns the loop
+        # and decides when the task is complete; an integer is only an
+        # explicit emergency fuse retained for callers that need one.
+        self.max_steps = max_steps
         self._remaining_budget = max_steps
         self._step_answers: list[tuple[str, str]] = []
         self._step_evidence: list[dict[str, object]] = [
@@ -116,10 +119,14 @@ class PlanController:
             yield self._event("plan.completed", summary="Plan already completed")
             yield self._runtime_event(
                 "run.completed",
-                answer="All enabled plan steps are complete.",
+                answer=self._build_report("completed"),
                 summary="Plan completed",
                 metadata=self._terminal_metadata(),
             )
+            return
+        if self.max_steps is None:
+            async for event in self._run_shared_loop(enabled):
+                yield event
             return
         last_answer: str | None = None
         completed_titles = [
@@ -127,7 +134,7 @@ class PlanController:
         ]
         for index, step in enumerate(enabled):
             if self._remaining_budget < 1:
-                answer = self._combined_answer()
+                answer = self._build_report("paused")
                 yield self._event(
                     "plan.paused",
                     summary="Plan model budget exhausted before the next step",
@@ -258,23 +265,231 @@ class PlanController:
         yield self._event("plan.completed", summary="All plan steps completed")
         yield self._runtime_event(
             "run.completed",
-            answer=self._combined_answer() or last_answer or "All enabled plan steps are complete.",
+            answer=(
+                self._build_report("completed")
+                or last_answer
+                or "All enabled plan steps are complete."
+            ),
             summary="Plan completed",
             metadata=self._terminal_metadata(),
         )
+
+    async def _run_shared_loop(
+        self, enabled: tuple[PlanStep, ...]
+    ) -> AsyncIterator[RuntimeEvent | PlanEvent]:
+        """Run the whole plan through one model loop.
+
+        Plan steps remain visible audit records, but they do not become hidden
+        sub-runs.  The model receives the plan as one task and the runtime only
+        records the plan-level terminal result.  This keeps decision ownership
+        in ``CodingAgent`` and avoids arbitrary per-step budget boundaries.
+        """
+        for step in enabled:
+            self._update_step(step, PlanStepState.RUNNING)
+        yield self._event(
+            "plan.step.started",
+            summary="Plan execution started",
+            metadata={
+                "step_ids": [step.id for step in enabled],
+                "permission_mode": self.agent.permission_mode.value,
+                "shared_runtime": True,
+            },
+        )
+        task = _shared_plan_task(self.plan, enabled)
+        self.agent.max_steps = None
+        self.agent.set_event_sequence(self._sequence)
+        terminal: RuntimeEvent | None = None
+        async for event in self.agent.run(task):
+            if event.type in {
+                "run.started",
+                "run.completed",
+                "run.incomplete",
+                "run.failed",
+                "run.cancelled",
+            }:
+                if event.type != "run.started":
+                    terminal = event
+                continue
+            yield self._annotate_shared_runtime_event(event)
+        if terminal is None:
+            for step in enabled:
+                self._update_step(
+                    step,
+                    PlanStepState.FAILED,
+                    error_code="PLAN_STEP_INTERRUPTED",
+                )
+            yield self._event(
+                "plan.failed",
+                error_code="PLAN_STEP_INTERRUPTED",
+                error_message="Plan ended without a terminal event",
+            )
+            yield self._runtime_event(
+                "run.failed",
+                error_code="PLAN_STEP_INTERRUPTED",
+                error_message="Plan ended without a terminal event",
+            )
+            return
+        if terminal.type == "run.completed":
+            evidence = _terminal_evidence(terminal)
+            # Completion is a single loop decision.  Marking the enabled plan
+            # records together reflects that fact; evidence is deliberately
+            # shared instead of pretending each step had an independent run.
+            for step in enabled:
+                self._update_step(step, PlanStepState.COMPLETED, evidence=evidence)
+                self._completed_step_ids.append(step.id)
+            self._step_evidence.append(evidence)
+            yield self._event(
+                "plan.step.completed",
+                summary="Plan completed by shared agent loop",
+                metadata={
+                    "step_ids": [step.id for step in enabled],
+                    "evidence": evidence,
+                    "shared_runtime": True,
+                },
+            )
+            yield self._event("plan.completed", summary="All plan steps completed")
+            yield self._runtime_event(
+                "run.completed",
+                answer=self._build_report("completed"),
+                summary="Plan completed",
+                metadata=self._terminal_metadata(),
+            )
+            return
+        terminal_step_state = (
+            PlanStepState.FAILED
+            if terminal.type == "run.failed"
+            else PlanStepState.PENDING
+        )
+        for step in enabled:
+            self._update_step(
+                step,
+                terminal_step_state,
+                evidence=_terminal_evidence(terminal),
+                error_code=terminal.error_code,
+            )
+        if terminal.type == "run.incomplete":
+            report = self._build_report("paused")
+            yield self._event(
+                "plan.paused",
+                summary=terminal.summary,
+                answer=report,
+                metadata={"step_ids": [step.id for step in enabled]},
+            )
+        else:
+            yield self._event(
+                "plan.failed" if terminal.type == "run.failed" else "plan.cancelled",
+                summary=terminal.summary,
+                error_code=terminal.error_code,
+                error_message=terminal.error_message,
+            )
+        if terminal.type == "run.incomplete":
+            terminal = replace(terminal, answer=report)
+        yield self._annotate_shared_runtime_event(terminal)
 
     def _annotate_runtime_event(self, event: RuntimeEvent, step: PlanStep) -> RuntimeEvent:
         metadata = dict(event.metadata or {})
         metadata.update({"plan_step": step.sequence, "plan_step_id": step.id})
         return replace(event, sequence=self._next_sequence(), metadata=metadata)
 
-    def _combined_answer(self) -> str:
-        if not self._step_answers:
-            return ""
-        rendered = "\n\n".join(
-            f"## {title}\n{answer}" for title, answer in self._step_answers
-        )
-        return _bounded_text(rendered, MAX_PLAN_ANSWER_CHARS)
+    def _annotate_shared_runtime_event(self, event: RuntimeEvent) -> RuntimeEvent:
+        metadata = dict(event.metadata or {})
+        metadata.update({"plan_id": self.plan.id, "shared_runtime": True})
+        return replace(event, sequence=self._next_sequence(), metadata=metadata)
+
+    def _build_report(self, status: str) -> str:
+        """Render a bounded, line-complete report from public runtime facts."""
+        completed = set(self._completed_step_ids)
+        chinese = self.agent.language == "zh"
+        if chinese:
+            lines = ["# 计划报告", "", f"状态: {_report_status(status, chinese)}", ""]
+            lines.append("## 步骤")
+        else:
+            lines = ["# Plan report", "", f"Status: {status}", ""]
+            lines.append("## Steps")
+        for step in sorted(self.plan.steps, key=lambda item: item.sequence):
+            state = "COMPLETED" if step.id in completed else step.state.value
+            lines.append(f"\n## {step.title}")
+            if chinese:
+                lines.append(f"- 序号: {step.sequence}")
+                lines.append(f"- 状态: {_report_step_state(state)}")
+            else:
+                lines.append(f"- Sequence: {step.sequence}")
+                lines.append(f"- Status: {state}")
+        evidence = _aggregate_evidence(self._step_evidence)
+        changed = evidence.get("changed_files", [])
+        lines.extend(["", "## 证据" if chinese else "## Evidence"])
+        if chinese:
+            lines.append(
+                "- 观察: "
+                f"{evidence.get('observations', 0)}; 修改: {evidence.get('mutations', 0)}; "
+                f"验证: {evidence.get('verifications', 0)}"
+            )
+        else:
+            lines.append(
+                "- Observations: "
+                f"{evidence.get('observations', 0)}; mutations: {evidence.get('mutations', 0)}; "
+                f"verifications: {evidence.get('verifications', 0)}"
+            )
+        if changed:
+            lines.append(
+                ("- 修改文件: " if chinese else "- Changed files: ")
+                + ", ".join(str(path) for path in changed)
+            )
+        unresolved = evidence.get("unresolved_errors", [])
+        if unresolved:
+            lines.append(
+                ("- 未解决错误: " if chinese else "- Unresolved errors: ")
+                + ", ".join(str(code) for code in unresolved)
+            )
+        denials = evidence.get("verification_argument_denials", 0)
+        recoveries = evidence.get("verification_recoveries", 0)
+        if denials:
+            lines.append(
+                (
+                    f"- 验证偏差: {denials} 个命令被拒绝, "
+                    if chinese
+                    else f"- Verification deviations: {denials} denied command(s), "
+                )
+                + (
+                    f"{recoveries} 个已恢复"
+                    if chinese
+                    else f"{recoveries} recovered"
+                )
+            )
+        failures = evidence.get("verification_failures", [])
+        if failures:
+            rendered_failures = ", ".join(
+                str(item.get("code"))
+                + (
+                    f" ({item['profile']})"
+                    if isinstance(item, dict) and item.get("profile")
+                    else ""
+                )
+                for item in failures
+                if isinstance(item, dict)
+            )
+            if rendered_failures:
+                lines.append(
+                    ("- 验证失败: " if chinese else "- Verification failures: ")
+                    + rendered_failures
+                )
+        profiles = evidence.get("verification_profiles", [])
+        if profiles:
+            lines.append(
+                ("- 成功验证配置: " if chinese else "- Successful verification profiles: ")
+                + ", ".join(map(str, profiles))
+            )
+        if status != "completed":
+            lines.extend(
+                [
+                    "",
+                    "## 待处理" if chinese else "## Remaining",
+                    "- 计划尚未完成, 请恢复或修改。"
+                    if chinese
+                    else "- The plan is not complete; resume or revise it.",
+                ]
+            )
+        return "\n".join(lines)
 
     def _terminal_metadata(
         self,
@@ -333,6 +548,35 @@ def _step_task(plan: Plan, step: PlanStep, completed: list[str]) -> str:
     )
 
 
+def _shared_plan_task(plan: Plan, steps: tuple[PlanStep, ...]) -> str:
+    rendered = "\n".join(
+        f"{step.sequence}. {step.title}: {step.instruction}" for step in steps
+    )
+    return (
+        "Work on the following implementation plan as one continuous coding task. "
+        "The plan is context, not a separate decision process: choose the next action "
+        "with the available tools, verify the workspace, and report only when the whole "
+        "request is complete. Do not claim work that has no tool evidence.\n"
+        f"Plan goal: {plan.task}\nPlan steps:\n{rendered}"
+    )
+
+
+def _report_status(status: str, chinese: bool) -> str:
+    if not chinese:
+        return status
+    return {"completed": "已完成", "paused": "已暂停"}.get(status, status)
+
+
+def _report_step_state(state: str) -> str:
+    return {
+        "COMPLETED": "已完成",
+        "RUNNING": "执行中",
+        "FAILED": "失败",
+        "SKIPPED": "已跳过",
+        "PENDING": "待处理",
+    }.get(state, state)
+
+
 def _step_context(plan: Plan, answers: list[tuple[str, str]]) -> str:
     details = "\n\n".join(
         f"### {title}\n{answer}" for title, answer in answers[-8:]
@@ -383,6 +627,22 @@ def _aggregate_evidence(items: list[dict[str, object]]) -> dict[str, object]:
         for item in items
         if isinstance((value := item.get("verification_recoveries")), int)
     )
+    verification_failures = sorted(
+        {
+            (str(item.get("code")), str(item.get("profile")))
+            for evidence in items
+            for item in evidence.get("verification_failures", [])
+            if isinstance(item, dict) and item.get("code")
+        }
+    )
+    verification_profiles = sorted(
+        {
+            str(profile)
+            for evidence in items
+            for profile in evidence.get("verification_profiles", [])
+            if isinstance(profile, str)
+        }
+    )
     changed_files = sorted(
         {
             str(path)
@@ -405,17 +665,25 @@ def _aggregate_evidence(items: list[dict[str, object]]) -> dict[str, object]:
         "unresolved_errors": unresolved_errors,
         "verification_argument_denials": verification_argument_denials,
         "verification_recoveries": verification_recoveries,
+        "verification_failures": [
+            {"code": code, **({"profile": profile} if profile != "None" else {})}
+            for code, profile in verification_failures
+        ],
+        "verification_profiles": verification_profiles,
     }
 
 
 def _verification_metadata(evidence: dict[str, object]) -> dict[str, object]:
     denials = evidence.get("verification_argument_denials")
     recoveries = evidence.get("verification_recoveries")
-    if not isinstance(denials, int) or denials < 1:
-        return {}
-    return {
-        "verification_note": (
-            "The requested command arguments were denied; a permitted verification "
-            f"command later succeeded ({recoveries or 0} recovery)."
-        )
-    }
+    failures = evidence.get("verification_failures")
+    if isinstance(denials, int) and denials > 0:
+        return {
+            "verification_note": (
+                "The requested command arguments were denied; a permitted verification "
+                f"command later succeeded ({recoveries or 0} recovery)."
+            )
+        }
+    if isinstance(failures, list) and failures:
+        return {"verification_note": "One or more verification commands failed."}
+    return {}
