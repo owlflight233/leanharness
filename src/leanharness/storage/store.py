@@ -102,6 +102,7 @@ class LocalStore:
             connection.execute("PRAGMA journal_mode = WAL")
             self._connection = connection
             apply_migrations(connection)
+            self._repair_attachment_paths()
         except (OSError, sqlite3.Error) as exc:
             self.close()
             raise StorageError("Local session storage could not be opened") from exc
@@ -314,6 +315,7 @@ class LocalStore:
         attachment_id = str(uuid.uuid4())
         relative = Path("attachments") / f"{attachment_id}.bin"
         path = self.data_dir / relative
+        storage_path = relative.as_posix()
         digest = hashlib.sha256(data).hexdigest()
         now = utc_now()
         try:
@@ -330,7 +332,7 @@ class LocalStore:
                         kind,
                         len(data),
                         digest,
-                        str(path),
+                        storage_path,
                         now,
                     ),
                 )
@@ -347,7 +349,7 @@ class LocalStore:
             kind,
             len(data),
             digest,
-            str(path),
+            storage_path,
             now,
         )
 
@@ -440,10 +442,61 @@ class LocalStore:
     def _safe_attachment_path(self, value: object) -> Path:
         if not isinstance(value, str) or not value:
             raise StorageError("Attachment storage path is invalid")
-        path = Path(value).resolve()
-        if not path.is_relative_to(self.attachment_dir.resolve()):
+        raw = Path(value)
+        if raw.is_absolute():
+            try:
+                relative = Path(os.path.abspath(raw)).relative_to(
+                    Path(os.path.abspath(self.attachment_dir))
+                )
+            except ValueError as exc:
+                raise StorageError("Attachment storage path is invalid") from exc
+        else:
+            try:
+                relative = raw.relative_to("attachments")
+            except ValueError as exc:
+                raise StorageError("Attachment storage path is invalid") from exc
+        if len(relative.parts) != 1 or relative.suffix.casefold() != ".bin":
+            raise StorageError("Attachment storage path is invalid")
+        try:
+            parsed_id = uuid.UUID(relative.stem)
+        except ValueError as exc:
+            raise StorageError("Attachment storage path is invalid") from exc
+        if str(parsed_id) != relative.stem.casefold():
+            raise StorageError("Attachment storage path is invalid")
+        path = self.attachment_dir / relative.name
+        is_junction = getattr(self.attachment_dir, "is_junction", lambda: False)
+        if self.attachment_dir.is_symlink() or is_junction() or path.is_symlink():
             raise StorageError("Attachment storage path is invalid")
         return path
+
+    def _repair_attachment_paths(self) -> None:
+        """Normalize legacy absolute paths after a data-directory relocation.
+
+        Older app processes could record the same data directory through a
+        sandbox-specific absolute prefix. Only an internal ``<id>.bin`` file
+        whose hash matches the stored metadata is eligible for repair.
+        """
+        rows = self.connection.execute(
+            "SELECT id, storage_path, sha256 FROM attachments"
+        ).fetchall()
+        repairs: list[tuple[str, str]] = []
+        for row in rows:
+            attachment_id = str(row["id"])
+            relative = Path("attachments") / f"{attachment_id}.bin"
+            storage_path = relative.as_posix()
+            if row["storage_path"] == storage_path:
+                continue
+            target = self.data_dir / relative
+            if not target.is_file() or target.is_symlink():
+                continue
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            if digest == row["sha256"]:
+                repairs.append((storage_path, attachment_id))
+        if repairs:
+            with self.connection:
+                self.connection.executemany(
+                    "UPDATE attachments SET storage_path=? WHERE id=?", repairs
+                )
 
     def list_plugins(self) -> list[PluginRecord]:
         rows = self.connection.execute(
