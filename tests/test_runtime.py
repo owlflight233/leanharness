@@ -119,6 +119,38 @@ def test_completion_guidance_uses_session_language() -> None:
     assert decision.guidance == "在报告完成前\uFF0C至少获取一次成功的工作区观察。"
 
 
+def test_unresolved_mutation_error_blocks_completion_until_recovered() -> None:
+    from leanharness.runtime.completion import CompletionLedger
+    from leanharness.tools import ToolErrorInfo, ToolResult
+
+    ledger = CompletionLedger(successful_observations=1, successful_mutations=1)
+    ledger.record(
+        "docx_generate",
+        ToolResult(
+            "call-1",
+            "docx_generate",
+            False,
+            error=ToolErrorInfo("PATH_ALREADY_EXISTS", "target exists"),
+            public_metadata={"plugin_id": "leanharness-docx"},
+        ),
+    )
+    decision = ledger.validate_completed(language="zh")
+    assert decision.accepted is False
+    assert decision.reason == "MUTATION_ERROR_UNRESOLVED"
+    assert "PATH_ALREADY_EXISTS" in (decision.guidance or "")
+
+    ledger.record(
+        "docx_generate",
+        ToolResult(
+            "call-2",
+            "docx_generate",
+            True,
+            public_metadata={"plugin_id": "leanharness-docx", "path": "report-v2.docx"},
+        ),
+    )
+    assert ledger.validate_completed().accepted is True
+
+
 def test_resumed_metrics_rehydrate_from_public_events() -> None:
     from leanharness.runtime.metrics import RunMetrics
 

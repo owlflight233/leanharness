@@ -9,6 +9,14 @@ from leanharness.tools import ToolResult
 _OBSERVATION_TOOLS = frozenset(
     {"workspace_list", "workspace_read", "workspace_search", "git_inspect"}
 )
+_MUTATION_TOOLS = frozenset(
+    {
+        "workspace_mkdir",
+        "workspace_patch",
+        "workspace_write",
+        "workspace_edit",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -22,6 +30,7 @@ class CompletionLedger:
     successful_verifications: int = 0
     changed_files: set[str] = field(default_factory=set)
     unresolved_errors: list[str] = field(default_factory=list)
+    unresolved_mutation_errors: list[str] = field(default_factory=list)
     verification_argument_denials: int = 0
     verification_recoveries: int = 0
     verification_failures: list[dict[str, object]] = field(default_factory=list)
@@ -66,6 +75,9 @@ class CompletionLedger:
                 self._clear_tool_errors("WRITE_")
                 self._clear_tool_errors("EDIT_")
                 self._clear_tool_errors("DIRECTORY_")
+                self._clear_tool_errors("PATH_")
+                self._clear_tool_errors("PLUGIN_")
+                self.unresolved_mutation_errors.clear()
             elif tool == "workspace_command":
                 self.successful_verifications += 1
                 profile = result.public_metadata.get("profile")
@@ -77,6 +89,12 @@ class CompletionLedger:
             return
         if result.error and result.error.code not in self.unresolved_errors:
             self.unresolved_errors.append(result.error.code)
+        if (
+            result.error
+            and (tool in _MUTATION_TOOLS or plugin_mutation)
+            and result.error.code not in self.unresolved_mutation_errors
+        ):
+            self.unresolved_mutation_errors.append(result.error.code)
         if (
             tool == "workspace_command"
             and result.error is not None
@@ -126,6 +144,22 @@ class CompletionLedger:
                     if language == "zh"
                     else "Project verification was attempted, but no command succeeded. "
                     "Retry with an allowed profile or report the run as incomplete."
+                ),
+            )
+        unresolved_mutations = list(self.unresolved_mutation_errors)
+        if unresolved_mutations:
+            return CompletionDecision(
+                accepted=False,
+                reason="MUTATION_ERROR_UNRESOLVED",
+                guidance=(
+                    "最近一次工作区写入未成功 ("
+                    + ", ".join(unresolved_mutations)
+                    + "). 请先解决该写入错误, 再报告完成; 否则报告运行未完成。"
+                    if language == "zh"
+                    else "The latest workspace mutation did not succeed ("
+                    + ", ".join(unresolved_mutations)
+                    + "). Resolve the mutation error before reporting completion, "
+                    "or report the run as incomplete."
                 ),
             )
         return CompletionDecision(accepted=True)
