@@ -6,7 +6,7 @@ import json
 import shutil
 from pathlib import Path
 
-from leanharness.errors import PluginError, PluginManifestError
+from leanharness.errors import PluginError, PluginManifestError, PluginNotFoundError
 from leanharness.plugins.contracts import PluginManifest, parse_manifest
 from leanharness.storage import LocalStore, PluginRecord
 from leanharness.tools.contracts import BuiltinTool
@@ -30,7 +30,17 @@ class PluginManager:
         self._validate_source(source_path, manifest)
         target = self.root / manifest.id
         if target.exists():
-            raise PluginError("Plugin is already installed; remove it before reinstalling")
+            try:
+                self.store.get_plugin(manifest.id)
+            except PluginNotFoundError:
+                # A prior install may have copied files before its metadata
+                # transaction failed. Recover only this exact, unreferenced
+                # plugin directory so the next install is deterministic.
+                if target.is_symlink() or not target.is_dir():
+                    raise PluginError("Plugin install path is invalid") from None
+                shutil.rmtree(target)
+            else:
+                raise PluginError("Plugin is already installed; remove it before reinstalling")
         try:
             shutil.copytree(source_path, target)
         except OSError as exc:

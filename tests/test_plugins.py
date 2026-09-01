@@ -52,6 +52,17 @@ def test_duplicate_plugin_install_is_rejected_without_replacing_files(tmp_path: 
         assert Path(installed.install_path).is_dir()
 
 
+def test_orphaned_plugin_directory_is_recovered_on_install(tmp_path: Path) -> None:
+    with LocalStore(tmp_path / "data") as store:
+        manager = PluginManager(store)
+        orphan = manager.root / "leanharness-docx"
+        orphan.mkdir(parents=True)
+        (orphan / "stale.txt").write_text("stale", encoding="utf-8")
+        installed = manager.install(DOCX_PLUGIN)
+        assert installed.id == "leanharness-docx"
+        assert not (Path(installed.install_path) / "stale.txt").exists()
+
+
 def test_plugin_host_rejects_oversized_input_before_starting_process(tmp_path: Path) -> None:
     host = PluginHost(DOCX_PLUGIN, ("python", "plugin.py"))
     oversized = {"content": "x" * (MAX_PLUGIN_REQUEST_BYTES + 1)}
