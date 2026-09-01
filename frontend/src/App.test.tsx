@@ -549,6 +549,45 @@ describe("application shell", () => {
     expect(run.mock.calls[0]?.[6]).toEqual([]);
   });
 
+  it("retries a failed attachment upload and removes the stored attachment", async () => {
+    const user = userEvent.setup();
+    const attachment: Attachment = {
+      id: "attachment-retry",
+      session_id: baseSession.id,
+      message_id: null,
+      filename: "retry.txt",
+      media_type: "text/plain",
+      kind: "text",
+      byte_size: 5,
+      sha256: "b".repeat(64),
+      created_at: baseSession.created_at,
+    };
+    const attachmentClient = {
+      upload: vi.fn()
+        .mockRejectedValueOnce(new Error("上传暂时失败"))
+        .mockResolvedValueOnce(attachment),
+      delete: vi.fn(async () => undefined),
+    };
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        sessionClient={mockSessionClient()}
+        attachmentClient={attachmentClient}
+      />,
+    );
+    await screen.findByText("已保存的结论");
+
+    const file = new File(["retry"], "retry.txt", { type: "text/plain" });
+    await user.upload(screen.getByLabelText("选择文本或代码附件"), file);
+    expect(await screen.findByRole("alert")).toHaveTextContent("上传暂时失败");
+    await user.click(screen.getByRole("button", { name: "重试上传 retry.txt" }));
+    await waitFor(() => expect(attachmentClient.upload).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("button", { name: "移除附件 retry.txt" }));
+    await waitFor(() => expect(attachmentClient.delete).toHaveBeenCalledWith(attachment.id));
+    expect(screen.queryByText("retry.txt")).not.toBeInTheDocument();
+  });
+
   it("shows only enabled plugins and passes an explicit selection to the run", async () => {
     const user = userEvent.setup();
     const plugins: PluginSummary[] = [

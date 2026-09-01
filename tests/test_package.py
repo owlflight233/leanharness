@@ -155,6 +155,28 @@ def test_session_parser_supports_lifecycle_commands() -> None:
     assert renamed.title == "New title"
 
 
+def test_plugin_cli_supports_local_lifecycle(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_dir = tmp_path / "data"
+    plugin = Path(__file__).parents[1] / "plugins" / "leanharness-docx"
+    common = ["--data-dir", str(data_dir)]
+
+    assert main(["plugin", "install", str(plugin), *common]) == 0
+    assert capsys.readouterr().out.strip() == "leanharness-docx"
+    assert main(["plugin", "enable", "leanharness-docx", *common]) == 0
+    capsys.readouterr()
+    assert main(["plugin", "list", *common]) == 0
+    assert "leanharness-docx\t0.1.0\tenabled" in capsys.readouterr().out
+    assert main(["plugin", "disable", "leanharness-docx", *common]) == 0
+    capsys.readouterr()
+    assert main(["plugin", "remove", "leanharness-docx", *common]) == 0
+    capsys.readouterr()
+    assert main(["plugin", "list", *common]) == 0
+    assert capsys.readouterr().out == ""
+
+
 def test_run_cli_separates_trace_and_final_answer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

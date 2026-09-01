@@ -47,5 +47,8 @@ def get_health(config: AppConfig) -> HealthSnapshot:
             "tool.git.read",
             "approval.interactive",
             "input.interactive",
+            "input.attachment",
+            "plugin.local",
+            "tool.docx",
         ),
     )

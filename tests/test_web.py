@@ -198,6 +198,9 @@ def test_health_contract_is_exact(tmp_path: Path) -> None:
             "tool.git.read",
             "approval.interactive",
             "input.interactive",
+            "input.attachment",
+            "plugin.local",
+            "tool.docx",
         ],
     }
 
@@ -567,8 +570,32 @@ def test_plugin_api_lifecycle_and_permission_projection(
     )
     assert rejected.status_code == 422
     assert app.state.store.list_runs(rejected_session["id"]) == []
+    run_id = json.loads(unrestricted_run.text.splitlines()[-1])["run_id"]
+    app.state.store.append_event(
+        unrestricted_session["id"],
+        run_id,
+        999,
+        "tool.completed",
+        {
+            "type": "tool.completed",
+            "sequence": 999,
+            "run_id": run_id,
+            "tool": "docx_generate",
+            "metadata": {
+                "plugin_id": "leanharness-docx",
+                "path": "artifacts/report.docx",
+                "ok": True,
+            },
+        },
+    )
     assert delete(app, "/api/v1/plugins/leanharness-docx").json()["deleted"] is True
     assert get(app, "/api/v1/plugins").json() == {"plugins": []}
+    detail = get(app, f"/api/v1/sessions/{unrestricted_session['id']}").json()
+    assert any(
+        event.get("tool") == "docx_generate"
+        for run in detail["runs"]
+        for event in run["trace"]
+    )
 
 
 def test_model_check_contract_does_not_expose_credentials(

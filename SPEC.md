@@ -43,15 +43,15 @@ The first milestone is complete when:
 - the React client builds and reports backend health;
 - the local server defaults to `127.0.0.1:4318`;
 - backend and frontend tests pass from a clean checkout;
-- no model, file mutation, shell, plugin, or session API is falsely advertised.
+- no model, file mutation, shell, or session API is falsely advertised.
 
 ## Non-goals for the foundation milestone
 
 - No model request is sent.
 - No workspace file is modified by the application.
 - No shell command is exposed to a model.
-- No plugin is downloaded, auto-discovered, or allowed to replace the fixed
-  runtime, permission, or trace core.
+- No plugin is downloaded or auto-discovered. Explicitly installed local
+  plugins cannot replace the fixed runtime, permission, or trace core.
 - No conversation or run is persisted.
 - No multi-agent orchestration is implemented.
 
