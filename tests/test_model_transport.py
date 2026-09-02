@@ -9,6 +9,7 @@ from leanharness.errors import (
     ModelAuthError,
     ModelContextLengthError,
     ModelProtocolError,
+    ModelQuotaError,
     ModelRateLimitError,
     ModelTimeoutError,
     ModelUnavailableError,
@@ -247,6 +248,25 @@ def test_transport_failures_map_to_stable_errors(raised, error_type, code) -> No
     with pytest.raises(error_type) as caught:
         run(client.complete(ModelRequest(messages=(ModelMessage(role="user", content="x"),))))
     assert caught.value.code == code
+
+
+def test_payment_required_maps_to_quota_error() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            402,
+            json={
+                "error": {
+                    "message": "Insufficient Balance",
+                    "type": "unknown_error",
+                    "code": "invalid_request_error",
+                }
+            },
+        )
+
+    client = OpenAICompatibleClient(config(), transport=httpx.MockTransport(handler))
+    with pytest.raises(ModelQuotaError, match="balance or quota") as caught:
+        run(client.complete(ModelRequest(messages=(ModelMessage(role="user", content="x"),))))
+    assert caught.value.code == "MODEL_QUOTA_EXCEEDED"
 
 
 @pytest.mark.parametrize(

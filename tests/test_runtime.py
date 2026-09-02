@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from leanharness.errors import ModelProtocolError, ModelUnavailableError
+from leanharness.errors import ModelProtocolError, ModelQuotaError, ModelUnavailableError
 from leanharness.models import ModelMessage, ModelRequest, ModelResponse, ModelUsage, ToolCall
 from leanharness.permissions import ApprovalCoordinator, PermissionMode
 from leanharness.runtime import (
@@ -506,6 +506,17 @@ def test_runtime_fails_after_second_protocol_error(tmp_path: Path) -> None:
     serialized = json.dumps([event.to_dict() for event in events])
     assert "first malformed response" not in serialized
     assert "second malformed response" not in serialized
+
+
+def test_runtime_does_not_protocol_retry_quota_failure(tmp_path: Path) -> None:
+    model = ScriptedModel([ModelQuotaError("Model account balance or quota is insufficient")])
+
+    events = collect(ReadOnlyAgent(tmp_path, model, max_steps=4))
+
+    assert events[-1].type == "run.failed"
+    assert events[-1].error_code == "MODEL_QUOTA_EXCEEDED"
+    assert events[-1].error_message == "Model account balance or quota is insufficient"
+    assert len(model.requests) == 1
 
 
 def test_structured_write_is_reported_as_changed_file(tmp_path: Path) -> None:

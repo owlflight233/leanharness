@@ -14,6 +14,7 @@ from leanharness.errors import (
     ModelContextLengthError,
     ModelError,
     ModelProtocolError,
+    ModelQuotaError,
     ModelRateLimitError,
     ModelTimeoutError,
     ModelUnavailableError,
@@ -219,6 +220,8 @@ class OpenAICompatibleClient:
     def _raise_for_status(status_code: int, body: bytes = b"") -> None:
         if status_code in {401, 403}:
             raise ModelAuthError("Model authentication failed")
+        if status_code == 402:
+            raise ModelQuotaError("Model account balance or quota is insufficient")
         if status_code == 429:
             raise ModelRateLimitError("Model service rate limit reached")
         if status_code in {408, 504}:

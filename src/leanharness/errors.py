@@ -49,6 +49,12 @@ class ModelRateLimitError(ModelError):
     code = "MODEL_RATE_LIMITED"
 
 
+class ModelQuotaError(ModelError):
+    """Raised when the upstream account cannot serve the request due to billing/quota."""
+
+    code = "MODEL_QUOTA_EXCEEDED"
+
+
 class ModelTimeoutError(ModelError):
     """Raised when the upstream does not respond within the configured timeout."""
 
