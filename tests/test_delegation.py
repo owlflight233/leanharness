@@ -10,6 +10,7 @@ from leanharness.models import ModelRequest, ModelResponse, ToolCall
 from leanharness.permissions import PermissionMode
 from leanharness.runtime import CodingAgent
 from leanharness.runtime.delegation import (
+    CHILD_MAX_STEPS,
     DELEGATE_ANALYSIS_TOOL_NAME,
     ParallelAnalysisTool,
     ScopedReadOnlyToolRegistry,
@@ -225,6 +226,97 @@ def test_worker_completion_keeps_outcome_tool_available(tmp_path: Path) -> None:
         for definition in request.tools
     )
     assert not any(request.tool_choice == "none" for request in model.worker_requests)
+
+
+def test_worker_structured_outcome_is_processed_on_reserved_last_step(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src.py").write_text("print('ok')", encoding="utf-8")
+
+    class LastStepWorkerModel:
+        def __init__(self) -> None:
+            self.parent_calls = 0
+            self.worker_calls = 0
+            self.last_worker_tools: tuple[str, ...] = ()
+
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            is_worker = "delegated repository analyst" in request.messages[0].content
+            if not is_worker:
+                self.parent_calls += 1
+                if self.parent_calls == 1:
+                    return ModelResponse(
+                        content="Delegating analysis.",
+                        tool_calls=(_delegate_call([_task("inspect entry", "src.py")]),),
+                    )
+                if self.parent_calls == 2:
+                    return ModelResponse(
+                        content="Checking the delegated result.",
+                        tool_calls=(
+                            ToolCall(
+                                "parent-read",
+                                "workspace_list",
+                                {"path": "."},
+                            ),
+                        ),
+                    )
+                return ModelResponse(
+                    content="",
+                    tool_calls=(
+                        ToolCall(
+                            "parent-outcome",
+                            "report_run_outcome",
+                            {
+                                "status": "completed",
+                                "answer": "The delegated analysis is complete.",
+                            },
+                        ),
+                    ),
+                )
+
+            self.worker_calls += 1
+            self.last_worker_tools = tuple(tool.name for tool in request.tools)
+            if self.worker_calls < CHILD_MAX_STEPS:
+                return ModelResponse(
+                    content="Reading assigned evidence.",
+                    tool_calls=(
+                        ToolCall(
+                            f"read-entry-{self.worker_calls}",
+                            "workspace_read",
+                            {"path": "src.py", "start_line": self.worker_calls},
+                        ),
+                    ),
+                )
+            return ModelResponse(
+                content="",
+                tool_calls=(
+                    ToolCall(
+                        "worker-outcome",
+                        "report_run_outcome",
+                        {
+                            "status": "completed",
+                            "answer": json.dumps(
+                                {
+                                    "summary": "Entry inspected",
+                                    "facts": ["The entry file is readable."],
+                                    "blockers": [],
+                                }
+                            ),
+                        },
+                    ),
+                ),
+            )
+
+    model = LastStepWorkerModel()
+    agent = CodingAgent(tmp_path, model, enable_delegation=True, max_steps=5)
+
+    async def run():
+        return [event async for event in agent.run("Inspect entry")]
+
+    events = asyncio.run(run())
+
+    assert events[-1].type == "run.completed"
+    assert model.worker_calls == CHILD_MAX_STEPS
+    assert model.last_worker_tools == ("report_run_outcome",)
 
 
 def test_incomplete_worker_reports_budget_boundary_instead_of_invalid_json(

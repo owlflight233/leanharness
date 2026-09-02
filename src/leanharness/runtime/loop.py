@@ -399,7 +399,17 @@ class CodingAgent:
                     "usage.reported", step=step, usage=response.usage.to_dict()
                 )
 
-            if summary_round:
+            # The parent runtime's reserved summary round is text-only and
+            # terminal. A delegated worker uses the same boundary to narrow
+            # its tools, but must still process a valid report_run_outcome so
+            # its structured JSON result can be accepted.
+            worker_outcome_round = (
+                summary_round
+                and self._summary_outcome_only
+                and len(response.tool_calls) == 1
+                and response.tool_calls[0].name == OUTCOME_TOOL_NAME
+            )
+            if summary_round and not worker_outcome_round:
                 self.state = transition(self.state, RunState.EXHAUSTED)
                 yield self._event(
                     "run.incomplete",
