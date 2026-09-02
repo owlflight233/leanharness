@@ -22,6 +22,20 @@ StepUpdater = Callable[[str, PlanStepState, dict[str, object] | None, str | None
 MAX_STEP_ANSWER_CHARS = 6_000
 MAX_PLAN_CONTEXT_CHARS = 12_000
 
+# A plan can be confirmed while the session is still in inspect mode.  If the
+# model then asks for a capability that the current registry intentionally does
+# not expose, that is a recoverable permission boundary, not a broken plan or a
+# broken model request.  Keep this mapping narrow so real runtime failures still
+# surface as plan.failed.
+_RECOVERABLE_PERMISSION_CODES = frozenset(
+    {
+        "TOOL_NOT_FOUND",
+        "TOOL_UNAVAILABLE",
+        "MUTATION_NOT_REQUESTED",
+        "APPROVAL_UNAVAILABLE",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PlanEvent:
@@ -360,6 +374,33 @@ class PlanController:
             if terminal.type == "run.failed"
             else PlanStepState.PENDING
         )
+
+        permission_reason = _permission_pause_reason(terminal)
+        if permission_reason is not None:
+            for step in enabled:
+                self._update_step(step, PlanStepState.PENDING, error_code=permission_reason)
+            report = self._build_report("paused")
+            yield self._event(
+                "plan.paused",
+                summary=_permission_pause_summary(permission_reason, self.agent.language),
+                answer=report,
+                metadata={
+                    "step_ids": [step.id for step in enabled],
+                    "reason": permission_reason,
+                    "requires_permission_change": True,
+                },
+            )
+            yield self._runtime_event(
+                "run.incomplete",
+                answer=report,
+                summary=_permission_pause_summary(permission_reason, self.agent.language),
+                error_code=permission_reason,
+                metadata=self._terminal_metadata(
+                    incomplete_reason="PERMISSION_REQUIRED",
+                    permission_required=True,
+                ),
+            )
+            return
         for step in enabled:
             self._update_step(
                 step,
@@ -369,11 +410,17 @@ class PlanController:
             )
         if terminal.type == "run.incomplete":
             report = self._build_report("paused")
+            reason = _incomplete_reason(terminal)
+            summary = _plan_incomplete_summary(reason, terminal.summary, self.agent.language)
             yield self._event(
                 "plan.paused",
-                summary=terminal.summary,
+                summary=summary,
                 answer=report,
-                metadata={"step_ids": [step.id for step in enabled]},
+                metadata={
+                    "step_ids": [step.id for step in enabled],
+                    "reason": reason,
+                    "requires_permission_change": reason == "PERMISSION_REQUIRED",
+                },
             )
         else:
             yield self._event(
@@ -383,7 +430,21 @@ class PlanController:
                 error_message=terminal.error_message,
             )
         if terminal.type == "run.incomplete":
-            terminal = replace(terminal, answer=report)
+            terminal = replace(
+                terminal,
+                answer=report,
+                summary=summary,
+                error_code=(
+                    "TOOL_NOT_FOUND"
+                    if reason == "PERMISSION_REQUIRED"
+                    else terminal.error_code
+                ),
+                metadata={
+                    **(terminal.metadata or {}),
+                    "incomplete_reason": reason,
+                    "permission_required": reason == "PERMISSION_REQUIRED",
+                },
+            )
         yield self._annotate_shared_runtime_event(terminal)
 
     def _annotate_runtime_event(self, event: RuntimeEvent, step: PlanStep) -> RuntimeEvent:
@@ -495,6 +556,7 @@ class PlanController:
         self,
         *,
         incomplete_reason: str | None = None,
+        permission_required: bool = False,
     ) -> dict[str, object]:
         return {
             "plan_id": self.plan.id,
@@ -503,6 +565,7 @@ class PlanController:
             "metrics": self.agent.metrics.to_dict(),
             "context": self.agent.metrics.context_dict(),
             **({"incomplete_reason": incomplete_reason} if incomplete_reason else {}),
+            **({"permission_required": True} if permission_required else {}),
         }
 
     def _update_step(
@@ -558,6 +621,85 @@ def _shared_plan_task(plan: Plan, steps: tuple[PlanStep, ...]) -> str:
         "with the available tools, verify the workspace, and report only when the whole "
         "request is complete. Do not claim work that has no tool evidence.\n"
         f"Plan goal: {plan.task}\nPlan steps:\n{rendered}"
+    )
+
+
+def _permission_pause_reason(event: RuntimeEvent) -> str | None:
+    """Return a recoverable permission code carried by a failed run."""
+
+    if event.type not in {"run.failed", "run.incomplete"}:
+        return None
+    candidates: list[object] = [event.error_code]
+    metadata = event.metadata or {}
+    candidates.append(metadata.get("primary_error_code"))
+    evidence = metadata.get("evidence")
+    if isinstance(evidence, dict):
+        candidates.extend(evidence.get("unresolved_errors", []))
+    for value in candidates:
+        if isinstance(value, str) and value in _RECOVERABLE_PERMISSION_CODES:
+            return value
+    # A repeated unavailable call is normally classified as RUN_STALLED by
+    # the runtime.  The causal error is still preserved in the evidence; if
+    # it is present, pausing is safer and recoverable than marking the plan
+    # permanently failed.
+    if event.type == "run.failed" and event.error_code == "RUN_STALLED":
+        evidence = metadata.get("evidence")
+        if isinstance(evidence, dict):
+            for code in evidence.get("unresolved_errors", []):
+                if isinstance(code, str) and code in _RECOVERABLE_PERMISSION_CODES:
+                    return code
+    # Repeated requests for an unavailable tool are surfaced by the runtime as
+    # RUN_STALLED with the original code retained in primary_error_code/evidence.
+    return None
+
+
+def _permission_pause_summary(code: str, language: str) -> str:
+    if language == "zh":
+        return f"当前权限不允许执行所需操作（{code}），切换会话权限后可恢复计划"  # noqa: RUF001
+    return (
+        "The current permission does not allow the required action "
+        f"({code}); change the session permission and resume the plan"
+    )
+
+
+def _incomplete_reason(event: RuntimeEvent) -> str:
+    metadata = event.metadata or {}
+    value = metadata.get("incomplete_reason")
+    if isinstance(value, str) and value:
+        if value == "MODEL_REPORTED_INCOMPLETE":
+            evidence = metadata.get("evidence")
+            if isinstance(evidence, dict):
+                for code in evidence.get("unresolved_errors", []):
+                    if isinstance(code, str) and code in _RECOVERABLE_PERMISSION_CODES:
+                        return "PERMISSION_REQUIRED"
+        return value
+    return "MODEL_REPORTED_INCOMPLETE"
+
+
+def _plan_incomplete_summary(reason: str, fallback: str | None, language: str) -> str:
+    if reason == "PERMISSION_REQUIRED":
+        return _permission_pause_summary("TOOL_NOT_FOUND", language)
+    if reason in _RECOVERABLE_PERMISSION_CODES:
+        return _permission_pause_summary(reason, language)
+    if reason == "MODEL_REPORTED_INCOMPLETE":
+        return (
+            "Agent 报告当前任务尚未完成，计划已暂停，可恢复继续执行"  # noqa: RUF001
+            if language == "zh"
+            else (
+                "The agent reported that the task is not complete; "
+                "the plan is paused and can be resumed"
+            )
+        )
+    if reason in {"STEP_BUDGET_EXHAUSTED", "PLAN_BUDGET_EXHAUSTED"}:
+        return (
+            "运行预算已用完，计划已暂停"  # noqa: RUF001
+            if language == "zh"
+            else "The run budget was exhausted; the plan is paused"
+        )
+    return fallback or (
+        "计划已暂停，尚未完成"  # noqa: RUF001
+        if language == "zh"
+        else "The plan is paused before completion"
     )
 
 

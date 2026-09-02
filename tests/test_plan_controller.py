@@ -294,5 +294,62 @@ def test_unbounded_plan_persists_evidence_report_when_model_stops_incomplete(
     assert events[-2].type == "plan.paused"
     assert events[-1].type == "run.incomplete"
     assert events[-1].answer == events[-2].answer
+    assert "budget" not in (events[-2].summary or "").lower()
+    assert "not complete" in (events[-2].summary or "").lower()
     assert "Temporary model report." not in events[-1].answer
     assert "## Remaining" in events[-1].answer
+
+
+def test_plan_pauses_with_permission_reason_instead_of_plan_failure(
+    tmp_path: Path,
+) -> None:
+    class PermissionBlockedModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            self.calls += 1
+            if self.calls > 1:
+                return ModelResponse(
+                    content="",
+                    tool_calls=(
+                        ToolCall(
+                            "incomplete",
+                            "report_run_outcome",
+                            {"status": "incomplete", "answer": "Need write access."},
+                        ),
+                    ),
+                )
+            return ModelResponse(
+                content="",
+                tool_calls=(
+                    ToolCall(
+                        "missing-write",
+                        "workspace_patch",
+                        {"patch": "*** Begin Patch\n*** End Patch"},
+                    ),
+                ),
+            )
+
+    controller = PlanController(
+        make_plan(),
+        tmp_path,
+        PermissionBlockedModel(),
+        permission_mode=PermissionMode.INSPECT,
+        language="en",
+        max_steps=None,
+    )
+
+    async def collect():
+        return [event async for event in controller.run()]
+
+    events = asyncio.run(collect())
+    # The unavailable mutating capability is a recoverable pause.  It must not
+    # be presented as a broken plan, and the user can resume after changing
+    # the session permission.
+    assert any(event.type == "plan.paused" for event in events)
+    assert not any(event.type == "plan.failed" for event in events)
+    terminal = events[-1]
+    assert terminal.type == "run.incomplete"
+    assert terminal.error_code == "TOOL_NOT_FOUND"
+    assert terminal.metadata["incomplete_reason"] == "PERMISSION_REQUIRED"
