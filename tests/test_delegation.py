@@ -161,6 +161,73 @@ class DelegationModel:
         return ModelResponse(content="Both delegated checks completed.")
 
 
+class WorkerCompletionContractModel:
+    """Ensure a worker keeps its outcome tool available through its final step."""
+
+    def __init__(self) -> None:
+        self.worker_requests: list[ModelRequest] = []
+        self.parent_delegated = False
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        if "delegated repository analyst" not in request.messages[0].content:
+            if self.parent_delegated:
+                return ModelResponse(content="Delegated evidence is sufficient.")
+            self.parent_delegated = True
+            return ModelResponse(
+                content="Delegating analysis.",
+                tool_calls=(
+                    _delegate_call([_task("inspect entry", "src.py")]),
+                ),
+            )
+        self.worker_requests.append(request)
+        if not any(message.role == "tool" for message in request.messages):
+            return ModelResponse(
+                content="Reading the assigned file.",
+                tool_calls=(
+                    ToolCall("read-entry", "workspace_read", {"path": "src.py"}),
+                ),
+            )
+        return ModelResponse(
+            content="",
+            tool_calls=(
+                ToolCall(
+                    "worker-outcome",
+                    "report_run_outcome",
+                    {
+                        "status": "completed",
+                        "answer": json.dumps(
+                            {
+                                "summary": "Entry inspected",
+                                "facts": ["The entry file is readable."],
+                                "blockers": [],
+                            }
+                        ),
+                    },
+                ),
+            ),
+        )
+
+
+def test_worker_completion_keeps_outcome_tool_available(tmp_path: Path) -> None:
+    (tmp_path / "src.py").write_text("print('ok')", encoding="utf-8")
+    model = WorkerCompletionContractModel()
+    agent = CodingAgent(tmp_path, model, enable_delegation=True, max_steps=4)
+
+    async def run():
+        return [event async for event in agent.run("Inspect entry")]
+
+    events = asyncio.run(run())
+
+    assert events[-1].type == "run.completed"
+    assert any(
+        definition.name == "report_run_outcome"
+        for definition in model.worker_requests[-1].tools
+    )
+    assert not any(
+        request.tool_choice == "none" for request in model.worker_requests
+    )
+
+
 def test_parent_receives_only_structured_delegated_evidence(tmp_path: Path) -> None:
     (tmp_path / "src.py").write_text("APP_SECRET_SOURCE = True", encoding="utf-8")
     (tmp_path / "tests.py").write_text("TEST_SECRET_SOURCE = True", encoding="utf-8")

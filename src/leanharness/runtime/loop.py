@@ -1135,7 +1135,11 @@ class CodingAgent:
             session_id=self.session_id,
             history=(),
             history_sources=(),
-            reserve_summary_round=True,
+            # Workers have a fixed public JSON completion contract.  Do not
+            # reserve the parent's summary-round behavior here: that round
+            # removes tools, which would make report_run_outcome unavailable
+            # exactly when the worker must finalize its structured result.
+            reserve_summary_round=False,
             include_outcome_tool=True,
             context_sanitizer=self._context_sanitizer,
             enable_delegation=False,
