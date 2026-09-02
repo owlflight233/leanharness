@@ -100,6 +100,28 @@ def test_projection_keeps_system_first_and_stable_sources() -> None:
     assert projection.digest
 
 
+def test_projection_marks_persisted_history_and_active_task() -> None:
+    journal = ContextJournal(
+        (ModelMessage(role="system", content="rules"), ModelMessage(role="user", content="now"))
+    )
+    history = (
+        ContextSource("message:old", ModelMessage(role="user", content="old task")),
+        ContextSource(
+            "run:old:evidence",
+            ModelMessage(role="system", content='{"historical_run_evidence":{}}'),
+        ),
+        ContextSource("message:answer", ModelMessage(role="assistant", content="old answer")),
+    )
+
+    projection = ContextProjector(max_chars=8_000, soft_chars=6_000).project(history, journal)
+    contents = [message.content for message in projection.messages]
+
+    assert contents[0] == "rules"
+    assert "PUBLIC HISTORY START" in contents[1]
+    assert contents[2:5] == ["old task", '{"historical_run_evidence":{}}', "old answer"]
+    assert contents[5] == "now"
+
+
 def test_deterministic_compaction_preserves_tool_protocol_and_recent_steps() -> None:
     journal = ContextJournal(
         (ModelMessage(role="system", content="rules"), ModelMessage(role="user", content="task"))
@@ -352,6 +374,24 @@ def test_historical_run_evidence_is_projected_without_tool_content(tmp_path: Pat
     assert "README.md" in rendered
     assert "private source body" not in rendered
     assert history[-1].message.content == "README inspected"
+
+
+def test_historical_run_evidence_keeps_public_task_and_answer(tmp_path: Path) -> None:
+    store = LocalStore(tmp_path / "data")
+    session = store.create_session(store.ensure_project(tmp_path))
+    run_record = store.create_run(session.id, "coding", "Inspect README", 4)
+    store.update_run(run_record.id, state="COMPLETED", answer="README inspected")
+
+    history = context_history_for_session(store, session)
+    evidence = next(
+        source.message.content
+        for source in history
+        if source.source_id.endswith(":evidence")
+    )
+
+    payload = json.loads(evidence)["historical_run_evidence"]
+    assert payload["task"] == "Inspect README"
+    assert payload["answer"] == "README inspected"
 
 
 def test_persistent_history_budget_keeps_complete_run_turns(tmp_path: Path) -> None:

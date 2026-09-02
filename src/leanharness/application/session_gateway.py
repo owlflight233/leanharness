@@ -299,6 +299,11 @@ def _run_evidence(store: LocalStore, run: RunRecord) -> ContextSource:
             "state": run.state,
             "permission_mode": run.permission_mode,
             "error_code": run.error_code,
+            # Keep the durable run identity and its public task/answer visible
+            # even when a message was not written (for example, an interrupted
+            # stream).  These are bounded public fields, never raw tool data.
+            "task": run.task[:2_000],
+            "answer": (run.answer or "")[:2_000],
             "evidence": terminal_evidence,
             "tools": tools[-12:],
             "re_read_workspace_for_current_facts": True,
@@ -320,6 +325,8 @@ def _run_evidence(store: LocalStore, run: RunRecord) -> ContextSource:
                 "state": run.state,
                 "permission_mode": run.permission_mode,
                 "error_code": run.error_code,
+                "task": run.task[:2_000],
+                "answer": (run.answer or "")[:2_000],
                 "evidence_sha256": hashlib.sha256(evidence_json.encode("utf-8")).hexdigest(),
                 "evidence_compacted": True,
                 "re_read_workspace_for_current_facts": True,

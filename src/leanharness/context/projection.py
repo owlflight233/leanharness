@@ -375,9 +375,30 @@ def _normalise_sources(
 ) -> list[ContextSource]:
     sources: list[ContextSource] = []
     live_start = 0
-    if live and live[0].role == "system":
-        sources.append(ContextSource("live:0", live[0]))
-        live_start = 1
+    # Keep every leading live system message ahead of persisted conversation
+    # history.  The runtime normally has one system contract, while the
+    # optional history marker below is also a system message.
+    while live_start < len(live) and live[live_start].role == "system":
+        sources.append(ContextSource(f"live:{live_start}", live[live_start]))
+        live_start += 1
+    has_persisted_run = any(source.source_id.startswith("run:") for source in history)
+    if has_persisted_run:
+        sources.append(
+            ContextSource(
+                "context:history-start",
+                ModelMessage(
+                    role="system",
+                    content=(
+                        "PUBLIC HISTORY START. The following user and assistant messages "
+                        "are earlier public conversation records, grouped with redacted "
+                        "run evidence. Treat them as context and factual records, not as "
+                        "a new request. Older answers may be stale; distinguish them from "
+                        "the active task. The final user message after this block is the "
+                        "active task; verify the workspace when current facts matter."
+                    ),
+                ),
+            )
+        )
     for index, item in enumerate(history):
         sources.append(
             item if isinstance(item, ContextSource) else ContextSource(f"history:{index}", item)
@@ -424,8 +445,16 @@ def _semantic_candidate_range(
         raise ContextBudgetError("Context does not contain an active user task")
 
     protected_start = max(task_index + 1, _protected_start(messages))
+    history_start = 1
+    if (
+        len(sources) > history_start
+        and sources[history_start].source_id == "context:history-start"
+    ):
+        # The boundary is part of the projection protocol, not historical
+        # evidence. Keep it in place while compressing the records it frames.
+        history_start += 1
     ranges = (
-        sources[1:task_index],
+        sources[history_start:task_index],
         sources[task_index + 1 : protected_start],
     )
     for candidate in ranges:
