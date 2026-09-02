@@ -116,6 +116,7 @@ class CodingAgent:
         enable_delegation: bool = False,
         system_message: str | None = None,
         model_output_tokens: int = MODEL_OUTPUT_TOKEN_BUDGET,
+        summary_outcome_only: bool = False,
     ) -> None:
         if max_steps is not None and not MIN_MAX_STEPS <= max_steps <= MAX_MAX_STEPS:
             raise ValueError(f"max_steps must be between {MIN_MAX_STEPS} and {MAX_MAX_STEPS}")
@@ -129,6 +130,7 @@ class CodingAgent:
         self._context_sanitizer = context_sanitizer
         self._system_message = system_message
         self._model_output_tokens = model_output_tokens
+        self._summary_outcome_only = summary_outcome_only
         if enable_delegation:
             self.tools.register(
                 ParallelAnalysisTool(self.workspace, self._run_delegated_analysis)
@@ -1135,16 +1137,16 @@ class CodingAgent:
             session_id=self.session_id,
             history=(),
             history_sources=(),
-            # Workers have a fixed public JSON completion contract.  Do not
-            # reserve the parent's summary-round behavior here: that round
-            # removes tools, which would make report_run_outcome unavailable
-            # exactly when the worker must finalize its structured result.
-            reserve_summary_round=False,
+            # Workers have a fixed public JSON completion contract. Their last
+            # bounded step exposes only report_run_outcome (see
+            # summary_outcome_only), forcing a protocol-valid structured result.
+            reserve_summary_round=True,
             include_outcome_tool=True,
             context_sanitizer=self._context_sanitizer,
             enable_delegation=False,
             system_message=worker_system_prompt(self.language, request.scope),
             model_output_tokens=4_096,
+            summary_outcome_only=True,
         )
         async for event in child.run(request.task):
             if (
@@ -1187,24 +1189,45 @@ class CodingAgent:
             if terminal_type == "run.incomplete"
             else SubtaskStatus.FAILED
         )
-        try:
-            summary, facts, blockers = parse_worker_answer(
-                terminal_answer,
-                sanitizer=self._context_sanitizer,
-            )
-        except (ValueError, TypeError, json.JSONDecodeError):
+        if status is SubtaskStatus.COMPLETED:
+            try:
+                summary, facts, blockers = parse_worker_answer(
+                    terminal_answer,
+                    sanitizer=self._context_sanitizer,
+                )
+            except (ValueError, TypeError, json.JSONDecodeError):
+                summary = (
+                    "子任务未返回有效的结构化证据"
+                    if self.language == "zh"
+                    else "The worker did not return valid structured evidence"
+                )
+                facts = ()
+                blockers = ("SUBTASK_RESULT_INVALID",)
+                status = SubtaskStatus.INCOMPLETE
+                terminal_error = "SUBTASK_RESULT_INVALID"
+        else:
+            # An incomplete worker still has useful, runtime-observed evidence
+            # such as files and tools used. Preserve that boundary explicitly;
+            # do not reinterpret an exhausted worker as malformed JSON.
             summary = (
-                "子任务未返回有效的结构化证据"
+                "子任务在有限步数内完成了部分观察，但未形成结构化结论"  # noqa: RUF001
                 if self.language == "zh"
-                else "The worker did not return valid structured evidence"
+                else (
+                    "The worker gathered partial observations but did not finish "
+                    "its structured conclusion"
+                )
             )
             facts = ()
             blockers = (
-                "SUBTASK_RESULT_INVALID",
+                "SUBTASK_BUDGET_EXHAUSTED"
+                if status is SubtaskStatus.INCOMPLETE
+                else "SUBTASK_FAILED",
             )
-            if status is SubtaskStatus.COMPLETED:
-                status = SubtaskStatus.INCOMPLETE
-            terminal_error = "SUBTASK_RESULT_INVALID"
+            terminal_error = (
+                "SUBTASK_BUDGET_EXHAUSTED"
+                if status is SubtaskStatus.INCOMPLETE
+                else terminal_error
+            )
 
         return SubtaskResult(
             request=request,
@@ -1227,6 +1250,13 @@ class CodingAgent:
             for definition in self.tools.definitions
             if definition.name not in self._disabled_tools
         )
+        if summary_round and self._summary_outcome_only:
+            return ModelRequest(
+                messages=messages,
+                max_tokens=self._model_output_tokens,
+                tools=(OUTCOME_TOOL,),
+                tool_choice="auto",
+            )
         return ModelRequest(
             messages=messages,
             max_tokens=self._model_output_tokens,

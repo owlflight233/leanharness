@@ -221,11 +221,51 @@ def test_worker_completion_keeps_outcome_tool_available(tmp_path: Path) -> None:
     assert events[-1].type == "run.completed"
     assert any(
         definition.name == "report_run_outcome"
-        for definition in model.worker_requests[-1].tools
+        for request in model.worker_requests
+        for definition in request.tools
     )
-    assert not any(
-        request.tool_choice == "none" for request in model.worker_requests
-    )
+    assert not any(request.tool_choice == "none" for request in model.worker_requests)
+
+
+def test_incomplete_worker_reports_budget_boundary_instead_of_invalid_json(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src.py").write_text("print('ok')", encoding="utf-8")
+
+    class ExhaustedWorkerModel:
+        def __init__(self) -> None:
+            self.parent_calls = 0
+
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            if "delegated repository analyst" not in request.messages[0].content:
+                self.parent_calls += 1
+                if self.parent_calls == 1:
+                    return ModelResponse(
+                        content="Delegating analysis.",
+                        tool_calls=(
+                            _delegate_call([_task("inspect entry", "src.py")]),
+                        ),
+                    )
+                return ModelResponse(content="Partial delegated evidence.")
+            return ModelResponse(
+                content="Reading assigned evidence.",
+                tool_calls=(
+                    ToolCall("read-entry", "workspace_read", {"path": "src.py"}),
+                ),
+            )
+
+    model = ExhaustedWorkerModel()
+    agent = CodingAgent(tmp_path, model, enable_delegation=True, max_steps=3)
+
+    async def run():
+        return [event async for event in agent.run("Inspect entry")]
+
+    events = asyncio.run(run())
+    subtask = next(event for event in events if event.type == "subtask.failed")
+
+    assert subtask.metadata and subtask.metadata["status"] in {"incomplete", "failed"}
+    assert subtask.metadata["error_code"] != "SUBTASK_RESULT_INVALID"
+    assert subtask.summary != "子任务未返回有效的结构化证据"
 
 
 def test_parent_receives_only_structured_delegated_evidence(tmp_path: Path) -> None:

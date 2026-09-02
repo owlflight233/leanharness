@@ -25,7 +25,9 @@ MAX_SUBTASK_CHARS = 2_000
 MAX_SCOPE_ITEMS = 16
 MAX_RESULT_ITEMS = 16
 MAX_RESULT_TEXT_CHARS = 1_000
-CHILD_MAX_STEPS = 8
+# Repository analysis workers need a few reads before they can produce their
+# fixed JSON report. This remains bounded and independent of the parent budget.
+CHILD_MAX_STEPS = 25
 _FORBIDDEN_PUBLIC_TEXT = re.compile(
     r"(?i)(?:<\s*(?:think|thinking)\b|chain[_ -]?of[_ -]?thought|authorization|api[_ -]?key)"
 )
