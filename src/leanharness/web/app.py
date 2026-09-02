@@ -594,18 +594,25 @@ def create_app(
             generated: GeneratedPlan | None = None
             last_sequence = -1
             terminal_seen = False
+            pending_terminal: RuntimeEvent | None = None
             try:
                 async for item in generator.generate(task):
                     if isinstance(item, GeneratedPlan):
                         generated = item
                         continue
                     last_sequence = item.sequence
-                    terminal_seen = item.type in {
+                    if item.type in {
                         "run.completed",
                         "run.incomplete",
                         "run.failed",
                         "run.cancelled",
-                    }
+                    }:
+                        # Hold the runtime terminal until the generator has
+                        # validated the plan.  Otherwise an invalid plan
+                        # produces both run.completed and plan.failed, which
+                        # makes the client display a contradictory outcome.
+                        pending_terminal = item
+                        continue
                     event_payload = item.to_dict()
                     store.append_event(
                         session.id, run.id, item.sequence, item.type, event_payload
@@ -614,23 +621,79 @@ def create_app(
                         event_payload, session_id=session.id, run_id=run.id
                     )
                 if generated is None:
+                    if (
+                        pending_terminal is not None
+                        and pending_terminal.type != "run.completed"
+                    ):
+                        terminal_payload = pending_terminal.to_dict()
+                        store.append_event(
+                            session.id,
+                            run.id,
+                            pending_terminal.sequence,
+                            pending_terminal.type,
+                            terminal_payload,
+                        )
+                        store.update_run(
+                            run.id,
+                            state=(
+                                "EXHAUSTED"
+                                if pending_terminal.type == "run.incomplete"
+                                else "CANCELLED"
+                                if pending_terminal.type == "run.cancelled"
+                                else "FAILED"
+                            ),
+                            answer=pending_terminal.answer,
+                            error_code=pending_terminal.error_code,
+                        )
+                        terminal_seen = True
+                        yield _encode_payload(
+                            terminal_payload,
+                            session_id=session.id,
+                            run_id=run.id,
+                        )
+                        return
+                    failure_sequence = last_sequence + 1
+                    failure_payload = {
+                        "type": "plan.failed",
+                        "sequence": failure_sequence,
+                        "run_id": run.id,
+                        "error": {
+                            "code": "PLAN_INVALID_FORMAT",
+                            "message": "The model did not return a valid plan",
+                        },
+                    }
                     store.update_run(
                         run.id, state="FAILED", error_code="PLAN_INVALID_FORMAT"
                     )
+                    store.append_event(
+                        session.id,
+                        run.id,
+                        failure_sequence,
+                        "plan.failed",
+                        failure_payload,
+                    )
+                    terminal_seen = True
                     yield _encode_payload(
-                        {
-                            "type": "plan.failed",
-                            "sequence": last_sequence + 1,
-                            "run_id": run.id,
-                            "error": {
-                                "code": "PLAN_INVALID_FORMAT",
-                                "message": "The model did not return a valid plan",
-                            },
-                        },
+                        failure_payload,
                         session_id=session.id,
                         run_id=run.id,
                     )
                     return
+                if pending_terminal is not None:
+                    terminal_payload = pending_terminal.to_dict()
+                    store.append_event(
+                        session.id,
+                        run.id,
+                        pending_terminal.sequence,
+                        pending_terminal.type,
+                        terminal_payload,
+                    )
+                    terminal_seen = True
+                    yield _encode_payload(
+                        terminal_payload,
+                        session_id=session.id,
+                        run_id=run.id,
+                    )
                 plan = store.create_plan(
                     session.id,
                     title=generated.title,
@@ -647,7 +710,10 @@ def create_app(
                     plan_id=plan.id,
                 )
                 store.update_run(run.id, state="COMPLETED", answer=generated.markdown)
-                created_sequence = last_sequence + 1
+                created_sequence = max(
+                    last_sequence,
+                    pending_terminal.sequence if pending_terminal is not None else -1,
+                ) + 1
                 store.append_event(
                     session.id,
                     run.id,

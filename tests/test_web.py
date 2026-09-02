@@ -772,9 +772,16 @@ def test_invalid_plan_format_emits_terminal_failure_and_closes_run(
     events = [json.loads(line) for line in response.text.splitlines()]
 
     assert response.status_code == 200
-    assert any(event["type"] == "run.completed" for event in events)
+    # A malformed plan must have one honest terminal outcome.  Publishing the
+    # runtime's provisional run.completed before plan validation made the UI
+    # show both success and plan.failed for the same request.
+    assert not any(event["type"] == "run.completed" for event in events)
     failed = next(event for event in events if event["type"] == "plan.failed")
     assert failed["error"]["code"] == "PLAN_INVALID_FORMAT"
+    assert not any(
+        event["type"] in {"run.incomplete", "run.failed", "run.cancelled"}
+        for event in events
+    )
     session_id = failed["session_id"]
     detail = get(app, f"/api/v1/sessions/{session_id}").json()
     assert detail["runs"][0]["state"] == "FAILED"
