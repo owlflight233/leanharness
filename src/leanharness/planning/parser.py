@@ -13,6 +13,7 @@ MAX_PLAN_STEPS = 32
 MAX_STEP_CHARS = 2_000
 _HEADING = re.compile(r"^#\s+(.+?)\s*$")
 _STEP = re.compile(r"^(\d{1,2})\.\s+(.+?)\s*$")
+_HTML_TAG = re.compile(r"</?[A-Za-z][^>]*>")
 
 
 def parse_plan_markdown(markdown: str) -> tuple[str, tuple[PlanStep, ...]]:
@@ -85,6 +86,9 @@ def _clean_text(value: str, label: str) -> str:
     cleaned = " ".join(value.split())
     if not cleaned:
         raise PlanFormatError(f"{label} must not be blank")
-    if "<" in cleaned or ">" in cleaned:
+    # Angle brackets are valid technical prose (for example ``>=3.12``).
+    # Reject actual HTML tags only; Markdown rendering sanitizes HTML at the
+    # UI boundary separately.
+    if _HTML_TAG.search(cleaned):
         raise PlanFormatError(f"{label} contains unsupported markup")
     return cleaned

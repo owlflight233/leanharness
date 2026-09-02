@@ -42,6 +42,16 @@ def test_parser_enforces_step_size_and_count() -> None:
         parse_plan_markdown("\n".join(f"{index}. step" for index in range(1, 34)))
 
 
+def test_parser_allows_technical_angle_brackets_but_rejects_html() -> None:
+    title, steps = parse_plan_markdown(
+        '# Demo\n1. **Runtime** - Require Python >=3.12 and keep list[T] types'
+    )
+    assert title == "Demo"
+    assert ">=3.12" in steps[0].instruction
+    with pytest.raises(PlanFormatError):
+        parse_plan_markdown("# Demo\n1. **Markup** - reject <script>alert(1)</script>")
+
+
 def test_plan_storage_crud_version_and_step_state(tmp_path: Path) -> None:
     store = LocalStore(tmp_path / "data")
     session = store.create_session(store.ensure_project(tmp_path))
