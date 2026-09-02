@@ -44,10 +44,13 @@ def test_parser_enforces_step_size_and_count() -> None:
 
 def test_parser_allows_technical_angle_brackets_but_rejects_html() -> None:
     title, steps = parse_plan_markdown(
-        '# Demo\n1. **Runtime** - Require Python >=3.12 and keep list[T] types'
+        "# Demo\n"
+        "1. **Runtime** - Require Python >=3.12 and keep list[T] types\n"
+        "2. **CLI** - Implement `add <title>` without treating the placeholder as HTML"
     )
     assert title == "Demo"
     assert ">=3.12" in steps[0].instruction
+    assert "`add <title>`" in steps[1].instruction
     with pytest.raises(PlanFormatError):
         parse_plan_markdown("# Demo\n1. **Markup** - reject <script>alert(1)</script>")
 
