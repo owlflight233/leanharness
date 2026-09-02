@@ -76,6 +76,7 @@ class RunRequest(BaseModel):
     session_id: str | None = None
     attachment_ids: list[str] = Field(default_factory=list, max_length=8)
     plugin_ids: list[str] = Field(default_factory=list, max_length=8)
+    delegation_enabled: bool = False
 
 
 class PlanCreateRequest(BaseModel):
@@ -443,6 +444,7 @@ def create_app(
             data_dir=app.state.config.data_dir,
             user_message=user_message,
             tool_registry_factory=selected_tool_registry,
+            enable_delegation=payload.delegation_enabled,
         )
         store.add_message(
             session.id,

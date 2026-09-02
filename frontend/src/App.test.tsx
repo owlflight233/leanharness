@@ -243,6 +243,32 @@ describe("application shell", () => {
     expect(screen.getByText("Agent · 本地保存")).toBeInTheDocument();
   });
 
+  it("enables parallel analysis from the add menu for this run", async () => {
+    const user = userEvent.setup();
+    const run = vi.fn<RunStreamer>(async (_task, onEvent) => {
+      onEvent({ type: "run.started", sequence: 0, run_id: "delegated-run" });
+      onEvent({ type: "run.completed", sequence: 1, run_id: "delegated-run", answer: "完成" });
+    });
+    render(
+      <App
+        healthLoader={successfulHealth}
+        modelStatusLoader={configuredModel}
+        runStreamer={run}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "添加模式、文件或插件" }));
+    const delegation = screen.getByRole("menuitemcheckbox", { name: /子任务协作/ });
+    expect(delegation).toHaveAttribute("aria-checked", "false");
+    await user.click(delegation);
+    expect(delegation).toHaveAttribute("aria-checked", "true");
+    await user.type(screen.getByLabelText("任务输入"), "分析项目");
+    await user.click(screen.getByRole("button", { name: "发送任务" }));
+
+    await waitFor(() => expect(run).toHaveBeenCalled());
+    expect(run.mock.calls[0]?.[7]).toBe(true);
+  });
+
   it("opens and closes the project drawer", async () => {
     const user = userEvent.setup();
     render(<App healthLoader={successfulHealth} modelStatusLoader={configuredModel} />);

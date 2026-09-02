@@ -17,6 +17,7 @@ import {
   TerminalSquare,
   Trash2,
   UserRound,
+  UsersRound,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -216,6 +217,7 @@ function App({
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [plugins, setPlugins] = useState<PluginSummary[]>([]);
   const [selectedPluginIds, setSelectedPluginIds] = useState<string[]>([]);
+  const [delegationEnabled, setDelegationEnabled] = useState(false);
   const [pluginError, setPluginError] = useState<string | null>(null);
   const nextMessageId = useRef(1);
   const nextAttachmentId = useRef(1);
@@ -514,6 +516,7 @@ function App({
           activeSessionId ?? undefined,
           attachmentIds,
           selectedPluginIds,
+          delegationEnabled,
       );
     } catch (error: unknown) {
       if (!requestStarted) setPendingAttachments(submittedAttachments);
@@ -1226,6 +1229,9 @@ function App({
                   </button>
                   <div className="composer-menu-divider" />
                   <div className="composer-menu-label">附件与扩展</div>
+                  <button type="button" role="menuitemcheckbox" aria-checked={delegationEnabled} className={delegationEnabled ? "selected" : ""} onClick={() => setDelegationEnabled((enabled) => !enabled)}>
+                    <UsersRound size={15} /><span>子任务协作</span><small>最多 5 个并行只读分析</small>
+                  </button>
                   <button type="button" role="menuitem" onClick={() => { setComposerMenuOpen(false); imageInput.current?.click(); }}><ImageIcon size={15} /><span>上传图片</span><small>PNG、JPEG、WebP</small></button>
                   <button type="button" role="menuitem" onClick={() => { setComposerMenuOpen(false); textInput.current?.click(); }}><FileCode2 size={15} /><span>上传文本或代码</span><small>UTF-8 文件</small></button>
                   {plugins.filter((plugin) => plugin.enabled).length === 0 ? (
@@ -1247,6 +1253,7 @@ function App({
               )}
             </div>
             {selectedPluginIds.length > 0 && <span className="plugin-selection" title={selectedPluginIds.join(", ")}><Blocks size={12} />{selectedPluginIds.length} 个插件</span>}
+            {delegationEnabled && <span className="plugin-selection" title="本次任务允许父 Agent 并行委派只读子任务"><UsersRound size={12} />子任务协作</span>}
             {pluginError && <span className="plugin-error" title={pluginError}>插件状态不可用</span>}
             <div className="composer-settings"><label htmlFor="permission-mode">权限</label><select id="permission-mode" value={permissionMode} onChange={(event) => void changePermission(event.target.value as PermissionMode)} disabled={isStreaming}><option value="inspect">只读检查</option><option value="approve">逐次批准</option><option value="unrestricted">受控直接执行</option></select></div><span className="composer-state">{isStreaming ? mode === "plan" ? "正在生成计划" : "Agent 正在执行" : modelStatus.status === "ready" && modelStatus.data.configured ? mode === "plan" ? "计划模式 · 本地保存" : "Agent · 本地保存" : `模型${modelCopy}`}</span>
             {isStreaming ? (

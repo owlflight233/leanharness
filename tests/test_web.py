@@ -474,6 +474,31 @@ def test_attachment_api_feeds_only_the_current_model_request(
     assert source_text.encode() not in (data_dir / "leanharness.sqlite3").read_bytes()
 
 
+def test_delegation_tool_is_opt_in_per_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LEANHARNESS_MODEL_BASE_URL", "https://models.example.test/v1")
+    monkeypatch.setenv("LEANHARNESS_MODEL_NAME", "example-model")
+    client = CapturingRuntimeClient()
+    app = create_app(
+        build_config(workspace=tmp_path, data_dir=tmp_path / "data"),
+        model_client_factory=lambda _config: client,
+    )
+
+    disabled = post(app, "/api/v1/runs", json_body={"task": "Inspect"})
+    assert disabled.status_code == 200
+    assert "delegate_analysis" not in {tool.name for tool in client.requests[0].tools}
+
+    enabled = post(
+        app,
+        "/api/v1/runs",
+        json_body={"task": "Inspect with helpers", "delegation_enabled": True},
+    )
+    assert enabled.status_code == 200
+    assert "delegate_analysis" in {tool.name for tool in client.requests[2].tools}
+
+
 def test_attachment_api_rejects_cross_session_use_before_creating_a_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -67,6 +67,7 @@ export type RunStreamer = (
   sessionId?: string,
   attachmentIds?: string[],
   pluginIds?: string[],
+  delegationEnabled?: boolean,
 ) => Promise<void>;
 
 export type ApprovalResolver = (
@@ -121,6 +122,7 @@ export async function streamRun(
   sessionId?: string,
   attachmentIds: string[] = [],
   pluginIds: string[] = [],
+  delegationEnabled = false,
 ): Promise<void> {
   const response = await fetch("/api/v1/runs", {
     method: "POST",
@@ -131,6 +133,7 @@ export async function streamRun(
       ...(sessionId ? { session_id: sessionId } : {}),
       ...(attachmentIds.length ? { attachment_ids: attachmentIds } : {}),
       ...(pluginIds.length ? { plugin_ids: pluginIds } : {}),
+      ...(delegationEnabled ? { delegation_enabled: true } : {}),
     }),
     signal,
   });
