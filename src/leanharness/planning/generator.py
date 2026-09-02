@@ -9,6 +9,7 @@ from typing import Protocol
 
 from leanharness.application.language import language_instruction
 from leanharness.context import ContextSource
+from leanharness.errors import PlanFormatError
 from leanharness.models import ModelMessage, ModelRequest, ModelResponse
 from leanharness.permissions import PermissionMode
 from leanharness.planning.contracts import PlanStep
@@ -103,7 +104,17 @@ class PlanGenerator:
     async def generate(self, task: str) -> AsyncIterator[RuntimeEvent | GeneratedPlan]:
         planning_task = plan_generation_task(task)
         async for event in self.agent.run(planning_task):
-            if event.type == "run.completed" and event.answer:
-                title, steps = parse_plan_markdown(event.answer)
-                yield GeneratedPlan(title=title, markdown=event.answer, steps=steps)
+            # Forward the runtime terminal event before parsing its answer.
+            # A malformed plan is a normal protocol outcome handled by the
+            # API boundary; it must not strand the run in CREATED by escaping
+            # before the event is observed.
             yield event
+            if event.type == "run.completed" and event.answer:
+                try:
+                    title, steps = parse_plan_markdown(event.answer)
+                except PlanFormatError:
+                    # The API stream owns the terminal error contract.  Keep
+                    # the runtime event visible, then let the caller emit
+                    # PLAN_INVALID_FORMAT and close the persisted run.
+                    continue
+                yield GeneratedPlan(title=title, markdown=event.answer, steps=steps)

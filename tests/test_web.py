@@ -76,6 +76,20 @@ class FakeModelClient:
         return ModelResponse(content="ready")
 
 
+class InvalidPlanModelClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete(self, request):
+        self.calls += 1
+        if self.calls == 1:
+            return ModelResponse(
+                content="Inspecting the workspace.",
+                tool_calls=(ToolCall("list", "workspace_list", {"path": "."}),),
+            )
+        return ModelResponse(content="Here is a plan in prose, without the required list.")
+
+
 class PlanModelClient:
     def __init__(self) -> None:
         self.calls = 0
@@ -738,6 +752,33 @@ def test_plan_stream_emits_research_events_and_persists_plan_message(
     created_audit = next(event for event in audit_events if event["type"] == "plan.created")
     assert created_audit["step_count"] == 1
     assert "source_markdown" not in json.dumps(created_audit, ensure_ascii=False)
+
+
+def test_invalid_plan_format_emits_terminal_failure_and_closes_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LEANHARNESS_MODEL_BASE_URL", "https://models.example.test/v1")
+    monkeypatch.setenv("LEANHARNESS_MODEL_NAME", "example-model")
+    app = create_app(
+        build_config(workspace=tmp_path, data_dir=tmp_path / "data"),
+        model_client_factory=lambda _config: InvalidPlanModelClient(),
+    )
+
+    response = post(
+        app,
+        "/api/v1/plans/stream",
+        json_body={"task": "Create a project plan"},
+    )
+    events = [json.loads(line) for line in response.text.splitlines()]
+
+    assert response.status_code == 200
+    assert any(event["type"] == "run.completed" for event in events)
+    failed = next(event for event in events if event["type"] == "plan.failed")
+    assert failed["error"]["code"] == "PLAN_INVALID_FORMAT"
+    session_id = failed["session_id"]
+    detail = get(app, f"/api/v1/sessions/{session_id}").json()
+    assert detail["runs"][0]["state"] == "FAILED"
+    assert detail["runs"][0]["error_code"] == "PLAN_INVALID_FORMAT"
 
 
 def test_plan_resume_explicitly_uses_current_session_permission(
