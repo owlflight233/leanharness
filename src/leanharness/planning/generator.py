@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from leanharness.application.language import language_instruction
 from leanharness.context import ContextSource
 from leanharness.errors import PlanFormatError
 from leanharness.models import ModelMessage, ModelRequest, ModelResponse
@@ -15,8 +14,10 @@ from leanharness.permissions import PermissionMode
 from leanharness.planning.contracts import PlanStep
 from leanharness.planning.parser import parse_plan_markdown
 from leanharness.runtime import CodingAgent, RuntimeEvent
+from leanharness.runtime.prompting import language_instruction
 
 PLAN_GENERATION_MAX_STEPS = 8
+PLAN_FORMAT_REPAIR_MAX_TOKENS = 4_096
 
 
 def plan_generation_task(task: str) -> str:
@@ -24,6 +25,22 @@ def plan_generation_task(task: str) -> str:
         "Inspect the repository and any supplied attachments as needed, then produce an "
         "implementation plan for this request. Do not modify files or run commands. "
         f"Request: {task}"
+    )
+
+
+def plan_system_prompt(language: str) -> str:
+    """System contract for planning, separate from the coding-loop contract."""
+
+    return (
+        "You are LeanHarness Plan Mode. Investigate the supplied repository and attachments "
+        "with read-only tools when evidence is needed. Do not edit files, run commands, use "
+        "plugins, delegate work, or call a completion tool. The only task-level decision is "
+        "to produce a practical implementation plan for the user's request. When the plan "
+        "is ready, respond directly with only an optional '# Title' line followed by a "
+        "consecutive ordered list. Each step must be 'N. **Short title** - concrete "
+        "instruction'. Do not include a preamble, epilogue, code fence, table, unordered "
+        "list, or hidden reasoning. "
+        + language_instruction(language)
     )
 
 
@@ -87,6 +104,9 @@ class PlanGenerator:
         context_sanitizer: Callable[[str], str] | None = None,
         user_message: ModelMessage | None = None,
     ) -> None:
+        self._model_client = model_client
+        self._language = language
+        self._task = ""
         self.agent = CodingAgent(
             workspace,
             PlanningModelClient(model_client, language),
@@ -99,9 +119,11 @@ class PlanGenerator:
             context_sanitizer=context_sanitizer,
             include_outcome_tool=False,
             user_message=user_message,
+            system_message=plan_system_prompt(language),
         )
 
     async def generate(self, task: str) -> AsyncIterator[RuntimeEvent | GeneratedPlan]:
+        self._task = task
         planning_task = plan_generation_task(task)
         async for event in self.agent.run(planning_task):
             # Forward the runtime terminal event before parsing its answer.
@@ -113,8 +135,47 @@ class PlanGenerator:
                 try:
                     title, steps = parse_plan_markdown(event.answer)
                 except PlanFormatError:
-                    # The API stream owns the terminal error contract.  Keep
-                    # the runtime event visible, then let the caller emit
-                    # PLAN_INVALID_FORMAT and close the persisted run.
+                    repaired = await self._repair_format(event.answer)
+                    if repaired is not None:
+                        yield repaired
                     continue
                 yield GeneratedPlan(title=title, markdown=event.answer, steps=steps)
+
+    async def _repair_format(self, candidate: str) -> GeneratedPlan | None:
+        """Ask the model once to normalize formatting without changing scope."""
+
+        request = ModelRequest(
+            messages=(
+                ModelMessage(
+                    role="system",
+                    content=(
+                        "Normalize a proposed implementation plan into the required limited "
+                        "Markdown protocol. Preserve the original task and step meaning. "
+                        "Return only an optional '# Title' followed by a consecutive ordered "
+                        "list. Each line must be 'N. **Short title** - concrete instruction'. "
+                        "Do not add, remove, or reorder work. Do not use tools, code fences, "
+                        "tables, bullets, preamble, or epilogue. "
+                        + language_instruction(self._language)
+                    ),
+                ),
+                ModelMessage(
+                    role="user",
+                    content=(
+                        f"Original request:\n{self._task}\n\n"
+                        "Candidate plan to normalize:\n"
+                        f"{candidate[:32 * 1024]}"
+                    ),
+                ),
+            ),
+            max_tokens=PLAN_FORMAT_REPAIR_MAX_TOKENS,
+            tools=(),
+            tool_choice="none",
+        )
+        try:
+            response = await self._model_client.complete(request)
+            if response.tool_calls or not response.content:
+                return None
+            title, steps = parse_plan_markdown(response.content)
+        except (PlanFormatError, ValueError, TypeError):
+            return None
+        return GeneratedPlan(title=title, markdown=response.content, steps=steps)

@@ -56,4 +56,43 @@ def test_plan_generation_inspects_then_parses_markdown(tmp_path: Path) -> None:
         for request in model.requests
         for tool in request.tools
     )
+    assert "You are LeanHarness Plan Mode" in model.requests[0].messages[0].content
+    assert "call report_run_outcome" not in model.requests[0].messages[0].content
     assert "Return only a plan" in model.requests[-1].messages[-1].content
+
+
+def test_plan_generation_repairs_one_format_only_response(tmp_path: Path) -> None:
+    class RepairModel:
+        def __init__(self) -> None:
+            self.requests: list[ModelRequest] = []
+
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return ModelResponse(
+                    content="I inspected the repository.",
+                    tool_calls=(
+                        ToolCall(
+                            id="list-1",
+                            name="workspace_list",
+                            arguments={"path": "."},
+                        ),
+                    ),
+                )
+            if len(self.requests) == 2:
+                return ModelResponse(content="Here is the plan:\n- inspect files\n- add tests")
+            return ModelResponse(
+                content="# Demo\n1. **Inspect** - Read the repository\n2. **Test** - Run pytest"
+            )
+
+    model = RepairModel()
+
+    async def collect():
+        generator = PlanGenerator(tmp_path, model, language="en")
+        return [item async for item in generator.generate("Improve the project")]
+
+    items = asyncio.run(collect())
+    generated = next(item for item in items if isinstance(item, GeneratedPlan))
+    assert [step.title for step in generated.steps] == ["Inspect", "Test"]
+    assert model.requests[-1].tools == ()
+    assert model.requests[-1].tool_choice == "none"
