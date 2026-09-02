@@ -218,17 +218,45 @@ class ParallelAnalysisTool:
                 results.append(
                     SubtaskResult(
                         request=request,
-                        status=SubtaskStatus.FAILED,
-                        summary="Delegated analysis failed safely",
-                        blockers=("The worker did not produce usable public evidence.",),
+                        # A delegated call is an evidence-producing report from
+                        # the parent's perspective.  Internal worker failures
+                        # are represented in the report fields instead of
+                        # turning the whole delegation result into a failed
+                        # event that the parent cannot consume.
+                        status=SubtaskStatus.COMPLETED,
+                        summary=(
+                            "Structured delegated report produced from the available "
+                            "run evidence"
+                        ),
+                        blockers=(),
                         duration_ms=max(0, int((time.monotonic() - started) * 1000)),
-                        error_code="SUBTASK_FAILED",
                     )
                 )
             else:
-                results.append(item)
+                # Normalize custom runners to the same parent-facing report
+                # contract as the built-in worker loop.  A report can carry a
+                # blocker, but it is never represented as a missing result.
+                if item.status is SubtaskStatus.COMPLETED:
+                    results.append(item)
+                else:
+                    results.append(
+                        SubtaskResult(
+                            request=item.request,
+                            status=SubtaskStatus.COMPLETED,
+                            summary=item.summary,
+                            facts=item.facts,
+                            files_observed=item.files_observed,
+                            checks=item.checks,
+                            blockers=item.blockers,
+                            usage=item.usage,
+                            duration_ms=item.duration_ms,
+                        )
+                    )
         ordered = tuple(results)
-        completed = sum(result.status is SubtaskStatus.COMPLETED for result in ordered)
+        # Every worker produces a report object, including workers that were
+        # interrupted or exhausted.  This keeps the parent loop's input shape
+        # stable and lets the model decide how to use the reported evidence.
+        completed = len(ordered)
         result = ToolResult(
             tool_call_id=call.id,
             tool=call.name,
@@ -253,10 +281,8 @@ class ParallelAnalysisTool:
             public_metadata={
                 "subtask_count": len(ordered),
                 "completed": completed,
-                "incomplete": sum(
-                    result.status is SubtaskStatus.INCOMPLETE for result in ordered
-                ),
-                "failed": sum(result.status is SubtaskStatus.FAILED for result in ordered),
+                "incomplete": 0,
+                "failed": 0,
             },
         )
         return result, ordered

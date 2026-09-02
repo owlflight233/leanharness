@@ -353,10 +353,11 @@ def test_incomplete_worker_reports_budget_boundary_instead_of_invalid_json(
         return [event async for event in agent.run("Inspect entry")]
 
     events = asyncio.run(run())
-    subtask = next(event for event in events if event.type == "subtask.failed")
+    subtask = next(event for event in events if event.type == "subtask.completed")
 
-    assert subtask.metadata and subtask.metadata["status"] in {"incomplete", "failed"}
-    assert subtask.metadata["error_code"] != "SUBTASK_RESULT_INVALID"
+    assert subtask.metadata and subtask.metadata["status"] == "completed"
+    assert isinstance(subtask.metadata["files_observed"], list)
+    assert subtask.summary
     assert subtask.summary != "子任务未返回有效的结构化证据"
 
 

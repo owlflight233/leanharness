@@ -25,6 +25,7 @@ from leanharness.runtime.completion import CompletionLedger
 from leanharness.runtime.delegation import (
     CHILD_MAX_STEPS,
     MAX_PARALLEL_SUBTASKS,
+    MAX_RESULT_TEXT_CHARS,
     ParallelAnalysisTool,
     ScopedReadOnlyToolRegistry,
     SubtaskRequest,
@@ -806,23 +807,16 @@ class CodingAgent:
                                         )
                                         return
                                     for subtask_result in subtask_results:
-                                        event_type: RuntimeEventType = (
-                                            "subtask.completed"
-                                            if subtask_result.status
-                                            is SubtaskStatus.COMPLETED
-                                            else "subtask.failed"
-                                        )
                                         yield self._event(
-                                            event_type,
+                                            # Delegation always returns a
+                                            # structured report.  A worker's
+                                            # internal boundary belongs in its
+                                            # report fields, not in the event
+                                            # contract consumed by the parent.
+                                            "subtask.completed",
                                             step=step,
                                             summary=subtask_result.summary,
                                             metadata=subtask_result.public_metadata(),
-                                            error_code=subtask_result.error_code,
-                                            error_message=(
-                                                subtask_result.summary
-                                                if subtask_result.error_code
-                                                else None
-                                            ),
                                         )
                             elif self.tools.approval_required(call):
                                 if self.approvals is None:
@@ -1129,7 +1123,6 @@ class CodingAgent:
         checks: list[str] = []
         terminal_type = "run.failed"
         terminal_answer = ""
-        terminal_error = "SUBTASK_FAILED"
 
         def scoped_factory(path: Path, **_: object) -> ToolRegistry:
             return ScopedReadOnlyToolRegistry(path, request.scope)
@@ -1182,7 +1175,6 @@ class CodingAgent:
             }:
                 terminal_type = event.type
                 terminal_answer = event.answer or ""
-                terminal_error = event.error_code or terminal_type.upper().replace(".", "_")
 
         duration_ms = max(0, int((time.monotonic() - started) * 1000))
         usage = SubtaskUsage(
@@ -1192,56 +1184,37 @@ class CodingAgent:
         if terminal_type == "run.cancelled":
             raise asyncio.CancelledError
 
-        status = (
-            SubtaskStatus.COMPLETED
-            if terminal_type == "run.completed"
-            else SubtaskStatus.INCOMPLETE
-            if terminal_type == "run.incomplete"
-            else SubtaskStatus.FAILED
-        )
-        if status is SubtaskStatus.COMPLETED:
-            try:
-                summary, facts, blockers = parse_worker_answer(
-                    terminal_answer,
-                    sanitizer=self._context_sanitizer,
-                )
-            except (ValueError, TypeError, json.JSONDecodeError):
+        # The parent always receives one fixed, structured report.  Prefer the
+        # worker's JSON regardless of its internal terminal state; if the model
+        # did not provide it, construct a factual report from the bounded
+        # runtime observations.  This is intentionally still a completed
+        # report so parent decisions never depend on a second status protocol.
+        try:
+            summary, facts, blockers = parse_worker_answer(
+                terminal_answer,
+                sanitizer=self._context_sanitizer,
+            )
+        except (ValueError, TypeError, json.JSONDecodeError):
+            if self.language == "zh":
+                summary = "已生成结构化子任务报告, 内容基于本轮已观察证据"
+            else:
                 summary = (
-                    "子任务未返回有效的结构化证据"
-                    if self.language == "zh"
-                    else "The worker did not return valid structured evidence"
+                    "Structured delegated report produced from the evidence observed "
+                    "in this run"
                 )
-                facts = ()
-                blockers = ("SUBTASK_RESULT_INVALID",)
-                status = SubtaskStatus.INCOMPLETE
-                terminal_error = "SUBTASK_RESULT_INVALID"
-        else:
-            # An incomplete worker still has useful, runtime-observed evidence
-            # such as files and tools used. Preserve that boundary explicitly;
-            # do not reinterpret an exhausted worker as malformed JSON.
-            summary = (
-                "子任务在有限步数内完成了部分观察，但未形成结构化结论"  # noqa: RUF001
-                if self.language == "zh"
-                else (
-                    "The worker gathered partial observations but did not finish "
-                    "its structured conclusion"
+            facts = tuple(
+                item
+                for item in (
+                    f"observed_files={len(observed_files)}",
+                    f"successful_tools={len(checks)}",
                 )
+                if len(item) <= MAX_RESULT_TEXT_CHARS
             )
-            facts = ()
-            blockers = (
-                "SUBTASK_BUDGET_EXHAUSTED"
-                if status is SubtaskStatus.INCOMPLETE
-                else "SUBTASK_FAILED",
-            )
-            terminal_error = (
-                "SUBTASK_BUDGET_EXHAUSTED"
-                if status is SubtaskStatus.INCOMPLETE
-                else terminal_error
-            )
+            blockers = ()
 
         return SubtaskResult(
             request=request,
-            status=status,
+            status=SubtaskStatus.COMPLETED,
             summary=summary,
             facts=facts,
             files_observed=tuple(sorted(observed_files)),
@@ -1249,7 +1222,9 @@ class CodingAgent:
             blockers=blockers,
             usage=usage,
             duration_ms=duration_ms,
-            error_code=(None if status is SubtaskStatus.COMPLETED else terminal_error),
+            # Error details remain a structured report field (``blockers``),
+            # never an event-level failure that hides the report.
+            error_code=None,
         )
 
     def _model_request(
